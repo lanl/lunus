@@ -1,0 +1,28 @@
+import os
+import libtbx.load_env
+
+Import('env_etc')
+
+env_etc.lunus_dist = libtbx.env.dist_path('lunus')
+env_etc.lunus_include = os.path.dirname(env_etc.lunus_dist)
+if not env_etc.no_boost_python:
+  # Build a Python extension.
+  Import("env_no_includes_boost_python_ext")
+  env = env_no_includes_boost_python_ext.Clone()
+  env_etc.enable_more_warnings(env=env)
+
+  # Register the include files you depend on.  These are just
+  # examples.
+  env_etc.include_registry.append(
+    env=env,
+    paths=[
+      env_etc.boost_include,
+      env_etc.python_include])
+
+  # Record the libraries needed for linking.
+  env.Append(LIBS=['cctbx'] + env_etc.libm)
+
+  # Build the extension as a shared library.
+  env.SharedLibrary(
+    source=['lunus.cpp'],
+    target='#lib/lunus')
