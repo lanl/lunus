@@ -88,8 +88,10 @@ namespace lunus {
       lnormim(imdiff);
     }
 
-    inline void LunusModeim(std::size_t w) {
-      imdiff->mode_width = w;
+    inline void LunusModeim(std::size_t mask, std::size_t bin) {
+      imdiff->mode_width = mask - 1;
+      imdiff->mode_height = mask - 1;
+      imdiff->mode_binsize = bin;
       lmodeim(imdiff);
     }
 
@@ -235,9 +237,9 @@ namespace lunus {
     inline void set_lattice(scitbx::af::flex_int data) {
       int* begin=data.begin();
       std::size_t size=data.size();
-      std::size_t xvox=data.accessor().focus()[0];
+      std::size_t zvox=data.accessor().focus()[0];
       std::size_t yvox=data.accessor().focus()[1];
-      std::size_t zvox=data.accessor().focus()[2];
+      std::size_t xvox=data.accessor().focus()[2];
       lat->lattice_length = size;
       lat->xvoxels = xvox;
       lat->yvoxels = yvox;
@@ -259,7 +261,7 @@ namespace lunus {
       std::size_t xvox = lat->xvoxels;
       std::size_t yvox = lat->yvoxels;
       std::size_t zvox = lat->zvoxels;
-      scitbx::af::flex_int data(scitbx::af::flex_grid<>(xvox,yvox,zvox));
+      scitbx::af::flex_int data(scitbx::af::flex_grid<>(zvox,yvox,xvox));
       int* begin=data.begin();
       std::size_t ct=0;
       for (int i = 0;i<lat->lattice_length;i++) {
