@@ -37,15 +37,17 @@ int lpolarim(DIFFIMAGE *imdiff)
 
   two_rho_offset = 2.*PI/180.*imdiff->polarization_offset;
   for(r=0; r < imdiff->vpixels; r++) {
-    rvec.y = (float)(r - imdiff->origin.r);
+    // rvec.y = (float)(r - imdiff->origin.r);
+    rvec.y = (float)(r*imdiff->pixel_size_mm-imdiff->beam_mm.y);
     for(c=0; c < imdiff->hpixels; c++) {
       if ((imdiff->image[index] != imdiff->overload_tag) &&
 	  (imdiff->image[index] != imdiff->ignore_tag)) {
-	rvec.x = (float)(c - imdiff->origin.c);
+	// rvec.x = (float)(c - imdiff->origin.c);
+  rvec.x = (float)(c*imdiff->pixel_size_mm-imdiff->beam_mm.x);
 	radius_squared = ((rvec.x*rvec.x) + (rvec.y*rvec.y));
 	radius = sqrtf(radius_squared);
-	distance_pixels= imdiff->distance_mm / imdiff->pixel_size_mm;
-	arctan_argument = radius / distance_pixels;
+	// distance_pixels= imdiff->distance_mm / imdiff->pixel_size_mm;
+	arctan_argument = radius / imdiff->distance_mm;
 	if (arctan_argument > POLARIZATION_CORRECTION_THRESHOLD) {
 	  two_theta = atanf(arctan_argument);
 	  cos_two_theta = cosf(two_theta);

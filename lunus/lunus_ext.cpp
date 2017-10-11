@@ -66,14 +66,15 @@ namespace lunus {
       lthrshim(imdiff);
     }
 
-    inline void LunusPolarim(float bxp, float byp, float dist, float polar, float offset, float px) {
+    inline void LunusPolarim(float bx, float by, float dist, float polar, float offset, float px) {
       printf("LunusPolarim\n");
-      imdiff->origin.c = bxp;
-      imdiff->origin.r = byp;
+      imdiff->beam_mm.x = bx;
+      imdiff->beam_mm.y = by;
       imdiff->distance_mm = dist;
       imdiff->polarization = polar;
       imdiff->polarization_offset = offset;
       imdiff->pixel_size_mm = px;
+      imdiff->value_offset = DEFAULT_VALUE_OFFSET;
       lpolarim(imdiff);
     }
 
@@ -85,6 +86,7 @@ namespace lunus {
       imdiff->cassette.x = cx;
       imdiff->cassette.y = cy;
       imdiff->pixel_size_mm = px;
+      imdiff->value_offset = DEFAULT_VALUE_OFFSET;
       lnormim(imdiff);
     }
 
@@ -120,10 +122,11 @@ namespace lunus {
       imdiff->beam_mm.x = bx;
       imdiff->beam_mm.y = by;
       imdiff->pixel_size_mm = px;
+      imdiff->value_offset = DEFAULT_VALUE_OFFSET;
       lavgrim(imdiff);
       std::size_t rs = imdiff->rfile_length;
-      scitbx::af::flex_double data(rs);
-      double* begin=data.begin();
+      scitbx::af::flex_double data_r(rs);
+      double* begin=data_r.begin();
       std::size_t ct=0;
       imdiff->rfile = (RFILE_DATA_TYPE *)realloc(imdiff->rfile,imdiff->rfile_length*sizeof(RFILE_DATA_TYPE));
       for (int i = 0;i<imdiff->rfile_length;i++) {
@@ -135,7 +138,7 @@ namespace lunus {
   }
       }
       printf("Calculated radial average for %ld bins, with %ld empty bins.\n",rs,ct);
-      return data;
+      return data_r;
     }
 
     inline scitbx::af::flex_int get_image() {
@@ -254,7 +257,7 @@ namespace lunus {
     lat->lattice[i] = (LATTICE_DATA_TYPE)begin[i];
   }
       }
-      printf("Converted lattice of size (%ld,%ld,%ld) with %ld negative pixel values.\n",xvox,yvox,zvox,ct);
+      printf("Converted lattice of size (%ld,%ld,%ld) with %ld negative voxel values.\n",xvox,yvox,zvox,ct);
     }
 
     inline scitbx::af::flex_int get_lattice() {
@@ -272,7 +275,7 @@ namespace lunus {
     begin[i] = lat->lattice[i];
   }
       }
-      printf("Converted lattice of size (%ld,%ld,%ld) with %ld negative pixel values.\n",xvox,yvox,zvox,ct);
+      printf("Converted lattice of size (%ld,%ld,%ld) with %ld negative voxel values.\n",xvox,yvox,zvox,ct);
       return data;
     }
 
