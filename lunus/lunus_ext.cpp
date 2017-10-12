@@ -237,16 +237,23 @@ namespace lunus {
       lanisolt(lat);
     }
 
-    inline void set_lattice(scitbx::af::flex_int data) {
+    inline void set_lattice(scitbx::af::flex_int data, float xsc, float ysc, float zsc) {
       int* begin=data.begin();
       std::size_t size=data.size();
-      std::size_t zvox=data.accessor().focus()[0];
-      std::size_t yvox=data.accessor().focus()[1];
-      std::size_t xvox=data.accessor().focus()[2];
+      std::uint32_t zvox=data.accessor().focus()[0];
+      std::uint32_t yvox=data.accessor().focus()[1];
+      std::uint32_t xvox=data.accessor().focus()[2];
       lat->lattice_length = size;
       lat->xvoxels = xvox;
       lat->yvoxels = yvox;
       lat->zvoxels = zvox;
+      lat->xscale = xsc;
+      lat->yscale = ysc;
+      lat->zscale = zsc;
+      lat->origin.i = (IJKCOORDS_DATA)(-1*((xvox/2)-1)*xsc);
+      lat->origin.j = (IJKCOORDS_DATA)(-1*((yvox/2)-1)*ysc);
+      lat->origin.k = (IJKCOORDS_DATA)(-1*((zvox/2)-1)*zsc);
+      lat->xyvoxels = lat->xvoxels * lat->yvoxels;
       lat->lattice = (LATTICE_DATA_TYPE *)realloc(lat->lattice,lat->lattice_length*sizeof(LATTICE_DATA_TYPE));
       std::size_t ct=0;
       for (int i = 0;i<lat->lattice_length;i++) {
@@ -257,7 +264,7 @@ namespace lunus {
     lat->lattice[i] = (LATTICE_DATA_TYPE)begin[i];
   }
       }
-      printf("Converted lattice of size (%ld,%ld,%ld) with %ld negative voxel values.\n",xvox,yvox,zvox,ct);
+      printf("Converted lattice of size (%i,%i,%i) with %ld negative voxel values.\n",xvox,yvox,zvox,ct);
     }
 
     inline scitbx::af::flex_int get_lattice() {
