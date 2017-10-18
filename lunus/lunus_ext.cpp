@@ -108,12 +108,12 @@ namespace lunus {
       imdiff->image = (IMAGE_DATA_TYPE *)realloc(imdiff->image,imdiff->image_length*sizeof(IMAGE_DATA_TYPE));
       std::size_t ct=0;
       for (int i = 0;i<imdiff->image_length;i++) {
-	if (begin[i]<0) {
-	  imdiff->image[i] = imdiff->ignore_tag;
-	  ct++;
-	} else {
-	  imdiff->image[i] = (IMAGE_DATA_TYPE)begin[i];
-	}
+  if (begin[i]<0) {
+    imdiff->image[i] = imdiff->ignore_tag;
+    ct++;
+  } else {
+    imdiff->image[i] = (IMAGE_DATA_TYPE)begin[i];
+  }
       }
       printf("Converted image size %ld,%ld with %ld negative pixel values.\n",fast,slow,ct);
     }
@@ -148,12 +148,12 @@ namespace lunus {
       int* begin=data.begin();
       std::size_t ct=0;
       for (int i = 0;i<imdiff->image_length;i++) {
-	if (imdiff->image[i] == imdiff->ignore_tag) {
-	  begin[i] = -1;
-	  ct++;
-	} else {
-	  begin[i] = imdiff->image[i];
-	}
+  if (imdiff->image[i] == imdiff->ignore_tag) {
+    begin[i] = -1;
+    ct++;
+  } else {
+    begin[i] = imdiff->image[i];
+  }
       }
       printf("Converted image size %ld,%ld with %ld negative pixel values.\n",fast,slow,ct);
       return data;
@@ -240,9 +240,9 @@ namespace lunus {
     inline void set_lattice(scitbx::af::flex_int data, float xsc, float ysc, float zsc) {
       int* begin=data.begin();
       std::size_t size=data.size();
-      std::uint32_t zvox=data.accessor().focus()[0];
-      std::uint32_t yvox=data.accessor().focus()[1];
-      std::uint32_t xvox=data.accessor().focus()[2];
+      std::size_t zvox=data.accessor().focus()[0];
+      std::size_t yvox=data.accessor().focus()[1];
+      std::size_t xvox=data.accessor().focus()[2];
       lat->lattice_length = size;
       lat->xvoxels = xvox;
       lat->yvoxels = yvox;
