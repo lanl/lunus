@@ -43,10 +43,19 @@ class Processor(SP_Processor):
   ct = None
   mean_lattice = None
   ref_img = None
+  ref_experiments = None
+  ref_indexed = None
 
 #  ref_img = DiffuseImage("placeholder.file")
 
   def process_datablock(self, tag, datablock):
+
+    if (self.params.mp.method == 'mpi'):
+      from mpi4py import MPI
+      comm = MPI.COMM_WORLD
+      rank = comm.Get_rank() # each process in MPI has a unique id, 0-indexed
+    else:
+      rank = 0
 
     if not self.params.output.composite_output:
       self.setup_filenames(tag)
@@ -70,6 +79,25 @@ class Processor(SP_Processor):
       print "Couldn't index", tag, str(e)
       if not self.params.dispatch.squash_errors: raise
       return
+
+# Create reference "experiments" and "idexed"
+    if self.ncalls == 0: 
+      if rank == 0:
+        self.ref_experiments = deepcopy(experiments)
+        self.ref_indexed = deepcopy(indexed)
+#        print "ref_data is",self.ref_data
+#      else:
+#        self.ref_data = None
+      if (self.params.mp.method == 'mpi'):
+#      from mpi4py import MPI
+#      comm = MPI.COMM_WORLD
+#        print "Barrier, rank = ",rank
+#        print "Broadcast, rank = ",rank
+        self.ref_experiments = comm.bcast(self.ref_experiments,root=0)
+        self.ref_indexed = comm.bcast(self.ref_indexed,root=0)
+        comm.barrier()
+#        print "Broadcast done, rank = ",rank
+
     try:
       experiments, indexed = self.refine(experiments, indexed)
     except Exception as e:
@@ -93,12 +121,6 @@ class Processor(SP_Processor):
         self.experiments = experiments
     DiffuseExperiment.from_experiments = from_experiments
 
-    if (self.params.mp.method == 'mpi'):
-      from mpi4py import MPI
-      comm = MPI.COMM_WORLD
-      rank = comm.Get_rank() # each process in MPI has a unique id, 0-indexed
-    else:
-      rank = 0
     test_exp = DiffuseExperiment()
     test_exp.from_experiments(experiments)
 
