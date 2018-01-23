@@ -132,6 +132,7 @@ class Processor(SP_Processor):
 #        print "Barrier, rank = ",rank
 #        print "Broadcast, rank = ",rank
         self.ref_data = comm.bcast(self.ref_data,root=0)
+        self.ref_img = comm.bcast(self.ref_img,root=0)
         comm.barrier()
 #        print "Broadcast done, rank = ",rank
 
