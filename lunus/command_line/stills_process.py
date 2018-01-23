@@ -10,9 +10,11 @@ from dials.command_line import stills_process
 from libtbx.phil import parse
 from diffuse_scattering.sematura import DiffuseExperiment, DiffuseImage
 from copy import deepcopy
+import numpy as np
+
 sematura_phil_str = '''
   lunus {
-    d_min = 2.5
+    d_min = 1.4
       .type = float
       .help = Limiting resolution of diffuse intensity map.
   }
@@ -37,6 +39,11 @@ class Processor(SP_Processor):
 
   ncalls = 0;
   ref_data = None
+  lt = None
+  ct = None
+  mean_lattice = None
+  ref_img = None
+
 #  ref_img = DiffuseImage("placeholder.file")
 
   def process_datablock(self, tag, datablock):
@@ -102,9 +109,20 @@ class Processor(SP_Processor):
     test_img = DiffuseImage(img_file)
     test_img.set_general_variables()
     test_img.remove_bragg_peaks(radial=True)
+    test_img.crystal_geometry(test_exp.crystal)
+    phil_cell=self.params.indexing.known_symmetry.unit_cell.parameters()
+# Set the unit cell to the .phil input, to make all the lattices identical
+    test_img.cella = phil_cell[0]
+    test_img.cellb = phil_cell[1]
+    test_img.cellc = phil_cell[2]
+    test_img.alpha = phil_cell[3]
+    test_img.beta = phil_cell[4]
+    test_img.gamma = phil_cell[5]
+    test_img.setup_diffuse_lattice(self.params.lunus.d_min)
     if self.ncalls == 0: 
       if rank == 0:
         self.ref_data = deepcopy(test_img.lunus_data_scitbx)
+        self.ref_img = deepcopy(test_img)
 #        print "ref_data is",self.ref_data
 #      else:
 #        self.ref_data = None
@@ -121,12 +139,110 @@ class Processor(SP_Processor):
       print "ref_data = None for Rank = ",rank
     test_img.scale_factor_from_images(self.ref_data)
 #    test_img.scale_factor()
-    test_img.crystal_geometry(test_exp.crystal)
-
-    test_img.setup_diffuse_lattice(self.params.lunus.d_min)
+    if (self.ncalls == 0):
+      self.lt = np.zeros(test_img.latsize, dtype=np.float32)
+      self.ct = np.zeros(test_img.latsize, dtype=np.float32)
     test_img.integrate_diffuse()
+    self.lt = np.add(self.lt,test_img.lt)
+    self.ct = np.add(self.ct,test_img.ct)
     self.ncalls = self.ncalls + 1
 #    print "RANK, NCALLS = ",rank, self.ncalls
+
+  def array_to_vtk(self):
+
+        from os import getcwd
+        mean_lattice_vtkname = (getcwd()+"/arrays/"+self.ref_img.id+"_mean.vtk")
+        vtkfile = open(mean_lattice_vtkname,"w")
+
+        array_values = self.mean_lattice.flatten()
+
+        a_recip = 1./self.ref_img.cella
+        b_recip = 1./self.ref_img.cellb
+        c_recip = 1./self.ref_img.cellc
+
+        print >>vtkfile,"# vtk DataFile Version 2.0"
+        print >>vtkfile,"lattice_type=PR;unit_cell={0},{1},{2},{3},{4},{5};space_group={6};".format(self.ref_img.cella,self.ref_img.cellb,self.ref_img.cellc,self.ref_img.alpha,self.ref_img.beta,self.ref_img.gamma, self.ref_img.unit_cell)
+        print >>vtkfile,"ASCII"
+        print >>vtkfile,"DATASET STRUCTURED_POINTS"
+        print >>vtkfile,"DIMENSIONS %d %d %d"%(self.ref_img.latxdim,self.ref_img.latydim,self.ref_img.latzdim)
+        print >>vtkfile,"SPACING %f %f %f"%(a_recip,b_recip,c_recip)
+        print >>vtkfile,"ORIGIN %f %f %f"%(-self.ref_img.i_0*a_recip,-self.ref_img.j_0*b_recip,-self.ref_img.k_0*c_recip)
+        print >>vtkfile,"POINT_DATA %d"%(self.ref_img.latsize)
+        print >>vtkfile,"SCALARS volume_scalars float 1"
+        print >>vtkfile,"LOOKUP_TABLE default\n"
+
+        index = 0
+        for k in range(0,self.ref_img.latzdim):
+            for j in range(0,self.ref_img.latydim):
+                for i in range(0,self.ref_img.latxdim):
+                    print >>vtkfile,array_values[index],
+                    index += 1
+                print >>vtkfile,""
+
+        vtkfile.close()
+        return
+
+  def finalize(self):
+    ''' Perform any final operations '''
+    if self.params.output.composite_output:
+      # Dump composite files to disk
+      if len(self.all_indexed_experiments) > 0 and self.params.output.refined_experiments_filename:
+        from dxtbx.model.experiment_list import ExperimentListDumper
+        dump = ExperimentListDumper(self.all_indexed_experiments)
+        dump.as_json(self.params.output.refined_experiments_filename)
+
+      if len(self.all_indexed_reflections) > 0 and self.params.output.indexed_filename:
+        self.save_reflections(self.all_indexed_reflections, self.params.output.indexed_filename)
+
+      if len(self.all_integrated_experiments) > 0 and self.params.output.integrated_experiments_filename:
+        from dxtbx.model.experiment_list import ExperimentListDumper
+        dump = ExperimentListDumper(self.all_integrated_experiments)
+        dump.as_json(self.params.output.integrated_experiments_filename)
+
+      if len(self.all_integrated_reflections) > 0 and self.params.output.integrated_filename:
+        self.save_reflections(self.all_integrated_reflections, self.params.output.integrated_filename)
+
+      # Create a tar archive of the integration dictionary pickles
+      if len(self.all_int_pickles) > 0 and self.params.output.integration_pickle:
+        import tarfile, StringIO, time, cPickle as pickle
+        tar_template_integration_pickle = self.params.output.integration_pickle.replace('%d', '%s')
+        outfile = os.path.join(self.params.output.output_dir, tar_template_integration_pickle%('x',self.composite_tag)) + ".tar"
+        tar = tarfile.TarFile(outfile,"w")
+        for i, (fname, d) in enumerate(zip(self.all_int_pickle_filenames, self.all_int_pickles)):
+          string = StringIO.StringIO(pickle.dumps(d, protocol=2))
+          info = tarfile.TarInfo(name=fname)
+          info.size=len(string.buf)
+          info.mtime = time.time()
+          tar.addfile(tarinfo=info, fileobj=string)
+        tar.close()
+
+    print "Entering MERGE step."
+
+    if (self.params.mp.method == 'mpi'):
+      from mpi4py import MPI
+      comm = MPI.COMM_WORLD
+      rank = comm.Get_rank() # each process in MPI has a unique id, 0-indexed
+    else:
+      rank = 0
+    if (self.params.mp.method == 'mpi'):
+      sumlt = np.zeros(self.lt.size,dtype=np.float32)
+      sumct = np.zeros(self.ct.size,dtype=np.float32)
+      comm.Reduce(self.lt, sumlt, op=MPI.SUM, root=0)
+      comm.Reduce(self.ct, sumct, op=MPI.SUM, root=0)
+    else:
+      sumlt = self.lt
+      sumct = self.ct
+    if (rank == 0):
+      sum_lt_masked = np.ma.array(sumlt,mask=sumct==0)
+      sum_ct_masked = np.ma.array(sumct,mask=sumct==0)
+      mean_lt = np.ma.divide(sum_lt_masked,sum_ct_masked)
+      mean_lt.set_fill_value(-32768)
+      self.mean_lattice = mean_lt.filled()
+      from os import getcwd
+      print "mean_lattice id = ",self.ref_img.id
+      mean_lattice_npzname = (getcwd()+"/arrays/"+self.ref_img.id+"_mean.npz")
+      np.savez(mean_lattice_npzname, mean_lt=self.mean_lattice)
+      self.array_to_vtk()      
 
 stills_process.Processor = Processor
 
