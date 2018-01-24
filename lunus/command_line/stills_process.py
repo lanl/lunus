@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-# LIBTBX_SET_DISPATCHER_NAME lunus.stills_process
+# LIBTBX_SET_DISPATCHER_NAME sematura.stills_process
 
 from __future__ import absolute_import, division
 from dials.command_line.stills_process import Script
