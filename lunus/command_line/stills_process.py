@@ -80,6 +80,43 @@ class Processor(SP_Processor):
       if not self.params.dispatch.squash_errors: raise
       return
 
+    ############## Restate the crystal model and miller indicies to align with a reference
+    still_model = experiments[0] # experimental model for the single shot treated as a still 
+    from dxtbx import load
+    # recover the filename of the image so it can be read again for scan position
+    imidentifier = datablock.extract_imagesets()[0].get_image_identifier(0)
+    imframe = load(imidentifier)
+    imscan = imframe.get_scan() # contains the scan state ("phi angle") for this particular image
+
+    from dxtbx.model.experiment_list import ExperimentListFactory
+    ad_hoc_model = "/home/mewall/exafel/cypa/refined_experiments.json"
+    ref_experiments = ExperimentListFactory.from_json_file(ad_hoc_model, check_format=False)
+    dials_sweep_crystal = ref_experiments.crystals()[0] # our ground truth reference model
+
+    from cctbx import sgtbx
+    from cctbx.crystal_orientation import crystal_orientation, basis_type
+    refco = crystal_orientation(dials_sweep_crystal.get_A(), basis_type.reciprocal)
+    stillco = crystal_orientation(still_model.crystal.get_A(), basis_type.reciprocal)
+
+    rotated_refco = refco.rotate_thru(
+      unit_axis=ref_experiments[0].goniometer.get_rotation_axis(),
+      angle=imscan.get_oscillation(deg=False)[0]) # rotate the reference to proper gonio setting
+
+    c_inv_r_best = stillco.best_similarity_transformation(
+      other = rotated_refco, fractional_length_tolerance = 50.00,
+      unimodular_generator_range=1) # align the experimental model with rotated reference
+    c_inv_r_int = tuple([int(round(ij,0)) for ij in c_inv_r_best])
+    c_inv = sgtbx.rt_mx(sgtbx.rot_mx(c_inv_r_int))
+    cb_op = sgtbx.change_of_basis_op(c_inv)
+    print "change of basis operator-->",cb_op
+
+    ec = still_model.crystal.change_basis(cb_op) # restated crystal model, consistent with reference
+    experiments[0].crystal = ec # modify crystal model in place, old model out of scope
+
+    restated_miller = cb_op.apply(indexed["miller_index"])
+    indexed["miller_index"] = restated_miller # modify reflections table in place, old column out of scope
+    ############## Finished restating the crystal model and miller indicies
+
 # Create reference "experiments" and "idexed"
     if self.ncalls == 0: 
       if rank == 0:
@@ -169,7 +206,7 @@ class Processor(SP_Processor):
     self.lt = np.add(self.lt,test_img.lt)
     self.ct = np.add(self.ct,test_img.ct)
     self.ncalls = self.ncalls + 1
-#    print "RANK, NCALLS = ",rank, self.ncalls
+    print "RANK, NCALLS = ",rank, self.ncalls
 
   def array_to_vtk(self):
 
