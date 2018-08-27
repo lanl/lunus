@@ -99,7 +99,7 @@ if __name__=="__main__":
     call_params = shlex.split(command)
     subprocess.call(call_params)
 
-#  np.save(xvectors_dir+"/x_vectors.npy",x)
+  np.save(xvectors_dir+"/x_vectors.npy",x)
 
 #  np.save(xvectors_dir+"/DATAsize.npy",DATAsize)
 
