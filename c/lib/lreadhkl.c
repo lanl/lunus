@@ -33,6 +33,8 @@ int lreadhkl(LAT3D *lat,LAT3D *tmpl)
   lat->yvoxels = tmpl->yvoxels;
   lat->zvoxels = tmpl->zvoxels;
   lat->lattice_length = tmpl->lattice_length;
+  lat->lattice = (LATTICE_DATA_TYPE *)calloc(lat->lattice_length,
+					     sizeof(LATTICE_DATA_TYPE));
   lat->xyvoxels = tmpl->xyvoxels;
   lat->xscale = tmpl->xscale;
   lat->yscale = tmpl->yscale;
@@ -53,11 +55,11 @@ int lreadhkl(LAT3D *lat,LAT3D *tmpl)
   lat->origin.k = tmpl->origin.k;
   printf("origin: %d %d %d\n",lat->origin.i,lat->origin.j,lat->origin.k);
 
-  int index = 0,ct=0;
+  size_t index = 0,ct=0;
   int i,j,k;
   float I,sigI;
 
-  printf("%d %d %d\n",lat->xvoxels,lat->yvoxels,lat->zvoxels);
+  printf("%d %d %d %ld\n",lat->xvoxels,lat->yvoxels,lat->zvoxels,lat->xvoxels*lat->yvoxels*lat->zvoxels);
 
   printf("Initializing the hkl file data...\n");
 
