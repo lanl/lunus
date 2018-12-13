@@ -1,3 +1,5 @@
+// Note: This is work in progress, do not use! 12/13/2018 MEW
+
 /* LDECILT.C - Decimate a lattice.
    
    Author: Mike Wall
@@ -85,6 +87,8 @@ int ldecilt(LAT3D *lat)
 
   int stencil_ofst = (stencil_size-1)/2;
 
+  size_t dlat_index;
+
   for (k = 1; k < lat->zvoxels; k=k+dfac) {
     for (j = 0; j < lat->yvoxels; j=j+dfac) {
       for (i = 0; i < lat->xvoxels; i=i+dfac) {
@@ -119,7 +123,6 @@ int ldecilt(LAT3D *lat)
   lat->yscale *= dfac;
   lat->zscale *= dfac;
 
-  lat->xbound.
   lat->xbound.max = lat->xbound.min + ((float)lat->xvoxels-1)*lat->xscale;
   lat->ybound.max = lat->ybound.min + ((float)lat->yvoxels-1)*lat->yscale;
   lat->zbound.max = lat->zbound.min + ((float)lat->zvoxels-1)*lat->zscale;
