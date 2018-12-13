@@ -1,0 +1,55 @@
+#phenix_dir=/lustre/ttscratch1/mewall/packages/phenix-dev-2404/
+lunus_dir=${LUNUS_HOME}
+image_prefix=snc_newhead
+lunus_image_prefix=snc_newhead_lunus
+scale_image_prefix=snc_newhead_scale
+integration_image_prefix=$scale_image_prefix
+apply_correction=False
+correction_factor_scale=1.0
+lunus_image_dir=${work_dir}/proc
+# indexing
+cella=48.521
+cellb=48.521
+cellc=63.498
+alpha=90.0
+beta=90.0
+gamma=90.0
+unit_cell=48.521,48.521,63.498,90.0,90.0,90.0
+spacegroup=P41
+# integration
+do_integrate=True
+xvectors_path=${work_dir}/raw/tmpdir_common/xvectors.bin
+jsonlist_name=jsonlist.inp
+lattice_dir=${work_dir}/lattices
+diffuse_lattice_prefix=snc_diffuse
+pphkl=1
+filterhkl=True
+#integration_image_type=scale
+integration_image_type=corrected
+#lunus image processing
+maxcell=110
+modeim_bin_size=1
+modeim_kernel_width=15
+normim_tilt_x=0.0
+normim_tilt_y=0.0
+num_images=96
+distance_mm=57.42
+polarim_offset=0.0
+polarim_polarization=0.93
+punchim_xmax=556
+punchim_xmin=510
+punchim_ymax=517
+punchim_ymin=473
+raw_image_dir=${work_dir}/raw/
+#reduce params
+reference_image_number=1
+resolution=1.6
+scale_inner_radius=100
+scale_outer_radius=500
+#scaling
+thrshim_max=10000
+thrshim_min=1
+windim_xmax=984
+windim_xmin=40
+windim_ymax=984
+windim_ymin=40
