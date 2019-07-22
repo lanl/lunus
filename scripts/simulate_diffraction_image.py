@@ -90,6 +90,172 @@ def procimg_single(Isize1,Isize2,scale,lattice_mask_tag,A_matrix,rvec,experiment
 
   global image_mask_tag,pphkl
   imp=np.zeros((Isize1,Isize2))
+
+  #print("starting timer for vectorization code")
+  #
+  # #########################################
+  # start of vectorized code
+  # #########################################
+  print("converting input to numpy array")
+  time0 = time()
+  nprvec = np.asarray(rvec)
+  print("conversion took %f secs" %(time() - time0))
+  time1 = time() 
+  _imp = np.copy(imp)
+  _s_norm = np.linalg.norm(nprvec, axis=1)
+  _s_norm = np.reshape(_s_norm, (Isize1, Isize2))
+  _rsn = 1./_s_norm
+  mask_indices = np.where(_rsn < rsn_min)
+  _imp[mask_indices] = image_mask_tag
+  _ssq = np.square(_s_norm)
+  _cos_two_theta = 1. - _ssq * wavelength*wavelength / 2.
+  _cos_sq_two_theta = np.square(_cos_two_theta)
+  _sin_sq_two_theta = 1. - _cos_sq_two_theta
+  _k = nprvec + s0 # is this correct?
+  _k_norm = np.linalg.norm(_k, axis =1,keepdims=True)
+  _kp = np.copy(_k)
+  _kp[:,2] = 0. #set third dimension to 0.
+  _kp_norm = np.linalg.norm(_kp,axis=1,keepdims=True)
+  _kp = _kp/_kp_norm 
+  _sin_rho = np.dot(_kp, polarization_vec)
+  _cos_two_rho = 1. - 2. * _sin_rho * _sin_rho
+  _cos_two_rho = np.reshape(_cos_two_rho,(Isize1, Isize2))
+  _cf = (1. + _cos_sq_two_theta - epsilon * _cos_two_rho * _sin_sq_two_theta)/2.
+  _cos_incidence= (_k/_k_norm).dot(normal_vec)
+  _cos_incidence = np.reshape(_cos_incidence,(Isize1, Isize2))
+  _cf *= _cos_incidence*_cos_incidence*_cos_incidence
+  np_A = np.asarray(A_matrix).reshape((3,3)).transpose()
+  
+  _H = np.dot(nprvec,np_A) * pphkl
+  d_shape = np.asarray(D.shape)
+  _f_ijk = _H + (d_shape/2).astype(np.int)
+  _ijk = _f_ijk.astype(np.int)
+  _d_ijk = _f_ijk - _ijk
+
+  print("starting interpolation ")
+  #pdb.set_trace()  
+
+  #vectorized interpolation code.
+  #get the index to  non boundary vertices of D
+  ind_to_D_nb_vert =  np.where( ( _ijk[:,0] < d_shape[0]-1) & (_ijk[:,1]<d_shape[1]-1) & (_ijk[:,2]<d_shape[2]-1) )
+
+  #get the actual list of vertices. note: there will be repeated elements here
+  D_vert_000 = _ijk[ind_to_D_nb_vert]
+
+
+  # an element in D_vert_000 is the coordinate of a vertex in D. This is the coordinate 
+  # of the left-bottom-near vertex of a cube (which is a sub-cell of the D lattice)
+  # if we cyclically shift these coordinates in the x,y,z direction by 1, we get the coordinates of 
+  # all the remaining 7 vertices of this cube. The D-lattice values at the corners of the cube
+  # will be used to perform the interpolation.
+
+  D_vert_list = []
+  D_vert_list.append(D_vert_000)
+  #Let's generate the list of coordinates of the remaining 7 vertices.  
+  for i in [0,1]:
+    for j in [0,1]:
+      for k in [0,1]:
+        if (i + j + k == 0): #we already have this as  D_vert_000
+          continue 
+        neigh_vert =  D_vert_000 + [i,j,k]
+        D_vert_list.append(neigh_vert)
+
+  #pdb.set_trace()
+
+  # note: the list of neighbor vertices appear in the following order 
+  # in D_vert_list (denoted by ijk)
+  # 000,001,010,011,100,101,110,111
+  # corresponding to the weights
+  # (1-d_i)(1-d_j)(1-d_k), (1-di)(1-d_j)d_k, (1-d_i)d_j(1-d_k), (1-d_i)d_jd_k
+  # d_i(1-d_j)(1-d_k), d_i(1-d_j)d_k, d_id_j(1-d_k), d_id_j(1-d_k)
+
+  _imp_array = []
+
+  #populate _imp arrays with the values from the lattice
+  for i in range(8):
+    #_imp_t = np.copy(_imp)
+    _imp_t = np.zeros((Isize1*Isize2))
+    _vert_t = D_vert_list[i]
+    _imp_t[ind_to_D_nb_vert] = D[tuple([_vert_t[:,0],_vert_t[:,1],_vert_t[:,2]])]
+    _imp_array.append(_imp_t)
+
+
+  #pdb.set_trace()
+
+  #first create D mask
+  D_mask = np.ones(D.shape)
+  D_mask_indices = np.where(D == lattice_mask_tag)
+  D_mask[D_mask_indices] = 0.
+
+
+  ##Create a an _imp-shaped mask for each _imp array
+  _imp_mask_array = []
+
+  for i in range(8):
+    _mask_t = np.zeros((Isize1*Isize2))
+    _vert_t = D_vert_list[i]
+    _mask_t[ind_to_D_nb_vert] = D_mask[tuple([_vert_t[:,0],_vert_t[:,1],_vert_t[:,2]])]
+    _imp_mask_array.append(_mask_t)
+
+  #pdb.set_trace()
+
+  #interpolation weights
+  _d_i = _d_ijk[:,0]
+  _d_j = _d_ijk[:,1]
+  _d_k = _d_ijk[:,2]
+
+  #interpolation weight list
+  _interp_wt_array = [
+    (1-_d_i)*(1-_d_j)*(1-_d_k), 
+    (1-_d_i)*(1-_d_j)*_d_k, 
+    (1-_d_i)*_d_j*(1-_d_k),
+     (1-_d_i)*_d_j*_d_k,
+     _d_i*(1-_d_j)*(1-_d_k), 
+     _d_i*(1-_d_j)*_d_k, 
+     _d_i*_d_j*(1-_d_k), 
+     _d_i*_d_j*_d_k
+    ]
+
+  #pdb.set_trace()
+  #interpolation
+  _imp_result = np.zeros((Isize1*Isize2))
+  for i in range(8):
+    _imp_result += _interp_wt_array[i]*_imp_array[i]*_imp_mask_array[i]
+
+  #pdb.set_trace()
+
+  _wt_tot = np.zeros((Isize1*Isize2))
+  for i in range(8):
+    _wt_tot += _interp_wt_array[i]*_imp_mask_array[i]
+
+  #pdb.set_trace()
+
+  nz_wt_ind = np.where(_wt_tot > 0. )
+  _imp_result[nz_wt_ind] *= np.reshape(_cf,(Isize1*Isize2))[nz_wt_ind]/_wt_tot[nz_wt_ind]
+
+  z_wt_ind = np.where(_wt_tot == 0.)
+  _imp_result[z_wt_ind] = image_mask_tag
+
+  #pdb.set_trace()
+
+  #imp cells that map to boundary cells have to be set to image_mask_tag.
+  ind_to_D_b_vert = np.where( ( _ijk[:,0] >= d_shape[0]-1) | (_ijk[:,1]>=d_shape[1]-1) | (_ijk[:,2]>=d_shape[2]-1) )
+  _imp_result[ind_to_D_b_vert] = image_mask_tag
+
+  # set rsn based mask here
+  mask_indices = np.where(_rsn < rsn_min)
+  _imp_result = np.reshape(_imp_result, (Isize1,Isize2) )
+  _imp_result[mask_indices] = image_mask_tag
+  ############################
+  #end of vectorized code
+  ############################
+  print("time for vectorized code ", time() - time1)
+  #pdb.set_trace()
+  np.save('_imp_interp.npy',_imp_result)
+  return _imp_result
+
+  # Below not used.
+
 #  for r in xrange(100): # slow dimension
   for r in xrange(Isize1): # slow dimension
     if (r%10 == 0):
