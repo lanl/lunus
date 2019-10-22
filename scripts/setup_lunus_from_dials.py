@@ -157,7 +157,9 @@ if __name__=="__main__":
         if (add_background_images==True):
           if (len(bkglist) != 1):
             bkgname=bkglist[i]
-            exp_list[0].imageset.external_lookup.pedestal.filename=os.path.abspath(bkgname)
+          else:
+            bkgname=bkglist[0]
+          exp_list[0].imageset.external_lookup.pedestal.filename=os.path.abspath(bkgname)
         dump.experiment_list(exp_list,json_dir+"/experiments_for_lunus_{0:05d}.json".format(imnum))
       else:
         from scitbx import matrix
