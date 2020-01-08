@@ -98,7 +98,8 @@ def procimg_single(Isize1,Isize2,scale,lattice_mask_tag,A_matrix,rvec,experiment
   # #########################################
   print("converting input to numpy array")
   time0 = time()
-  nprvec = np.asarray(rvec)
+  nprvec = rvec
+#  nprvec = np.asarray(rvec)
   print("conversion took %f secs" %(time() - time0))
   time1 = time() 
   _imp = np.copy(imp)
@@ -406,6 +407,7 @@ def process_one_glob():
     if (rotation_series):
       experiments = ExperimentListFactory.from_json_file(metrolist[0], check_format=False)
       x = get_experiment_xvectors(experiments)
+      npx = np.asarray(x)
 
     Isize1,Isize2 = experiments[0].detector[0].get_image_size()
 
@@ -418,6 +420,7 @@ def process_one_glob():
       if (not rotation_series):
         experiments = ExperimentListFactory.from_json_file(metrolist[i], check_format=False)
         x = get_experiment_xvectors(experiments)
+        npx = np.asarray(x)
 
       imgname=filelist[i]
       img = dxtbx.load(imgname)
@@ -447,7 +450,7 @@ def process_one_glob():
 
       A_matrix = matrix.sqr(crystal.get_A()).inverse()
 
-      diffim = procimg_single(Isize1,Isize2,scale,lattice_mask_tag,A_matrix,x[0],experiments,D)
+      diffim = procimg_single(Isize1,Isize2,scale,lattice_mask_tag,A_matrix,npx[0],experiments,D)
 
       # Apply correction factor for polarization and solid angle
 
