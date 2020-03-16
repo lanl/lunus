@@ -226,6 +226,7 @@ int lmodeim(DIFFIMAGE *imdiff_in)
 
     clock_t stop = clock();
     double tel = ((double)(stop-start))/CLOCKS_PER_SEC;
+    printf("kernel loop took %g seconds\n",tel);
 
 #ifdef DEBUG
     printf("kernel loop took %g seconds\n",tel);
