@@ -224,6 +224,9 @@ def process_one_glob():
 
       imgname=filelist[i]
 
+      if (debug_level>0):
+        print("Rank {0} processing {1}".format(get_mpi_rank(),imgname))
+
       bt = time()
 
       if (get_mpi_rank() == 0 or not fresh_lattice):
@@ -236,20 +239,32 @@ def process_one_glob():
         scan = None
         gonio = None
       if fresh_lattice:
+        if (debug_level>0):
+          print("Broadcasting reference image info")
         data = mpi_bcast(data)
         scan = mpi_bcast(scan)
         gonio = mpi_bcast(gonio)
 
       et = time()
       ttr += et - bt
+
+      if (debug_level>0):
+        print("Took {0} secs to read {1}".format(et-bt,imgname))
+
 #      print("min of data = ",flex.min(data))
 #      print("max of data = ",flex.max(data))
+
+      if (debug_level>0):
+        print("Rank {0} entering p.set_image()".format(get_mpi_rank()))
 
       if isinstance(data,tuple):
         for pidx in range(len(data)):
           p.set_image(pidx,data[pidx])
       else:
         p.set_image(data)
+
+      if (debug_level>0):
+        print("Rank {0} entering p.LunusSetparamsim()".format(get_mpi_rank()))
 
       for pidx in range(len(experiment_params)):
         deck_and_extras = deck+experiment_params[pidx]
@@ -277,6 +292,8 @@ def process_one_glob():
       crystal = copy.deepcopy(crystal_reference)
 
       if (rotation_series):
+        if (debug_level>0):
+          print("Rank {0} applying rotation".format(get_mpi_rank()))
         start_angle, delta_angle = scan.get_oscillation()      
         axis = gonio.get_rotation_axis()
         crystal.rotate_around_origin(axis, start_angle + (delta_angle/2), deg=True)
@@ -388,6 +405,14 @@ if __name__=="__main__":
     rotation_series_str = args.pop(idx).split("=")[1]
     if (rotation_series_str == "False"):
       rotation_series=False
+
+ # debug level
+  try:
+    idx = [a.find("debug_level")==0 for a in args].index(True)
+  except ValueError:
+    debug_level=0
+  else:
+    debug_level = int(args.pop(idx).split("=")[1])
 
  # Input json
   keep_going = True
