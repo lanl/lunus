@@ -11,6 +11,15 @@ import lunus
 import copy, os
 from dials.array_family import flex
 import future,six
+import dxtbx
+from dxtbx.imageset import ImageSetFactory
+from dxtbx.model.experiment_list import Experiment, ExperimentList, ExperimentListFactory
+from dxtbx.serialize import dump
+from scitbx.matrix import col
+from scitbx import matrix
+import sys
+
+
 
 def mpi_enabled():
   return 'OMPI_COMM_WORLD_SIZE' in os.environ.keys()
@@ -30,8 +39,6 @@ def get_mpi_size():
   return mpi_comm.Get_size() if mpi_enabled() else 1
 
 def get_experiment_params(experiments):
-
-  from scitbx.matrix import col
 
   beam = experiments[0].beam
   detector = experiments[0].detector
@@ -134,10 +141,6 @@ def process_one_glob():
 
     global fresh_lattice
 
-    from dxtbx.imageset import ImageSetFactory
-    from dxtbx.model.experiment_list import Experiment, ExperimentList
-    from dxtbx.serialize import dump
-
     imnum=0
 
     tte = 0.0
@@ -174,11 +177,18 @@ def process_one_glob():
         experiment_params = None
         x = None
         crystal_reference = None
+      if get_mpi_rank() == 0:
+        print("Broadcasting rotation series common data")
+        sys.stdout.flush()
+      tbc = time()
       experiments = mpi_bcast(experiments)
       experiment_params = mpi_bcast(experiment_params)
       x = mpi_bcast(x)
       crystal_reference = mpi_bcast(crystal_reference)
-
+      tbc = time() - tbc
+      if get_mpi_rank() == 0:
+        print("LUNUS.PROCESS: Took {0} seconds to broadcast rotation series common data".format(tbc))
+        sys.stdout.flush()
     # prepend image 0 to each range.
 
     i_iter = list(range(get_mpi_rank(),len(filelist),get_mpi_size()))
@@ -298,7 +308,6 @@ def process_one_glob():
         axis = gonio.get_rotation_axis()
         crystal.rotate_around_origin(axis, start_angle + (delta_angle/2), deg=True)
 
-      from scitbx import matrix
       A_matrix = matrix.sqr(crystal.get_A()).inverse()
       At = np.asarray(A_matrix.transpose()).reshape((3,3))
       At_flex = A_matrix.transpose().as_flex_double_matrix()
@@ -340,9 +349,11 @@ def process_one_glob():
 
     print()
 
-    print("LUNUS.PROCESS: Rank {0} time spent in read, processing (sec): {1} {2}".format(get_mpi_rank(),ttr,tte))
+    mpi_barrier()
 
     if (get_mpi_rank() == 0):
+      print("LUNUS.PROCESS: Reads took {0} seconds".format(ttr))
+      print("LUNUS.PROCESS: Individual processing took {0} seconds".format(tte))
       print("LUNUS.PROCESS: Setup took {0} seconds".format(tsetup))
       print("LUNUS.PROCESS: Masking and thresholding took {0} seconds".format(tmask))
       print("LUNUS.PROCESS: Solid angle and polarization correction took {0} seconds".format(tcorrection))
@@ -350,7 +361,6 @@ def process_one_glob():
       print("LUNUS.PROCESS: Mapping took {0} seconds".format(tmap))
 
 if __name__=="__main__":
-  import sys
 
   args = sys.argv[1:] 
   usage = ["experiments=<experiments.json file, for metrology info>",
@@ -456,13 +466,13 @@ if __name__=="__main__":
 
   if mpi_enabled():
     mpi_init()
-
+    if (debug_level>0):
+      print("Rank {0} reporting for duty".format(get_mpi_rank()))
+      sys.stdout.flush()
   if get_mpi_rank() == 0:
     if (len(metro_glob_list) != len(image_glob_list) or (subtract_background_images and len(metro_glob_list) != len(bkg_glob_list))):
       raise(ValueError,"Must specify same number of experiments, images, and backgrounds")
 
-  import dxtbx
-  from dxtbx.model.experiment_list import ExperimentListFactory
 
 # Get a sample experiments file and use it to initialize the processor class
 
