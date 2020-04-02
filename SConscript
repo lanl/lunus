@@ -2,10 +2,6 @@
    # Date: 6/15/2017
    # Lattice methods wrapped by Alex Wolff (9/22/2017).
 
-
-
-
-
 import libtbx.load_env
 import os
 op = os.path
