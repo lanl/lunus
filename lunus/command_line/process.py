@@ -152,6 +152,9 @@ def process_one_glob():
     filelist=glob.glob(image_glob)
     filelist.sort()
 
+    if get_mpi_rank() == 0:
+      print("Analyzing {0} images".format(len(filelist)))
+
     if (subtract_background_images==True):
       bkglist=glob.glob(bkg_glob)
       bkglist.sort()
@@ -193,6 +196,8 @@ def process_one_glob():
 
     i_iter = list(range(get_mpi_rank(),len(filelist),get_mpi_size()))
 
+#    print("Rank {0}, i_iter = {1}".format(get_mpi_rank(),i_iter))
+
     i_iter.insert(0,0)
     
     tmode = 0.0
@@ -205,10 +210,10 @@ def process_one_glob():
     for i in i_iter:
       if fresh_lattice:
         if get_mpi_rank() == 0:
-          print("Reference image ",end=" ")
+          print("Reference image ")
           sys.stdout.flush()
       else:
-        print("{0} ".format(i),end=" ")
+        print("{0} ".format(i))
         sys.stdout.flush()
 
       if fresh_lattice:
@@ -332,7 +337,7 @@ def process_one_glob():
         p.LunusProcimlt(1)
         et = time()
         te = et - bt
-#        print("LUNUS.PROCESS: Rank {0} FINISHED processing image number {1}".format(get_mpi_rank(),imnum))
+        print("LUNUS.PROCESS: Rank {0} FINISHED processing image number {1}".format(get_mpi_rank(),i))
         
         tte += te
 
@@ -479,8 +484,8 @@ if __name__=="__main__":
   metro_glob = metro_glob_list[0]
 
   metrolist = glob.glob(metro_glob)
-  print("type(metrolist) = ",type(metrolist))
-  print(metrolist)
+#  print("type(metrolist) = ",type(metrolist))
+#  print(metrolist)
   metrolist.sort()
 
   metro = metrolist[0]

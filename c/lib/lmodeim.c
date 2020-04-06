@@ -249,7 +249,7 @@ int lmodeim(DIFFIMAGE *imdiff_in)
       }
     }
     
-    printf(" Number of teams, threads = %ld, %ld\n",num_teams,num_threads);
+    //    printf(" Number of teams, threads = %ld, %ld\n",num_teams,num_threads);
 
     window = (size_t *)calloc(wlen*num_teams*num_threads,sizeof(size_t));
     stack = (size_t *)calloc(wlen*num_teams*num_threads,sizeof(size_t));
