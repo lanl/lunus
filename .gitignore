@@ -7,3 +7,4 @@ tmp*
 !tmpdir_common
 \#SConscript\#
 c/src/.\#*
+.ipynb_checkpoints

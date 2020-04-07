@@ -414,7 +414,8 @@ int lmodeim(DIFFIMAGE *imdiff_in)
     }
 
 #ifdef USE_OFFLOAD
-#pragma omp target exit data map(from:image[0:image_length]) map(delete:image_mode[0:image_length],window[0:wlen*num_threads*num_teams],stack[0:wlen*num_threads*num_teams])
+#pragma omp target update from(image[0:image_length])
+#pragma omp target exit data map(delete:image[0:image_length],image_mode[0:image_length],window[0:wlen*num_threads*num_teams],stack[0:wlen*num_threads*num_teams])
 #endif
 
     free(image_mode);
