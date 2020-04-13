@@ -1,15 +1,17 @@
-C_HOME=${PWD}/..
+C_HOME=/gpfs/alpine/scratch/mewall/chm137/packages/lunus/c
 VPATH=${C_HOME}/src:${C_HOME}/lib:${C_HOME}/bin:${C_HOME}/include
 #CC=gcc-mp-4.8
 #CC=gcc-mp-5
 ##BR##CC=gcc
-CC=xlc
+CC=xlc_r
 #CC=icc
 MPI_BUILD=NO
 MPICC=mpicc
-MPICFLAGS= -L${MPI_LIB} -I${MPI_INCLUDE} -DUSE_MPI
+#MPICFLAGS= -L${MPI_LIB} -I${MPI_INCLUDE} -DUSE_MPI
+MPICFLAGS= -DUSE_MPI
 #CFLAGS= -g -O0 -axcore-avx2,mic-avx512 -DUSE_MPI -qopenmp -L${C_HOME}/lib -I${C_HOME}/include
-MPILIBS= -lmpi
+#MPILIBS= -lmpi
+MPILIBS=
 FFTWROOT=/Users/mewall/packages/fftw-3.3.4/inst_dir
 FFTW_DIR=${FFTWROOT}/lib
 FFTW_INC=${FFTWROOT}/include
@@ -20,6 +22,7 @@ FFTW_INC=${FFTWROOT}/include
 #CFLAGS= -g -O3 -fopenmp=libomp -fopenmp-targets=nvptx64-nvidia-cuda -DUSE_OPENMP -L${C_HOME}/lib -I${C_HOME}/include
 ##BR##CFLAGS= -g -O3 -fopenmp -DUSE_OPENMP -DUSE_OFFLOAD -L${C_HOME}/lib -I${C_HOME}/include
 CFLAGS= -g -O3 -qsmp=omp -qoffload -DUSE_OPENMP -DUSE_OFFLOAD -L${C_HOME}/lib -I${C_HOME}/include
+#CFLAGS= -g -O3 -qsmp=omp -DUSE_OPENMP -L${C_HOME}/lib -I${C_HOME}/include
 #CFLAGS= -g -O2 -axcore-avx2,mic-avx512 -L${C_HOME}/lib -I${C_HOME}/include
 #CFLAGS= -g -w -L${C_HOME}/lib -I${C_HOME}/include
 AR=ar
