@@ -37,7 +37,7 @@ def correction_factor(Isize1,Isize2,experiments,rvec):
   detector = experiments[0].detector
   p0 = detector[0]
 
-  beam_vec = -col(beam.get_direction())
+  beam_vec = -col(beam.get_sample_to_source_direction())
   wavelength = beam.get_wavelength()
 #  polarization_vec = beam.get_polarization()
   polarization_vec = col([0.,1.,0.])
@@ -48,7 +48,7 @@ def correction_factor(Isize1,Isize2,experiments,rvec):
   cf = np.zeros((Isize1,Isize2))
   for r in range(Isize1):
     if (r%10 == 0):
-        print "r = ",r
+        print("r = ",r)
     for c in range(Isize2):
       z = r*Isize2 + c
       s = col(rvec[z])
@@ -77,7 +77,7 @@ def procimg_single(Isize1,Isize2,scale,lattice_mask_tag,A_matrix,rvec,experiment
   p0 = detector[0]
 
   s0 = col(beam.get_s0())
-  beam_vec = -col(beam.get_direction())
+  beam_vec = -col(beam.get_sample_to_source_direction())
   wavelength = beam.get_wavelength()
 #  polarization_vec = beam.get_polarization()
   polarization_vec = col([0.,1.,0.])
@@ -260,7 +260,7 @@ def procimg_single(Isize1,Isize2,scale,lattice_mask_tag,A_matrix,rvec,experiment
 #  for r in xrange(100): # slow dimension
   for r in xrange(Isize1): # slow dimension
     if (r%10 == 0):
-        print "row=",r
+        print("row=",r)
     for c in xrange(Isize2): # fast dimension
       # calculate index into the data points
       z = r*Isize2 + c
@@ -414,7 +414,7 @@ def process_one_glob():
 #    cf = correction_factor(Isize1,Isize2,experiments,x[0])
 
     for i in range(len(filelist)):
-      print "{0}...".format(i),
+      print("{0}...".format(i),)
       sys.stdout.flush()
 
       if (not rotation_series):
@@ -458,28 +458,30 @@ def process_one_glob():
 
       dmin=np.amin(diffim)
 
-      print "dmin = ",dmin
+      print("dmin = ",dmin)
 
 #  s = 256./(dmax-dmin)
 
-      
-      for i in range(len(diffim)):
-        for j in range(len(diffim[i])):
-          if (diffim[i][j] != image_mask_tag):
-            diffim[i][j] *= scale
 
+      for i in range(len(diffim)):
+          for j in range(len(diffim[i])):
+              if (diffim[i][j] != image_mask_tag):
+                  diffim[i][j] = diffim[i][j]*scale
       if (shift_min):
         for i in range(len(diffim)):
           for j in range(len(diffim[i])):
             if (diffim[i][j] != image_mask_tag):
               diffim[i][j] -= dmin*scale
-        
 
 #      diffim *= scale
+              
+      int_mask_tag = int(image_mask_tag)
 
       for j in range(Isize2):
           for i in range(Isize1):
-              pixel_values[j,i] = np.int(diffim[i,j])
+              pixel_values[j,i] = np.int(diffim[i,j])              
+              if (pixel_values[j,i] == int_mask_tag):
+                pixel_values[j,i] = -1
 
       outname = prefout+"_%05d.cbf"%(imnum)
 
@@ -487,7 +489,7 @@ def process_one_glob():
 
       imnum = imnum +1
 
-    print
+    print()
 
 if __name__=="__main__":
   import sys
@@ -569,7 +571,7 @@ if __name__=="__main__":
     else:
       metro_glob_list.append(args.pop(metroidx).split("=")[1])
   if (len(metro_glob_list) == 0):
-    raise ValueError,"Experiments .json file must be specified using experiments="
+    raise(ValueError,"Experiments .json file must be specified using experiments=")
   
  # Image input glob
   keep_going = True
@@ -655,7 +657,7 @@ if __name__=="__main__":
 
   for i in range(len(metro_glob_list)):
 
-    print "Image set ",i+1,":",
+    print("Image set ",i+1,":",)
 
     metro_glob = metro_glob_list[i]
     image_glob = image_glob_list[i]

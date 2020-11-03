@@ -9,7 +9,78 @@
 
 #include<mwmask.h>
 
-int lminrim(DIFFIMAGE *imdiff)
+int lminrim(DIFFIMAGE *imdiff_in)
+{
+  size_t
+    i,
+    r,
+    c,
+    *n,
+    radius,
+    index = 0;
+
+  struct xycoords rvec;
+
+  RFILE_DATA_TYPE *rf;
+
+  XYZCOORDS_DATA ssq,rr;
+
+  float cos_two_theta;
+
+  int pidx;
+
+  DIFFIMAGE *imdiff;
+
+  if (imdiff_in->slist == NULL) lslistim(imdiff_in);
+
+  rf = (RFILE_DATA_TYPE *)malloc(MAX_RFILE_LENGTH*sizeof(RFILE_DATA_TYPE));
+
+  for (i=0;i<MAX_RFILE_LENGTH;i++) rf[i]=imdiff_in->ignore_tag;
+  imdiff_in->rfile_length = 0;
+
+  for (pidx = 0; pidx < imdiff_in->num_panels; pidx++) {
+
+    imdiff = &imdiff_in[pidx];
+    index = 0;
+
+    struct xyzcoords s;
+
+    for(r = 0; r < imdiff->vpixels; r++) {
+      for(c = 0; c < imdiff->hpixels; c++) {
+	s = imdiff->slist[index];
+	ssq = ldotvec(s,s);
+	cos_two_theta = 1. - ssq * imdiff->wavelength * imdiff->wavelength / 2.;
+	rr = imdiff->distance_mm / cos_two_theta; 
+	rvec.x = imdiff->wavelength * s.x * rr;
+	rvec.y = imdiff->wavelength * s.y * rr;
+	//	printf("rvec = (%f,%f)\n",rvec.x,rvec.y);
+	radius = (size_t)(sqrtf(rvec.x*rvec.x + rvec.y*rvec.y)/imdiff->pixel_size_mm+.5);
+	if ((imdiff->image[index] != imdiff->overload_tag) &&
+	    (imdiff->image[index] != imdiff->ignore_tag)) {
+	  if (radius >= imdiff_in->rfile_length) 
+	    imdiff_in->rfile_length = radius+1;
+	  if (rf[radius] > (RFILE_DATA_TYPE)imdiff->image[index] || rf[radius] == imdiff->ignore_tag) {
+	    rf[radius] = (RFILE_DATA_TYPE)imdiff->image[index];
+	  }
+	}
+	index++;
+      }
+    }
+  }
+  for(i=0;i<imdiff_in->rfile_length;i++) {
+    if (rf[i] != imdiff_in->ignore_tag) {
+      imdiff_in->rfile[i] = rf[i];
+#ifdef DEBUG
+      if (i>100 && i<=110) printf("lminrim rf[%d] = %g,",i,rf[i]);
+#endif
+    } else {
+      imdiff_in->rfile[i] = 0.0;
+    }
+  }
+  free(rf);
+}
+
+int lminrim_old(DIFFIMAGE *imdiff)
 {
 	size_t
 		radius,

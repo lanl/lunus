@@ -191,6 +191,7 @@ void lbufuncompress(const signed char* packed, const size_t packed_sz, int* valu
 
   //  while (j < packed_sz && k < values_sz)
   while (j < packed_sz)
+    //    while (k < values_sz)
     {
       c = packed[j];
       j += 1;
@@ -233,7 +234,11 @@ void lbufuncompress(const signed char* packed, const size_t packed_sz, int* valu
       values[k++]=current;
     }
   if (k > values_sz) {
-    printf("Exceeded length of target, j = %d, k = %d\n",j,k);
+    printf("LCBFTOOL: Exceeded length of image, j = %d, k = %d\n",j,k);
+    exit(1);
+  }
+  if (k < values_sz) {
+    printf("LCBFTOOL: Did not reach full length of image, j = %d, k = %d\n",j,k);
     exit(1);
   }
 }

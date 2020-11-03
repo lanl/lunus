@@ -44,10 +44,6 @@ int main(int argc, char *argv[])
  * Read information from input line:
  */
 	switch(argc) {
-		case 5: 
-			origin.r = (RCCOORDS_DATA)atoi(argv[4]);
-		case 4:
-			origin.c = (RCCOORDS_DATA)atoi(argv[3]);
 		case 3:
 			if ( (outfile = fopen(argv[2],"wb")) == NULL ) {
 				printf("Can't open %s.",argv[2]);
@@ -80,13 +76,6 @@ int main(int argc, char *argv[])
   }
 
 /*
- * Set main defaults:
- */
-
-	imdiff->origin = origin;
-  
-
-/*
  * Read diffraction image:
  */
 	imdiff->infile = imagein;
@@ -111,12 +100,6 @@ int main(int argc, char *argv[])
      perror(imdiff->error_msg);
      goto CloseShop;
    }
-
-  num_wrote = fwrite(imdiff->rfile, sizeof(RFILE_DATA_TYPE), 
-		imdiff->rfile_length, outfile);
-  if (num_wrote != imdiff->rfile_length){
-    printf("Only wrote %ld words to rfile.", num_wrote);
-  }
   
 CloseShop:
   

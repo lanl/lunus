@@ -17,12 +17,12 @@ int lminrlt(LAT3D *lat)
     j,
     k,
     r,
-    index = 0;
+    lat_index;
 
   int
     return_value = 0;
   
-  struct ijkcoords rvec;
+  struct ijkcoords index,rvec;
   
   float
     rscale;
@@ -42,33 +42,31 @@ int lminrlt(LAT3D *lat)
     goto CloseShop;
   }
 
-  rscale = (lat->xscale*lat->xscale + lat->yscale*lat->yscale +
-		 lat->zscale*lat->zscale);
   lat->rfile_length = 0;
-  for(k = 0; k < lat->zvoxels; k++) {
-    for(j = 0; j < lat->yvoxels; j++) {
-      for (i = 0; i < lat->xvoxels; i++) {
-	rvec.i = i - lat->origin.i;
-	rvec.j = j - lat->origin.j;
-	rvec.k = k - lat->origin.k;
-	rfloat.x = lat->xscale * rvec.i;
-	rfloat.y = lat->yscale * rvec.j;
-	rfloat.z = lat->zscale * rvec.k;
-	r = (size_t)(sqrtf((rfloat.x*rfloat.x + rfloat.y*rfloat.y + 
-		       rfloat.z*rfloat.z) / rscale)+.5);
-	if (lat->lattice[index] != lat->mask_tag) {
+  lat->index.i=lat->origin.i+1;
+  lat->index.j=lat->origin.j+1;
+  lat->index.k=lat->origin.k+1;
+  rscale=lssqrFromIndex(lat);
+  lat_index = 0;
+  for(index.k = 0; index.k < lat->zvoxels; index.k++) {
+    for(index.j = 0; index.j < lat->yvoxels; index.j++) {
+      for (index.i = 0; index.i < lat->xvoxels; index.i++) {
+	lat->index = index;
+	
+	r = (size_t)(sqrtf(lssqrFromIndex(lat) / rscale)+.5);
+	if (lat->lattice[lat_index] != lat->mask_tag) {
 	  //	  if (lat->lattice[index]<0) printf("%d,%f\n",(int)index,lat->lattice[index]);
-	  if (r >= lat->rfile_length) lat->rfile_length = r;
+	  if (r >= lat->rfile_length) lat->rfile_length = r + 1;
 	  if (ct[r] == 0) {
-	    lat->rfile[r] = lat->lattice[index];
+	    lat->rfile[r] = lat->lattice[lat_index];
 	    ct[r] = 1;
 	  } else {
-	    if (lat->rfile[r] > lat->lattice[index]) {
-	      lat->rfile[r] = lat->lattice[index];
+	    if (lat->rfile[r] > lat->lattice[lat_index]) {
+	      lat->rfile[r] = lat->lattice[lat_index];
 	    }
 	  }
 	}
-	index++;
+	lat_index++;
       }
     }
   }

@@ -6,8 +6,7 @@
    Version: 1.
    
    Usage:
-   		"avgrlt <input lattice> <output rfile> <x-origin>
-		        <y-origin> <z-origin>"
+   		"minrlt <input lattice> <output rfile> <cell>"
 
 		Input is a 3D lattice and voxel coordinates for the
 		origin.  Output is an rfile.  
@@ -22,6 +21,7 @@ int main(int argc, char *argv[])
     *outfile;
   
   char
+    cell_str[256],
     error_msg[LINESIZE];
   
   size_t
@@ -49,12 +49,8 @@ int main(int argc, char *argv[])
    * Read information from input line:
    */
   switch(argc) {
-    case 6: 
-    origin.k = atol(argv[5]);
-    case 5:
-    origin.j = atol(argv[4]);
     case 4:
-    origin.i = atol(argv[3]);
+      strcpy(cell_str,argv[3]);
     case 3:
     if ((outfile = fopen(argv[2],"wb")) == NULL) {
       printf("\nCan't open %s.\n\n",argv[2]);
@@ -72,9 +68,8 @@ int main(int argc, char *argv[])
     }
     break;
     default:
-    printf("\n Usage: avgrlt <input lattice> "
-	   "<output rfile> <x-origin> "
-	   "<y-origin> <z-origin>\n\n");
+    printf("\n Usage: minrlt <input lattice> "
+	   "<output rfile> <unit cell string>\n\n");
     exit(0);
   }
   
@@ -101,6 +96,17 @@ int main(int argc, char *argv[])
  * Generate the minimum vs radius:
  */
 
+  if (!(strcmp(cell_str,"None")==0)) {
+    strcpy(lat->cell_str,cell_str);
+  } else {
+    lat->cell.a = 1./lat->xscale;
+    lat->cell.b = 1./lat->yscale;
+    lat->cell.c = 1./lat->zscale;
+    lat->cell.alpha = lat->cell.beta = lat->cell.gamma = 90.0;
+    sprintf(cell_str,"%f,%f,%f,90.0,90.0,90.0",(float)lat->cell.a,(float)lat->cell.b,(float)lat->cell.c);
+    printf("%s\n",cell_str);
+  }
+  lparsecelllt(lat);
   lminrlt(lat);
 
 /*

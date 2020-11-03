@@ -17,6 +17,10 @@ void lanisolt(LAT3D *lat)
 
   struct ijkcoords index;
 
+  RFILE_DATA_TYPE *rfile,*rfile2;
+
+  rfile = (RFILE_DATA_TYPE *)calloc(MAX_RFILE_LENGTH,sizeof(RFILE_DATA_TYPE));
+  rfile2 = (RFILE_DATA_TYPE *)calloc(MAX_RFILE_LENGTH,sizeof(RFILE_DATA_TYPE));
   ct = (size_t *)calloc(MAX_RFILE_LENGTH,sizeof(size_t));
   if (!ct) {
     sprintf(lat->error_msg,"\nLANISOLT: Couldn't allocate counting "
@@ -48,13 +52,14 @@ void lanisolt(LAT3D *lat)
 	  //	  if (lat->lattice[index]<0) printf("%d,%f\n",(int)index,lat->lattice[index]);
 	  if (r >= lat->rfile_length) lat->rfile_length = r + 1;
 	  if (ct[r] == 0) {
-	    lat->rfile[r] = lat->lattice[lat_index];
+	    rfile[r] = lat->lattice[lat_index];
+	    rfile2[r] = lat->lattice[lat_index]*lat->lattice[lat_index];
 	    ct[r] = 1;
 	  } else {
-	    lat->rfile[r] = ((float)ct[r]*lat->rfile[r] +
-			     lat->lattice[lat_index])/(float)(ct[r]+1);
-	    if (isnan(lat->rfile[r])) {
-	      perror("LANISOLT: lat->rfile[r] is nan. Aborting\n");
+	    rfile[r] += lat->lattice[lat_index];
+	    rfile2[r] += lat->lattice[lat_index]*lat->lattice[lat_index];
+	    if (isnan(rfile[r])) {
+	      perror("LANISOLT: rfile[r] is nan. Aborting\n");
 	      exit(1);
 	    }
 	    ct[r]++;
@@ -73,8 +78,16 @@ void lanisolt(LAT3D *lat)
     if (ct[r]==0) {
       lat->rfile[r]=lat->mask_tag;
       num_zero_counts += 1;
-    }
+    } else {
+      lat->rfile[r] = rfile[r]/(RFILE_DATA_TYPE)ct[r];
+      if (lat->procmode == 1) {
+	lat->rfile[r] -= sqrtf(rfile2[r]/(RFILE_DATA_TYPE)ct[r]-lat->rfile[r]*lat->rfile[r]);
+      }
+    }	
   }
+
+  free(rfile);
+  free(rfile2);
 
   //  printf("LANISOLT: num_zero_counts = %d\n",num_zero_counts);
 

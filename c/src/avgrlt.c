@@ -6,8 +6,7 @@
    Version: 1.
    
    Usage:
-   		"avgrlt <input lattice> <output rfile> <x-origin>
-		        <y-origin> <z-origin>"
+   		"avgrlt <input lattice> <output rfile> <cell>"
 
 		Input is a 3D lattice and voxel coordinates for the
 		origin.  Output is an rfile.  

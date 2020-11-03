@@ -21,6 +21,9 @@ int main(int argc, char *argv[])
     cell_str[256],
     error_msg[LINESIZE];
   
+  int
+    procmode = 0;
+
   size_t
     i,
     j,
@@ -43,6 +46,8 @@ int main(int argc, char *argv[])
    * Read information from input line:
    */
   switch(argc) {
+  case 5:
+    procmode = atoi(argv[4]);
     case 4:
       strcpy(cell_str,argv[3]);
     case 3:
@@ -68,7 +73,7 @@ int main(int argc, char *argv[])
     break;
     default:
     printf("\n Usage: anisolt <input lattice> <output lattice> "
-	   "<cell_str>\n\n");
+	   "<cell_str> <run mode>\n\n");
     exit(0);
   }
   
@@ -104,6 +109,7 @@ int main(int argc, char *argv[])
     printf("%s\n",cell_str);
   }
   lparsecelllt(lat);
+  lat->procmode = procmode;
   lanisolt(lat);
 
 /*

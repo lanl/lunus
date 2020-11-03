@@ -61,7 +61,7 @@ int main(int argc, char *argv[])
 			break;
 		default:
 			printf("\n Usage: avgrim <input image> "
-				"<output rfile> <x origin> <y origin>\n\n");
+				"<output rfile>\n\n");
 			exit(0);
 	}
   
@@ -89,7 +89,7 @@ int main(int argc, char *argv[])
    * Generate rfile:
    */
   
-	printf("Radial averaging image of size %d,%d\n",imdiff->hpixels,imdiff->vpixels); 
+	//	printf("Radial averaging image of size %d,%d\n",imdiff->hpixels,imdiff->vpixels); 
 	lavgrim(imdiff);  
 
 /*
