@@ -24,6 +24,7 @@ import os
 from libtbx.utils import Keep
 from cctbx import crystal
 import cctbx.sgtbx
+import future
 
 def mpi_enabled():
   return 'OMPI_COMM_WORLD_SIZE' in os.environ.keys()
