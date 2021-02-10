@@ -14,6 +14,7 @@
 from iotbx.pdb import hierarchy
 from cctbx.array_family import flex
 import mmtbx.utils
+from cctbx import maptbx
 import copy
 import mdtraj as md
 import time
@@ -157,6 +158,15 @@ if __name__=="__main__":
   else:
     icalc_file = args.pop(idx).split("=")[1]
 
+# density map
+
+#  try:
+#    idx = [a.find("density")==0 for a in args].index(True)
+#  except ValueError:
+#    density_file = "density.ccp4"
+#  else:
+#    density_file = args.pop(idx).split("=")[1]
+
 # partial_sum (don't divide by nsteps at the end)
 
   try:
@@ -256,7 +266,9 @@ if __name__=="__main__":
   xrs.set_occupancies(1.0)
   xrs_sel = xrs.select(selection)
   fcalc = xrs_sel.structure_factors(d_min=d_min).f_calc()
-
+  f_000 = mmtbx.utils.f_000(xray_structure=xrs_sel)
+  volume = xrs_sel.unit_cell().volume()
+  print("f_000 = %g, volume = %g" % (f_000.f_000,volume))
   if (mpi_rank == 0):
     fcalc.as_mtz_dataset('FWT').mtz_object().write(file_name="reference.mtz")
 
@@ -486,6 +498,15 @@ if __name__=="__main__":
       avg_fcalc.as_mtz_dataset('FWT').mtz_object().write(file_name=fcalc_file)
     else:
       sig_fcalc.as_mtz_dataset('FWTsum').mtz_object().write(file_name=fcalc_file)
+
+# write density map
+
+#    if not partial_sum_mode:
+#      symmetry_flags = maptbx.use_space_group_symmetry
+#      dmap = avg_fcalc.fft_map(d_min=d_min,resolution_factor=0.5,symmetry_flags=symmetry_flags)
+#      dmap.apply_volume_scaling()
+#      dmap = avg_fcalc.fft_map(f_000=f_000.f_000)
+#      dmap.as_ccp4_map(file_name=density_file)
 
 # write icalc
 
