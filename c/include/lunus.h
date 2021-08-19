@@ -28,6 +28,14 @@
  * Defines:
  */
 
+#ifndef LUNUS_NUM_IBLOCKS
+#define LUNUS_NUM_IBLOCKS 1
+#endif
+
+#ifndef LUNUS_NUM_JBLOCKS
+#define LUNUS_NUM_JBLOCKS 1
+#endif
+
 /*
  * Data set selection:
  */

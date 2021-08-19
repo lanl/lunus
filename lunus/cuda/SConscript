@@ -1,0 +1,53 @@
+Import("env", "env_etc")
+
+# remove -ffast-math compile option
+lunus_cuda_env = env.Clone()
+ccflags = lunus_cuda_env['SHCCFLAGS']
+o = '-ffast-math'
+if o in ccflags:
+  ccflags.remove(o)
+lunus_cuda_env.Replace(SHCCFLAGS=ccflags)
+
+#if (env_etc.enable_cuda):
+#  lunus_cuda_env.Prepend(CPPFLAGS=["-DCUDAREAL=double"])
+#  lunus_cuda_obj = simtbx_gpu_env.SharedObject(
+#    target="#lunus/cuda/cuda_ext.o",
+#    source=[
+#      "cuda_ext.cpp",
+#    ]
+#  )
+
+import os
+import libtbx.load_env
+
+Import("env_boost_python_ext")
+env_bpl = env_boost_python_ext.Clone()
+
+env_etc.include_registry.append(
+    env=env_bpl,
+    paths=env_etc.lunus_common_includes + [env_etc.python_include])
+
+if (env_etc.enable_cuda):
+  # For now do all calculations in double precision to agree with CPU tests
+#  env_bpl.Prepend(NVCCFLAGS=["-DCUDAREAL=double"])
+  # Flag header to declare the cuda wrapper
+#  env_bpl.Prepend(NVCCFLAGS=["-DNANOBRAGG_HAVE_CUDA"])
+#  env_bpl.Prepend(NVCCFLAGS=["-DHAVE_NANOBRAGG_SPOTS_CUDA"])
+  cuda_src = []
+  cuda_src.append("lsort.cu")
+
+  env_bpl.Prepend(CPPPATH=[env_etc.boost_adaptbx_include,
+    env_etc.boost_include])
+
+  cuda_lib = env_bpl.cudaSharedLibrary(
+    target = "#lib/liblunus_cuda",
+    source = cuda_src)
+
+  env.Prepend(LIBS=["liblunus_cuda"])
+
+#  env.SharedLibrary(
+#    target="#lib/simtbx_gpu_ext",
+#    source=[
+#      simtbx_gpu_obj,"#simtbx/nanoBragg/nanoBragg"
+#    ]
+#  )

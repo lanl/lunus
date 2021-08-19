@@ -136,7 +136,7 @@ def process_one_glob():
 
     from dxtbx.imageset import ImageSetFactory
     from dxtbx.model.experiment_list import Experiment, ExperimentList
-    from dxtbx.serialize import dump
+#    from dxtbx.serialize import dump
 
     imnum=0
 
