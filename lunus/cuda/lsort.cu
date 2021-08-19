@@ -91,7 +91,7 @@ void Initialize(
 
 extern "C" void quickSortListCUB(size_t arr[], size_t stack[], size_t num_arrays, size_t array_size)
 {
-  size_t i, j;
+  size_t i;
 
  // int num_items = array_size-1;     // CUB <--- quickSortIterative
     // SEGMENTED SNIPPET from : https://nvlabs.github.io/cub/structcub_1_1_device_segmented_radix_sort.html#a175a8f431517e609e3d683076de86402
@@ -100,7 +100,7 @@ extern "C" void quickSortListCUB(size_t arr[], size_t stack[], size_t num_arrays
   int   *d_offsets             = new int[num_segments+1];
   size_t *d_keys_in;
   size_t *d_keys_out;
-  size_t *h_keys_out;
+//  size_t *h_keys_out;
   
   // Allocate device arrays
 //  DoubleBuffer<unsigned long> d_keys;
@@ -109,7 +109,7 @@ extern "C" void quickSortListCUB(size_t arr[], size_t stack[], size_t num_arrays
   CubDebugExit(g_allocator.DeviceAllocate((void**)&d_keys_in, sizeof(size_t) * array_size*num_segments));
   CubDebugExit(g_allocator.DeviceAllocate((void**)&d_keys_out, sizeof(size_t) * array_size*num_segments));
   CubDebugExit(g_allocator.DeviceAllocate((void**)&d_offsets, sizeof(int) * (num_segments+1)));
-  h_keys_out = new size_t[num_segments*array_size];
+//  h_keys_out = new size_t[num_segments*array_size];
   
   for (i=0; i<=num_segments;i++) {
     h_offsets[i] = (int)(i*array_size);
