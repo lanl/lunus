@@ -1,0 +1,3 @@
+[submodule "lunus/cuda/cub"]
+	path = lunus/cuda/cub
+	url = https://github.com/NVIDIA/cub.git
