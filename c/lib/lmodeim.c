@@ -419,8 +419,11 @@ int lmodeim(DIFFIMAGE *imdiff_in)
       //#pragma omp target map(to:wlen,num_per_jblock,num_per_iblock)  
       //#endif
       tic = ltime();
-      //      quickSortListCUB(window,stack,num_per_iblock*num_per_jblock,wlen);
+#ifdef USE_CUDA
+      quickSortListCUB(window,stack,num_per_iblock*num_per_jblock,wlen);
+#else
       quickSortList(window,stack,num_per_iblock*num_per_jblock,wlen);
+#endif
       toc = ltime();
       tsort = toc - tic;
 

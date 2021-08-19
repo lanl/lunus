@@ -51,9 +51,15 @@ env_lunus.Replace(CCFLAGS = replacement_ccflags)
 
 #env_lunus.Prepend(CCFLAGS=["-g","-DUSE_OPENMP","-I/opt/local/include/libomp","-Xpreprocessor","-fopenmp"])
 #env_lunus.Prepend(SHCCFLAGS=["-g","-O2","-fopenmp","-DUSE_OPENMP","-Xpreprocessor"])
-env_lunus.Prepend(CCFLAGS=["-g","-O2","-fopenmp","-DUSE_OPENMP","-Xpreprocessor"])
+env_lunus.Prepend(CCFLAGS=["-Xpreprocessor"])
+if (env_etc.have_openmp):
+  env_lunus.Prepend(CCFLAGS=["-DUSE_OPENMP"])
+  env_lunus.Prepend(LIBS=["gomp"])
+if (env_etc.enable_cuda):
+  env_lunus.Prepend(CCFLAGS=["-DUSE_CUDA"])
+#env_lunus.Prepend(CCFLAGS=["-g","-O2","-fopenmp","-DUSE_OPENMP","-Xpreprocessor"])
 #env_lunus.Prepend(CCFLAGS=["-g","-O3","-fopenmp","-DUSE_OPENMP","-DUSE_OFFLOAD","-foffload=nvptx-none","-foffload=-lm","-foffload=-fPIC","-Xpreprocessor"])
-env_lunus.Prepend(LIBS=["gomp"])
+#env_lunus.Prepend(LIBS=["gomp"])
 #env_lunus.Prepend(LIBS=["gomp","cudart"])
 #env_lunus.Prepend(LIBPATH=["/opt/local/lib/libomp","/opt/cudatoolkit/10.0/lib64"])
 #env_lunus.Prepend(LIBPATH=["/opt/cudatoolkit/10.0/lib64"])

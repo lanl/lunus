@@ -1,8 +1,9 @@
-Import("env")
+Import("env","env_etc")
 env = env.Clone()
-env.Prepend(CCFLAGS=["-g","-O2","-fopenmp","-DUSE_OPENMP","-Xpreprocessor"])
-env.Prepend(LIBS=["lunus","gomp"])
-#env.Prepend(LIBS=["lunus","gomp","cudart"])
+env.Prepend(LIBS=["lunus"])
+if (env_etc.enable_cuda):
+  env.Prepend(LIBS=["lunus_cuda"])
+
 #env.Prepend(LIBPATH=["/opt/local/lib/libomp","/opt/cudatoolkit/10.0/lib64"])
 
 env.SharedLibrary(
