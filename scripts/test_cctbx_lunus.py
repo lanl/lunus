@@ -60,7 +60,7 @@ windim_ymin=100
 windim_xmax=2362
 windim_ymax=2426
 thrshim_min=0
-thrshim_max=50
+thrshim_max=30000
 modeim_bin_size=1
 modeim_kernel_width=20
 
