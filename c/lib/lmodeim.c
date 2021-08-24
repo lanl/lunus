@@ -197,9 +197,10 @@ int lmodeim(DIFFIMAGE *imdiff_in)
 
   static IMAGE_DATA_TYPE
     //IMAGE_DATA_TYPE
-    *image = NULL;
+    *image_all = NULL;
 
   IMAGE_DATA_TYPE
+    *image = NULL,
     maxval,
     minval,
     binsize;
@@ -208,6 +209,13 @@ int lmodeim(DIFFIMAGE *imdiff_in)
     return_value = 0;
 
   static size_t
+    //size_t
+    *image_mode_all = NULL,
+    *window_all = NULL,
+    *nvals_all = NULL,
+    *stack_all = NULL;
+
+  size_t
     //size_t
     *image_mode = NULL,
     *window = NULL,
@@ -220,7 +228,9 @@ int lmodeim(DIFFIMAGE *imdiff_in)
 
   size_t wlen = (imdiff_in->mode_height+2)*(imdiff_in->mode_width+2);
     
-  int pidx;
+  int 
+    num_panels,
+    pidx;
 
   double tic, toc, tmkarr, tsort, tmkimg;
 
@@ -249,6 +259,7 @@ int lmodeim(DIFFIMAGE *imdiff_in)
   //  fflush(stdout);
 
   imdiff = &imdiff_in[0];
+  num_panels = imdiff->num_panels;
 
   if (reentry == 2 || reentry == 3) {
     if (hpixels != imdiff->hpixels || vpixels != imdiff->vpixels) {
@@ -262,6 +273,8 @@ int lmodeim(DIFFIMAGE *imdiff_in)
   image_length = imdiff->image_length;
   hpixels = imdiff->hpixels;
   vpixels = imdiff->vpixels;
+  binsize = imdiff->mode_binsize;
+
 
   if (reentry == 0 || reentry == 1) {
 
@@ -282,34 +295,42 @@ int lmodeim(DIFFIMAGE *imdiff_in)
       if (num_per_iblock < num_this) num_per_iblock = num_this;
     }
 
-    image = (IMAGE_DATA_TYPE *)calloc(image_length,sizeof(IMAGE_DATA_TYPE));
-    image_mode = (size_t *)calloc(image_length,sizeof(size_t));
-    nvals = (size_t *)calloc(num_per_jblock*num_per_iblock,sizeof(size_t));
-    window = (size_t *)calloc(wlen*num_per_jblock*num_per_iblock,sizeof(size_t));
-    stack = (size_t *)calloc(wlen*num_per_jblock*num_per_iblock,sizeof(size_t));
-
     /* 
-     * Allocate working mode filetered image: 
+     * Allocate working arrays: 
      */ 
   
-    if (!image || !image_mode || !window || !stack) {
+    image_all = (IMAGE_DATA_TYPE *)calloc(image_length*num_panels,sizeof(IMAGE_DATA_TYPE));
+    image_mode_all = (size_t *)calloc(image_length*num_panels,sizeof(size_t));
+    nvals_all = (size_t *)calloc(num_per_jblock*num_per_iblock*num_panels,sizeof(size_t));
+    window_all = (size_t *)calloc(wlen*num_per_jblock*num_per_iblock*num_panels,sizeof(size_t));
+    stack_all = (size_t *)calloc(wlen*num_per_jblock*num_per_iblock*num_panels,sizeof(size_t));
+
+    if (!image_all || !image_mode_all || !window_all || !stack_all) {
       sprintf(imdiff->error_msg,"\nLMODEIM:  Couldn't allocate arrays.\n\n");
       return_value = 1;
       goto CloseShop;
     }
 
 #ifdef USE_OFFLOAD
-#pragma omp target enter data map(alloc:image[0:image_length],image_mode[0:image_length])
-#pragma omp target enter data map(alloc:window[0:wlen*num_per_jblock*num_per_iblock],stack[0:wlen*num_per_jblock*num_per_iblock],nvals[0:num_per_jblock*num_per_iblock])
+#pragma omp target enter data map(alloc:image_all[0:image_length*num_panels],image_mode_all[0:image_length*num_panels])
+#pragma omp target enter data map(alloc:window_all[0:wlen*num_per_jblock*num_per_iblock*num_panels],stack_all[0:wlen*num_per_jblock*num_per_iblock*num_panels],nvals_all[0:num_per_jblock*num_per_iblock*num_panels])
 #endif
 
   } 
 
+  size_t num_mode_values=0, num_median_values=0, num_med90_values=0, num_this_values=0, num_ignored_values=0;
+
   //  printf("LMODEIM: mode_height = %d, mode_width = %d, num_panels = %d\n",imdiff_in->mode_height,imdiff_in->mode_width,imdiff_in->num_panels);
 
-  for (pidx = 0; pidx < imdiff_in->num_panels; pidx++) {
-    size_t num_mode_values=0, num_median_values=0, num_med90_values=0, num_this_values=0, num_ignored_values=0;
+  IMAGE_DATA_TYPE overload_tag = imdiff->overload_tag;
+  IMAGE_DATA_TYPE ignore_tag = imdiff->ignore_tag;
+
+  int got_first_val = 0;  
+    
+  for (pidx = 0; pidx < num_panels; pidx++) {
     imdiff = &imdiff_in[pidx];
+    image = &image_all[pidx*image_length];
+     
     if (pidx != imdiff->this_panel) {
       perror("LMODEIM: Image panels are not indexed sequentially. Aborting\n");
       exit(1);
@@ -321,14 +342,8 @@ int lmodeim(DIFFIMAGE *imdiff_in)
 
     memcpy(image, imdiff->image, image_length*sizeof(IMAGE_DATA_TYPE));
 
-    IMAGE_DATA_TYPE overload_tag = imdiff->overload_tag;
-    IMAGE_DATA_TYPE ignore_tag = imdiff->ignore_tag;
-    
-
     // Compute min and max for image
 
-    int got_first_val = 0;
-    
     size_t index; 
 
     for (index = 0; index < image_length; index++) {
@@ -345,27 +360,37 @@ int lmodeim(DIFFIMAGE *imdiff_in)
 	}
       }
     }
-    // Allocate the distribution
-
-    binsize = imdiff->mode_binsize;
-
-    // Compute the mode filtered image
-
+  }
 
 #ifdef USE_OFFLOAD
-#pragma omp target update to(image[0:image_length],image_mode[0:image_length])
+#pragma omp target update to(image_all[0:image_length],image_mode_all[0:image_length])
 #endif
 
-    double start = ltime();
+  // Compute the mode filtered image
 
-    tic = ltime();
+  double start = ltime();
 
-    for (jblock = 0; jblock < num_jblocks; jblock++) {
-      for (iblock = 0; iblock < num_iblocks; iblock++) {
-	size_t jlo = half_height + jblock;
-	size_t jhi = vpixels - half_height;     
-	size_t ilo = half_width + iblock;
-	size_t ihi = hpixels - half_width;     
+  tic = ltime();
+
+  for (jblock = 0; jblock < num_jblocks; jblock++) {
+    for (iblock = 0; iblock < num_iblocks; iblock++) {
+      size_t jlo = half_height + jblock;
+      size_t jhi = vpixels - half_height;     
+      size_t ilo = half_width + iblock;
+      size_t ihi = hpixels - half_width;     
+
+  for (pidx = 0; pidx < num_panels; pidx++) {
+
+    imdiff = &imdiff_in[pidx];
+    image = &image_all[pidx*image_length];
+    image_mode = &image_mode_all[pidx*image_length];
+    window = &window_all[pidx*wlen*num_per_jblock*num_per_iblock];
+    stack = &stack_all[pidx*wlen*num_per_jblock*num_per_iblock];
+    nvals = &nvals_all[pidx*num_per_jblock*num_per_iblock];
+     
+    // Allocate the distribution
+
+
 #ifdef USE_OPENMP
 #ifdef USE_OFFLOAD
 #pragma omp target map(to:minval,binsize,wlen,num_jblocks,num_iblocks, \
@@ -411,7 +436,7 @@ int lmodeim(DIFFIMAGE *imdiff_in)
 	    *this_nval = l;
 	}
       }
-
+  }
       toc = ltime();
       tmkarr = toc - tic;
 
@@ -420,9 +445,9 @@ int lmodeim(DIFFIMAGE *imdiff_in)
       //#endif
       tic = ltime();
 #ifdef USE_CUDA
-      quickSortListCUB(window,stack,num_per_iblock*num_per_jblock,wlen);
+      quickSortListCUB(window_all,stack_all,num_per_iblock*num_per_jblock*num_panels,wlen);
 #else
-      quickSortList(window,stack,num_per_iblock*num_per_jblock,wlen);
+      quickSortList(window_all,stack_all,num_per_iblock*num_per_jblock*num_panels,wlen);
 #endif
       toc = ltime();
       tsort = toc - tic;
@@ -458,6 +483,16 @@ int lmodeim(DIFFIMAGE *imdiff_in)
 #endif
       */
       tic = ltime();
+
+  for (pidx = 0; pidx < num_panels; pidx++) {
+
+    imdiff = &imdiff_in[pidx];
+    image = &image_all[pidx*image_length];
+    image_mode = &image_mode_all[pidx*image_length];
+    window = &window_all[pidx*wlen*num_per_jblock*num_per_iblock];
+    stack = &stack_all[pidx*wlen*num_per_jblock*num_per_iblock];
+    nvals = &nvals_all[pidx*num_per_jblock*num_per_iblock];
+
 #ifdef USE_OPENMP
 #pragma omp parallel for default(shared) \
   private(i,j) \
@@ -576,6 +611,7 @@ int lmodeim(DIFFIMAGE *imdiff_in)
 	    //        printf("Stop tm = %ld,th = %ld,i = %d,j = %d\n",tm,th,i,j);
 	  }
 	}
+  }
       toc = ltime();
       tmkimg = toc - tic;
 #ifdef DEBUG
@@ -596,6 +632,15 @@ int lmodeim(DIFFIMAGE *imdiff_in)
 #ifdef DEBUG
     printf("LMODEIM: %g seconds, num_mode_values=%ld,num_median_values=%ld,num_this_values=%ld,num_med90_values=%ld,num_ignored_values=%ld\n",tel,num_mode_values,num_median_values,num_this_values,num_med90_values,num_ignored_values);
 #endif
+
+  for (pidx = 0; pidx < num_panels; pidx++) {
+
+    imdiff = &imdiff_in[pidx];
+    image = &image_all[pidx*image_length];
+    image_mode = &image_mode_all[pidx*image_length];
+    window = &window_all[pidx*wlen*num_per_jblock*num_per_iblock];
+    stack = &stack_all[pidx*wlen*num_per_jblock*num_per_iblock];
+    nvals = &nvals_all[pidx*num_per_jblock*num_per_iblock];
     
 #ifdef USE_OPENMP
 #ifdef USE_OFFLOAD
@@ -641,26 +686,33 @@ int lmodeim(DIFFIMAGE *imdiff_in)
 	}
       }
     }
-	  
+  }
+
 #ifdef USE_OFFLOAD
-#pragma omp target update from(image[0:image_length]) 
+#pragma omp target update from(image_all[0:image_length]) 
 #endif
+
+  for (pidx = 0; pidx < num_panels; pidx++) {
+
+    imdiff = &imdiff_in[pidx];
+    image = &image_all[pidx*image_length];
+
     memcpy(imdiff->image,image,image_length*sizeof(IMAGE_DATA_TYPE));
+  }
 
     if (reentry == 0 || reentry == 3) {
 
 #ifdef USE_OFFLOAD
-#pragma omp target exit data map(delete:image[0:image_length],image_mode[0:image_length],window[0:wlen*num_per_iblock*num_per_jblock],stack[0:wlen*num_per_iblock*num_per_jblock])
+#pragma omp target exit data map(delete:image_all[0:image_length*num_panels],image_mode_all[0:image_length*num_panels],window_all[0:wlen*num_per_iblock*num_per_jblock*num_panels],stack[0:wlen*num_per_iblock*num_per_jblock*num_panels])
 #endif
 
       //      printf("MODEIM: Freeing arrays\n");
-      free(image);
-      free(image_mode);
-      free(window);
-      free(nvals);
-      free(stack);
+      free(image_all);
+      free(image_mode_all);
+      free(window_all);
+      free(nvals_all);
+      free(stack_all);
     }
-  }
  CloseShop:
   return(return_value);
 }
