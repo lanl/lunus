@@ -97,7 +97,7 @@ extern "C" void quickSortListCUB(size_t arr[], size_t stack[], size_t num_arrays
     // SEGMENTED SNIPPET from : https://nvlabs.github.io/cub/structcub_1_1_device_segmented_radix_sort.html#a175a8f431517e609e3d683076de86402
   int num_segments =(int)num_arrays;                                         // CUB segmented Radix Sort
   int   *h_offsets             = new int[num_segments+1];
-  int   *d_offsets             = new int[num_segments+1];
+  int   *d_offsets;
   size_t *d_keys_in;
   size_t *d_keys_out;
 //  size_t *h_keys_out;
@@ -206,6 +206,7 @@ extern "C" void quickSortListCUB(size_t arr[], size_t stack[], size_t num_arrays
     // Cleanup
   if (d_keys_in) CubDebugExit(g_allocator.DeviceFree(d_keys_in));
   if (d_keys_out) CubDebugExit(g_allocator.DeviceFree(d_keys_out));
+  if (d_offsets) CubDebugExit(g_allocator.DeviceFree(d_offsets));
   if (h_offsets) delete[] h_offsets;
 
 
