@@ -56,7 +56,7 @@ if (env_etc.have_openmp):
   env_lunus.Prepend(CCFLAGS=["-DUSE_OPENMP"])
   env_lunus.Prepend(LIBS=["gomp"])
 if (env_etc.enable_cuda):
-  env_lunus.Prepend(CCFLAGS=["-DUSE_CUDA","-DLUNUS_NUM_JBLOCKS=4"])
+  env_lunus.Prepend(CCFLAGS=["-DUSE_CUDA","-DLUNUS_NUM_JBLOCKS=16","-DLUNUS_NUM_IBLOCKS=8"])
 #env_lunus.Prepend(CCFLAGS=["-g","-O2","-fopenmp","-DUSE_OPENMP","-Xpreprocessor"])
 #env_lunus.Prepend(CCFLAGS=["-g","-O3","-fopenmp","-DUSE_OPENMP","-DUSE_OFFLOAD","-foffload=nvptx-none","-foffload=-lm","-foffload=-fPIC","-Xpreprocessor"])
 #env_lunus.Prepend(LIBS=["gomp"])
