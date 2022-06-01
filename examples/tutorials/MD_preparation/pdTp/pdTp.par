@@ -1,0 +1,140 @@
+* ---- 
+* Built parameters for pdTp.mol2 
+*    by user vzoete     Tue May 31 02:51:53 UTC 2022 
+* ---- 
+*
+
+BONDS
+PO4  O2CM  597.032     1.5100 
+PO4  OR    377.319     1.6300 
+OR   CR    363.214     1.4180 
+CR   CR    306.432     1.5080 
+CR   HCMM  342.991     1.0930 
+CR   NPDP  311.542     1.4510 
+NPDP CB    534.853     1.3260 
+CB   OR    404.019     1.3760 
+CB   NPYD  412.870     1.3330 
+CB   CB    401.068     1.3740 
+CB   CR    356.737     1.4860 
+CB   HCMM  381.853     1.0840 
+HOCC OR    564.143     0.9730 
+
+ANGLES
+CB   NPDP CB     71.678    122.7100 
+CB   NPDP CR     72.182    119.2360 
+NPDP CB   NPYD   70.454    128.3620 
+NPDP CB   OR     70.454    128.3620 
+NPYD CB   OR     95.283    115.8860 
+CB   NPYD CB     78.083    115.4060 
+NPYD CB   CB     42.892    126.1390 
+CB   CB   OR     69.663    116.4950 
+CB   CB   CB     48.145    119.9770 
+CB   CB   CR     57.788    120.4190 
+NPDP CB   CB     72.973    120.0520 
+NPDP CB   HCMM   50.304    113.3160 
+CB   CB   HCMM   40.517    120.5710 
+O2CM PO4  O2CM   89.813    122.8570 
+O2CM PO4  OR    108.020    109.6880 
+PO4  OR   CR     78.802    115.5810 
+OR   CR   CR     71.390    108.1330 
+OR   CR   HCMM   56.205    108.5770 
+CR   CR   HCMM   45.770    110.5490 
+HCMM CR   HCMM   37.134    108.8360 
+CR   CR   CR     61.243    109.6080 
+CR   OR   CR     86.143    106.9260 
+NPDP CR   OR     71.966    109.5000 
+NPDP CR   CR     84.848    106.3270 
+NPDP CR   HCMM   53.974    105.4810 
+CB   OR   HOCC   52.247    105.4090 
+CB   CR   HCMM   45.122    109.4910 
+
+DIHEDRALS
+NPDP CB   NPYD CB       3.500  2   180.00 
+NPDP CB   OR   HOCC     1.600  2   180.00 
+NPDP CB   CB   CB       3.500  2   180.00 
+NPDP CB   CB   CR       3.500  2   180.00 
+NPDP CR   OR   CR       0.100  3     0.00 
+NPDP CR   CR   CR       0.150  3     0.00 
+NPDP CR   CR   HCMM     0.150  3     0.00 
+CB   NPDP CB   CB       3.000  2   180.00 
+CB   NPDP CB   HCMM     3.000  2   180.00 
+CB   NPDP CR   OR       0.000  1     0.00 
+CB   NPDP CR   CR       0.000  1     0.00 
+CB   NPDP CR   HCMM     0.000  1     0.00 
+CB   NPYD CB   CB       3.500  2   180.00 
+CB   NPYD CB   OR       3.500  2   180.00 
+NPYD CB   NPDP CB       3.000  2   180.00 
+NPYD CB   NPDP CR       3.000  2   180.00 
+NPYD CB   OR   HOCC     1.600  2   180.00 
+NPYD CB   CB   CB       3.500  2   180.00 
+NPYD CB   CB   CR       3.500  2   180.00 
+CB   CB   CB   HCMM     3.500  2   180.00 
+CB   CB   CR   HCMM    -0.210  2   180.00 
+CB   CB   CR   HCMM     0.196  3     0.00 
+CB   CB   OR   HOCC     1.401  2   180.00 
+CB   CB   NPDP CR       3.000  2   180.00 
+CB   NPDP CB   OR       3.000  2   180.00 
+CB   CB   CB   OR       3.500  2   180.00 
+PO4  OR   CR   CR       0.100  3     0.00 
+PO4  OR   CR   HCMM     0.030  3     0.00 
+O2CM PO4  OR   CR       0.603  1     0.00 
+O2CM PO4  OR   CR       0.457  2   180.00 
+O2CM PO4  OR   CR       0.306  3     0.00 
+OR   CR   CR   OR       0.204  1     0.00 
+OR   CR   CR   OR       0.699  2   180.00 
+OR   CR   CR   OR       0.480  3     0.00 
+OR   CR   CR   CR      -0.344  1     0.00 
+OR   CR   CR   CR       0.879  2   180.00 
+OR   CR   CR   CR       0.238  3     0.00 
+OR   CR   CR   HCMM    -0.327  1     0.00 
+OR   CR   CR   HCMM     0.536  2   180.00 
+OR   CR   CR   HCMM     0.140  3     0.00 
+CR   CR   OR   CR      -0.341  1     0.00 
+CR   CR   OR   CR       0.378  2   180.00 
+CR   CR   OR   CR       0.378  3     0.00 
+CR   CR   CR   CR       0.051  1     0.00 
+CR   CR   CR   CR       0.341  2   180.00 
+CR   CR   CR   CR       0.166  3     0.00 
+CR   CR   CR   HCMM     0.320  1     0.00 
+CR   CR   CR   HCMM    -0.315  2   180.00 
+CR   CR   CR   HCMM     0.132  3     0.00 
+CR   OR   CR   HCMM     0.285  1     0.00 
+CR   OR   CR   HCMM     0.160  2   180.00 
+CR   OR   CR   HCMM     0.285  3     0.00 
+CR   NPDP CB   OR       3.000  2   180.00 
+CR   NPDP CB   HCMM     3.000  2   180.00 
+OR   CB   CB   CR       3.500  2   180.00 
+CR   CB   CB   HCMM     3.500  2   180.00 
+HCMM CR   CR   HCMM     0.142  1     0.00 
+HCMM CR   CR   HCMM    -0.693  2   180.00 
+HCMM CR   CR   HCMM     0.157  3     0.00 
+
+IMPROPER
+NPDP CB   CR   CB       1.799  0     0.00 
+CB   NPYD NPDP OR       2.519  0     0.00 
+CB   CB   NPYD OR       2.519  0     0.00 
+CR   OR   NPDP CR       0.000  0     0.00 
+CR   OR   NPDP HCMM     0.000  0     0.00 
+CR   CR   OR   CR       0.000  0     0.00 
+CR   CR   OR   HCMM     0.000  0     0.00 
+CR   OR   CR   HCMM     0.000  0     0.00 
+PO4  O2CM OR   O2CM     0.000  0     0.00 
+CR   CR   CR   OR       0.000  0     0.00 
+CB   CB   CB   CR       2.879  0     0.00 
+CR   CR   CR   HCMM     0.000  0     0.00 
+CB   CB   NPDP HCMM     2.519  0     0.00 
+CR   HCMM CB   HCMM     0.000  0     0.00 
+
+NONBONDED nbxmod  5 atom cdiel shift vatom vdistance vswitch - 
+cutnb 14.0 ctofnb 12.0 ctonnb 10.0 eps 1.0 e14fac 1.0 wmin 1.5 
+NPDP    0.000000  -0.110000     2.000000    
+CB      0.000000  -0.070000     1.992400    
+NPYD    0.000000  -0.200000     1.850000    
+PO4     0.000000  -0.585000     2.150000    
+O2CM    0.000000  -0.120000     1.700000    
+OR      0.000000  -0.152100     1.770000    
+CR      0.000000  -0.055000     2.175000   0.000000  -0.010000     1.900000    
+HCMM    0.000000  -0.022000     1.320000    
+HOCC    0.000000  -0.046000     0.224500    
+
+
