@@ -635,7 +635,7 @@ int main(int argc, char *argv[])
     for (j=0; j<lat->lattice_length; j++) {
       if (latctsum[j] != 0) {
 	lat->lattice[j] = latsum[j]/(float)latctsum[j];
-	if isnan(lat->lattice[j]) lat->lattice[j] = lat->mask_tag;
+	if (isnan(lat->lattice[j])) lat->lattice[j] = lat->mask_tag;
       } else {
 	lat->lattice[j] = lat->mask_tag;
       }
