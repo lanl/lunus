@@ -62,11 +62,21 @@ srcfile_list = glob.glob(glob_str)
 env_lunus.StaticLibrary(target='#lib/lunus',
   source = [os.path.join(correct_prefix,"c","lib",os.path.basename(srcfile)) for srcfile in srcfile_list],CPPPATH=[CPPP] )
 
+
+if sys.platform.startswith('linux') and env_etc.enable_kokkos:
+  env_lunus.SConscript("lunus/kokkos/SConscript",exports={ 'env' : env_lunus })
+  lunus_program_libs = ['lunus','lunus_kokkos','m']
+else:
+  if sys.platform.startswith('linux') and env_etc.enable_cuda:
+    env_lunus.SConscript("lunus/cuda/SConscript",exports={ 'env' : env_lunus })
+    lunus_program_libs = ['lunus','lunus_cuda','m']
+  else:
+    lunus_program_libs = ['lunus','m']
+
 glob_str = os.path.join(env_etc.lunus_dist,"c","src","*.c")
 srcfile_list = glob.glob(glob_str)
-
 for f in [os.path.join(correct_prefix,"c","src",os.path.basename(srcfile)) for srcfile in srcfile_list]:
-    env_lunus.Program('#bin/{}'.format("lunus."+os.path.basename(f).split('.')[0]),f,LIBS=['lunus','m'],CPPPATH=[CPPP])
+    env_lunus.Program('#bin/{}'.format("lunus."+os.path.basename(f).split('.')[0]),f,LIBS=lunus_program_libs,CPPPATH=[CPPP])
 
 if (not env_etc.no_boost_python):
 
@@ -88,9 +98,4 @@ if (not env_etc.no_boost_python):
 
   env_etc.enable_more_warnings(env=env_lunus)
   env_lunus.SConscript("lunus/SConscript",exports={ 'env' : env_lunus })
-  if sys.platform.startswith('linux') and env_etc.enable_kokkos:
-    env_lunus.SConscript("lunus/kokkos/SConscript",exports={ 'env' : env_lunus })
-  else:
-    if sys.platform.startswith('linux') and env_etc.enable_cuda:
-      env_lunus.SConscript("lunus/cuda/SConscript",exports={ 'env' : env_lunus })
 
