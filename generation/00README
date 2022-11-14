@@ -1,7 +1,0 @@
-denzo/ - Denzo input/output for processing oscs for crystal
-	orientation and Bragg peak measurements, and obtaining output
-	files with still crystal orientations.
-genlat/ - Generating a lattice from processed images. 
-image-proc/ - Image processing
-image-scale/ - Image scaling
-scalepack/ - Scalepack input/output for processing oscs.

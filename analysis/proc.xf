@@ -1,2 +1,0 @@
-#!/bin/csh -f -x
-xflt $1 {$1:r}.xf1.lat 1

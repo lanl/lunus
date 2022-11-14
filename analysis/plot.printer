@@ -1,6 +1,0 @@
-set term postscript eps 14
-set output "|lp"
-replot
-set output 
-set term x11
-replot

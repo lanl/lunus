@@ -1,4 +1,0 @@
-#/bin/csh -f -x
-ls -1 proc/snc???.wmpn.tif | gawk '{print "proc.makeline "$1}' | csh > genlat.input
-echo '.' >> genlat.input
-rm scale-factor

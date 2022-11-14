@@ -1,2 +1,0 @@
-#!/bin/csh -f -x
-symlt $1 {$1:r}.sym.lat 1

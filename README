@@ -23,9 +23,6 @@ All rights reserved.
 
 LUNUS software for diffuse scattering from protein crystals
 
-analysis/ - scripts for data analysis
 c/ - source and binaries for diffuse scattering routines
-docs/ - documentation for diffuse scattering analysis
-generation/ - map generation files
-visualization/ - map visualization files
-xplor/ - simulation files
+examples/ - some examples
+test/ - test suite

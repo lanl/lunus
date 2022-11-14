@@ -1,5 +1,0 @@
-proc/ - data directory and target directory for scripts
-proc.makeref* - build a reference profile
-proc.scale* - generate a scale factor and an error estimate for an image
-reference.rf - reference profile
-xx.avg - <II> for the reference profile

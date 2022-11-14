@@ -1,3 +1,0 @@
-#!/bin/csh -f -x
-set r1={$1:r}
-polarim $r1.tif {$r1}p.tif 534 500 57.42 .93 0

@@ -1,1 +1,0 @@
-seesh $1 $2 $3 | pxcat -fr 256,256,1 | px2ps -g > $1.ps

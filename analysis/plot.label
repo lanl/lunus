@@ -1,2 +1,0 @@
-set xlabel "Scattering Vector Length (1/Angstrom)"
-set ylabel "RMS Intensity (ADU)"

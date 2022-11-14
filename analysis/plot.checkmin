@@ -1,2 +1,0 @@
-set xrange [0.1:0.5]
-plot "proc/dfsq.0.8.sqrt.asc" title "Scale 0.8" with lines, "proc/dfsq.0.9.sqrt.asc" title "Scale 0.9" with lines, "proc/dfsq.1.0.sqrt.asc" title "Scale 1.0" with lines, "proc/dfsq.1.1.sqrt.asc" title "Scale 1.1" with lines, "proc/dfsq.1.2.sqrt.asc" title "Scale 1.2" with lines

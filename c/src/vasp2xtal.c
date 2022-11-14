@@ -1,7 +1,7 @@
 /* VASP2XTAL.C - Convert VASP cube2map charge density lattice to crystallographic charge.
    
    Author: Mike Wall
-   Date: 3/21/95
+   Date: 2/21/2014
    Version: 1.
    
    Usage:

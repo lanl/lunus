@@ -1,8 +1,0 @@
-#!/bin/csh -f -x
-set r1={$1:r}
-avgrim $r1.tif proc/$r1.rf 534 500 
-binasc 2 < proc/$r1.rf > proc/$r1.asc
-subrfim proc/$r1.rf $r1.tif {$r1}s.tif 534 500
-avsqrim {$r1}s.tif proc/{$r1}s.sqr.rf 534 500
-binasc 2 < proc/{$r1}s.sqr.rf > proc/{$r1}s.sqr.asc
-rm proc/{$r1}s.sqr.rf {$r1}s.tif

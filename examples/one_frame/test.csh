@@ -1,1 +1,0 @@
-libtbx.python integrate_diffuse.py indexing.data=snc_reindex_001.img indexing.data=snc_reindex_021.img indexing.data=snc_reindex_043.img index_only=True analyze.image=45 cell.a=48.3566 cell.b=48.3566 cell.c=63.2069 inputlist.fname=genlat.input latxdim=64 latydim=64 latzdim=64 diffuse.lattice.fname=snc_new_fix_cube.vtk np=4
