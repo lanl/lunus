@@ -74,8 +74,8 @@ int main(int argc, char *argv[])
 	  }
 	  break;
 	  default:
-	  printf("\n Usage: mulsclt <input lattice> <output lattice> "
-		 "<scale factor>\n\n");
+	  printf("\n Usage: samplt <input lattice> <output lattice> "
+		 "\n\n");
 	  exit(0);
 	}
   

@@ -1,13 +1,12 @@
-/* RAW2IMG.C - Convert a raw image to a .img file, given a template
+/* RAW2IM.C - Convert a raw image to a SMV or CBF file, given a template
    
    Author: Mike Wall 
    Date: 1/15/16
    Version: 1.
    
-   "raw2img <image in> <image out> <template>"
+   "raw2im <image in> <image out> <template>"
 
-   Input is raw image and template .img.  Output is 16-bit 
-   .img .
+   Input is raw image and template image. Output is a new image using the raw data 
 
    */
 

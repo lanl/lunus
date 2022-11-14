@@ -1,3 +1,0 @@
-seesh $1 $2 $3 | pxcat -fr 256,256,1 | px2tiff -g $TMPDIR/tmpimage.$USER
-xv $TMPDIR/tmpimage.$USER
-rm $TMPDIR/tmpimage.$USER

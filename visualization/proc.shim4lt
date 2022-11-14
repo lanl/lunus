@@ -1,6 +1,0 @@
-#!/bin/csh -f -x
-cp $1 tmp.lat
-echo $2 $3 > bounds
-perl -e 'for($i = 3;$i <= 14;$i++){print "shim4lt tmp.lat shim.",$i,".sh ",$i," ",$i,"\n"}' | csh -f -x
-perl -e 'for($i = 3;$i <= 14;$i++){print "xseesh2ps shim.",$i,".sh ",`cat bounds`,"\n"}' | csh -f -x
-rm shim.*.sh

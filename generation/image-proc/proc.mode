@@ -1,7 +1,0 @@
-#!/bin/csh -f -x
-set r1={$1:r}
-thrshim $r1.tif 0 10000 image.tif
-windim image.tif 50 974 80 974 $r1.w.tif
-modeim $r1.w.tif $r1.wm.tif 15 10
-rm $r1.w.tif
-rm image.tif

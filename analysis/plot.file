@@ -1,6 +1,0 @@
-set term postscript eps 14
-set output "plotfile.ps"
-replot
-set term x11
-set output
-replot

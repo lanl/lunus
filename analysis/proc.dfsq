@@ -1,4 +1,0 @@
-#!/bin/csh -f -x
-dfsqrlt $1 $2 $3
-binasc 2 < $3 > {$3:r}.asc
-gawk '{print $1*'`cat voxel_diagonal`'" "sqrt($2)}' {$3:r}.asc > {$3:r}.sqrt.asc

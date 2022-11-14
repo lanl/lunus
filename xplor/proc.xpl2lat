@@ -1,7 +1,0 @@
-#/bin/csh -f -x
-gawk '{print $2" "$3" "$4" "$6*$6}' $1 > tmp.hkl
-tail +4 tmp.hkl > tmp1.hkl
-gawk '{print $1" "$2" "$3" "$4}' tmp1.hkl > tmp2.hkl
-binasc 8 < tmp2.hkl > tmp2.map
-map2lat tmp2.map {$1:r}.lat 0 30 31 31 31 -1
-rm tmp.hkl tmp1.hkl tmp2.map tmp2.hkl

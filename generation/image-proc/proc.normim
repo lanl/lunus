@@ -1,3 +1,0 @@
-#!/bin/csh -f -x
-set r1={$1:r}
-normim $r1.tif {$r1}n.tif 534 500 57.40 0 0

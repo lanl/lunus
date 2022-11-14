@@ -109,7 +109,7 @@ int main(int argc, char *argv[])
   }
 
 /*
- * Generate the sum lattice:
+ * Calculate the difference:
  */
 
   lsubenvlt(lat1,lat2);

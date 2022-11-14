@@ -1,7 +1,0 @@
-dbatch.log.gz - session log from denzo
-dbatch1.snco - input file for first pass
-dbatch2.snco - input file for second pass
-index.snco - input file for first image hand-refinement
-refcyc1.snco - refinement cycle for first pass
-refcyc2.snco - refinement cycle for second pass
-snc???.x - output files containing refinement parameters

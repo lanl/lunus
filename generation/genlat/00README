@@ -1,5 +1,0 @@
-genlat.input - input file for program genlat
-proc/ - data directory and target directory for script output
-proc.genlat* - script to run genlat
-proc.genlat.input* - script to generate genlat.input file
-proc.makeline* - script to generate a single line of genlat.input

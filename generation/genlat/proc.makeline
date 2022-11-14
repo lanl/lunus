@@ -1,4 +1,0 @@
-#!/bin/csh -f -x
-set r1={$1:r}
-cat $r1.scale > scale-factor
-echo $r1:r".x "$r1".tif "`cat scale-factor`

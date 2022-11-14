@@ -1,14 +1,14 @@
-/* MAP2LAT.C - Convert standard CCP4 .map format to internal .lat.
+/* SHIFTMAP.C - Translate a ccp4 map.
    
    Author: Mike Wall
-   Date: 2/13/2014
+   Date: 5/4/2015
    Version: 1.
    
    Usage:
-   		"map2lat <input lattice> <output lattice>"
+   		"shiftmap <input ccp4 map> <output ccp4 map> <x trans> <y trans> <z trans>"
 
 		Input is a map in CCP4 format. 
-			Output is a lattice in internal format.  
+			Output is a map translated by the given shifts.  
    */
 
 #include<mwmask.h>
@@ -17,6 +17,7 @@ int main(int argc, char *argv[])
 {
   FILE
     *mapin,
+    *mapout,
     *latticeout;
   
   char
@@ -28,13 +29,14 @@ int main(int argc, char *argv[])
     k,
     num_read,
     num_wrote;
-  
-  LAT3D 
-    *lat;
+
+  int
+    decimation_factor;
 
   CCP4MAP
     *map;
   
+  struct xyzcoords shift;
 /*
  * Set input line defaults:
  */
@@ -45,12 +47,18 @@ int main(int argc, char *argv[])
  * Read information from input line:
  */
 	switch(argc) {
+	  case 6:
+	    shift.z=atof(argv[5]);
+	  case 5:
+	    shift.y=atof(argv[4]);
+	  case 4:
+	    shift.x=atof(argv[3]);
 	  case 3:
-	  if (strcmp(argv[2],"-") == 0) {
-	    latticeout = stdout;
-	  }
+	    if (strcmp(argv[2],"-") == 0) {
+	      mapout = stdout;
+	    }
 	  else {
-	    if ((latticeout = fopen(argv[2],"wb")) == NULL) {
+	    if ((mapout = fopen(argv[2],"wb")) == NULL) {
 	      printf("\nCan't open %s.\n\n",argv[2]);
 	      exit(0);
 	    }
@@ -68,18 +76,9 @@ int main(int argc, char *argv[])
 	  }
 	  break;
 	  default:
-	  printf("\n Usage: ccp4map2lat <input ccp4 map> <output lattice>\n\n");
+	  printf("\n Usage: shiftmap <input ccp4 map> <output ccp4 map> <x trans> <y trans> <z trans>\n\n");
 	  exit(0);
 	}
-  
-  /*
-   * Initialize lattice:
-   */
-
-  if ((lat = linitlt()) == NULL) {
-    perror("Couldn't initialize lattice.\n\n");
-    exit(0);
-  }
   
   /*
    * Initialize map:
@@ -101,23 +100,24 @@ int main(int argc, char *argv[])
     exit(0);
   }
 
-  /* 
-   * Copy map to lattice:
+  
+
+  /*
+   * Translate the map:
    */
 
-  if (lcpmaplt(map,lat) != 0) {
-    perror("Couldn't copy map to lattice\n\n");
-    exit(0);
-  }
-
+  map->shift.x=shift.x;
+  map->shift.y=shift.y;
+  map->shift.z=shift.z;
+  lshiftmap(map);
 
 /*
- * Write lattice to output file:
+ * Write map to output file:
  */
 
-  lat->outfile = latticeout;
-  if (lwritelt(lat) != 0) {
-    perror("Couldn't write lattice.\n\n");
+  map->outfile = mapout;
+  if (lwritemap(map) != 0) {
+    perror("Couldn't write map.\n\n");
     exit(0);
   }
 
@@ -127,13 +127,13 @@ CloseShop:
    * Free allocated memory:
    */
 
-  lfreelt(lat);
+  //  lfreelt(lat);
 
   /*
    * Close files:
    */
   
   fclose(mapin);
-  fclose(latticeout);
+  fclose(mapout);
 }
 

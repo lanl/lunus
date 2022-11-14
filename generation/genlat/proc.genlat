@@ -1,2 +1,0 @@
-#/bin/csh -f -x
-genlat snc.lat 0 30 30 30 30 .25 534 500 57.42 < genlat.input
