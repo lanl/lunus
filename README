@@ -25,4 +25,6 @@ LUNUS software for diffuse scattering from protein crystals
 
 c/ - source and binaries for diffuse scattering routines
 examples/ - some examples
+lunus/ - hardware acceleration and python methods, including md code
 test/ - test suite
+scripts/ - some useful scripts
