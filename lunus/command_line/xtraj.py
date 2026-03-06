@@ -577,7 +577,7 @@ EOF
     stime = time.time()
     print("Will use ",ct," frames distributed over ",mpi_size," workers")
     if (mpi_size == nchunks):
-      print("Each worker will handle ",chunks_per_rank," chunks of ",chunksize," frames with one extra frame in the first ",extra_chunks," workers")
+      print("Each worker will handle ",chunks_per_rank," chunks of ",chunksize," frames with one extra frame in the first ",extra_frames," workers")
     else:
       print("Each worker will handle ",chunks_per_rank," chunks of ",chunksize," frames with one extra chunk in the first ",extra_chunks," workers.")
       if extra_frames != 0:
