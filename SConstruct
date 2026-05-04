@@ -21,7 +21,7 @@ if 'gcc' in compiler_string:
 elif 'clang' in compiler_string:
   env.compiler = 'clang'
 
-env.enable_openmp = False
+env.enable_openmp = True
 env.enable_cuda = False
 env.enable_kokkos = False
 
