@@ -709,6 +709,7 @@ EOF
           fcalc = miller_arrays[1]
         else:
           xrs_sel.scattering_type_registry(table=scattering_table)
+
           fcalc = xrs_sel.structure_factors(d_min=d_min).f_calc()
 
         if do_opt:
@@ -739,7 +740,7 @@ EOF
 
     chunk_ct = chunk_ct + 1
 
-    print("Worker ",work_rank," processed chunk ",chunk_ct," of ",nchunklist[work_rank]," with ",chunklist[work_rank]," frames in ",time.time()-mtime," seconds")
+    print("Worker ",work_rank,"on MPI rank ",mpi_rank," processed chunk ",chunk_ct," of ",nchunklist[work_rank]," with ",chunklist[work_rank]," frames in ",time.time()-mtime," seconds")
 
     if (chunk_ct >= nchunklist[work_rank]):
       break
