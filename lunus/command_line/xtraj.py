@@ -14,6 +14,8 @@
 from __future__ import print_function
 from iotbx.pdb import hierarchy
 from cctbx.array_family import flex
+import cProfile
+import pstats
 import mmtbx.utils
 import mmtbx.model
 from cctbx import maptbx
@@ -31,6 +33,8 @@ import subprocess
 import pickle
 import h5py
 import gemmi
+import io
+from iotbx.cif import model as cif_model
 
 def mpi_enabled():
   return 'OMPI_COMM_WORLD_SIZE' in os.environ.keys()
@@ -416,6 +420,9 @@ if __name__=="__main__":
       
 # If in diff_mode, read the reference .mtz files
 
+  profiler = cProfile.Profile()
+  #profiler.enable()
+
   if diff_mode:
     if mpi_rank == 0:      
       from iotbx.reflection_file_reader import any_reflection_file
@@ -607,6 +614,7 @@ EOF
   fcalc_list = None
   
   itime = time.time()
+
   
   for tt in ti:
     
@@ -694,7 +702,6 @@ EOF
     #        print ("Time to optimize = ",otime2-otime1)
 
     # select the atoms for the structure factor calculation
-
         xrs_sel = xrs.select(selection)
         if engine == "sfall":
           pdbtmp = xrs_sel.as_pdb_file()
@@ -710,19 +717,77 @@ EOF
           miller_arrays = hkl_in.as_miller_arrays()
           fcalc = miller_arrays[1]
         elif engine == "gemmi":
-          full_pdb_string = xrs_sel.as_pdb_file()
-          st = gemmi.read_pdb_string(full_pdb_string)
+          ffttime1 = time.time()
+          #cif_block = xrs_sel.as_cif_block()
+          #cif_doc_cctbx = cif_model.cif()
+          #cif_doc_cctbx["gemmi_transfer"] = cif_block
+    
+          #out = io.StringIO()
+          #cif_doc_cctbx.show(out=out)
+          #cif_string = out.getvalue()
+
+          # Parse mmCIF string natively in Gemmi C++ backend
+          #cif_doc_gemmi = gemmi.cif.read_string(cif_string)
+          st = gemmi.Structure()
+          st.cell = gemmi.UnitCell(*xrs_sel.unit_cell().parameters())
+          st.spacegroup_hm = xrs_sel.space_group().type().lookup_symbol()
+          
+          model = gemmi.Model("1")
+          chain = gemmi.Chain("A")
+          res = gemmi.Residue()
+          res.name = "UNK"
+          res.seqid = gemmi.SeqId("1")
+          
+          # Extract flat arrays for fast iteration
+          coords = xrs.sites_cart()
+          u_isos = xrs.extract_u_iso_or_u_equiv()
+          occs = xrs.scatterers().extract_occupancies()
+          elements = [s.scattering_type for s in xrs.scatterers()]
+          
+          u_to_b = 8.0 * np.pi**2
+    
+          # zip() executes in C, minimizing Python loop overhead
+          for (x, y, z), u, occ, el in zip(coords, u_isos, occs, elements):
+            atom = gemmi.Atom()
+            atom.name = el
+            atom.element = gemmi.Element(el)
+            atom.pos = gemmi.Position(x, y, z)
+            atom.b_iso = u * u_to_b
+            atom.occ = occ
+            res.add_atom(atom)
+        
+          chain.add_residue(res)
+          model.add_chain(chain)
+          st.add_model(model)
+
+          #print("Time after writing pdb file string = ",time.time() - ffttime1)
+          #st = gemmi.make_structure_from_block(cif_doc_gemmi.sole_block())
+          #full_cif_string = xrs_sel.as_cif_string()
+          #st = gemmi.read_pdb_string(full_pdb_string)
+          print("Time after cctbx -> gemmi conversion = ",time.time() - ffttime1)
           calc = gemmi.DensityCalculatorX()
           calc.d_min = d_min
+          calc.blur = 0.0
+          calc.cutoff = 0.01
           calc.grid.unit_cell = st.cell
           calc.grid.spacegroup = st.find_spacegroup()
           calc.put_model_density_on_grid(st[0])
+          print("Time after density calculation ",time.time() - ffttime1)
+          real_space_array = np.array(calc.grid, copy=False)
+        
+          # 2. Use SciPy's Inverse FFT to compute the positive exponent (+2pi i h x)
+          # Setting workers=-1 tells SciPy to use all available CPU cores.
+          # ifftn automatically normalizes the sum by (1 / N_voxels).
+          
+          complex_grid = scipy.fft.ifftn(real_space_array, workers=-1, overwrite_x=True)
+          print("Time after calculate fft = ",time.time() - ffttime1)
+        
+          # 3. Multiply by unit cell Volume to complete the absolute scaling
+          complex_grid *= st.cell.volume
           grid = calc.grid
 
           # Get the integer grid dimensions before the FFT transforms it
           Nu, Nv, Nw = grid.nu, grid.nv, grid.nw
-
-          complex_grid = gemmi.transform_map_to_f_phi(grid)
 
           # --- 6. Generate Miller Indices (HKL) up to d_min ---
           # We use cctbx here just to easily get the mathematically correct list of HKLs 
@@ -754,18 +819,14 @@ EOF
           extracted_sf = complex_array[u, v, w]
 
           extracted_sf = np.conjugate(extracted_sf)
-          for i in range(len(hkls_np)):
-            h_idx, k_idx, l_idx = hkls_np[i]
-            hkl_tuple = (int(h_idx), int(k_idx), int(l_idx))
-            d_spacing = st.cell.calculate_d(hkl_tuple)
-            inv_d2 = 1.0 / (d_spacing ** 2) if d_spacing > 0 else 0.0
-            
-            # This inherently removes the blur Gemmi applied during put_model_density_on_grid
-            extracted_sf[i] *= calc.reciprocal_space_multiplier(inv_d2)
-
-          # Convert complex numbers to standard Amplitude and Phase
-          amplitudes = np.abs(extracted_sf)
-          phases = np.angle(extracted_sf, deg=True)
+          d_spacings_np = np.array(miller_set.d_spacings().data())
+        
+          # The un-blur math is mathematically: exp( B / (4 * d^2) )
+          inv_d2 = 1.0 / (d_spacings_np ** 2)
+          unblur_multiplier = np.exp(calc.blur * 0.25 * inv_d2)
+        
+          # Apply the multiplier across all reflections instantly
+          extracted_sf *= unblur_multiplier
 
           #Fix type
           extracted_sf = extracted_sf.astype(np.complex128)
@@ -794,7 +855,6 @@ EOF
           print("CCTBX Grid = ",cctbx_grid)
           
           fcalc = xrs_sel.structure_factors(d_min=d_min,algorithm="fft").f_calc()
-
 
         if do_opt:
           diffuse_expt_common,fcalc_common = diffuse_expt.common_sets(fcalc.as_non_anomalous_array())
@@ -838,8 +898,15 @@ EOF
 #    Nj = map_data[0].shape[1]
 #    Nk = map_data[0].shape[2]
 #    map_grid_3D = np.reshape(map_grid,(len(tsites),Ni,Nj,Nk))
-#    np.save(dens_file,map_grid_3D)                           
+#    np.save(dens_file,map_grid_3D)
 
+  #profiler.disable()
+
+  #stats = pstats.Stats(profiler)
+
+  # Sort by 'tottime' or 'cumtime', and print the top 20 slowest functions
+  #stats.sort_stats('tottime').print_stats(50)
+  
   print("Worker ",work_rank," is done with individual calculations")
   sys.stdout.flush()
 
