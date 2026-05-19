@@ -978,7 +978,6 @@ EOF
 
           calc = gemmi.DensityCalculatorX()
           calc.d_min = d_min
-          #calc.blur = 0.0
           calc.cutoff = gemmi_cutoff
           calc.grid.unit_cell = st.cell
           calc.grid.spacegroup = st.find_spacegroup()
