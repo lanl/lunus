@@ -25,12 +25,14 @@ import scipy.optimize
 import os
 from libtbx.utils import Keep
 from cctbx import crystal
+from cctbx import miller
 import cctbx.sgtbx
 import subprocess
 import pickle
 import h5py
 import math
 from scipy.interpolate import CubicSpline
+import gemmi
 
 def mpi_enabled():
   return 'OMPI_COMM_WORLD_SIZE' in os.environ.keys()
@@ -916,10 +918,82 @@ EOF
           hkl_in = any_reflection_file(file_name=fcalcnam_tmp)
           miller_arrays = hkl_in.as_miller_arrays()
           fcalc = miller_arrays[1]
-        else:
+        elif engine == "gemmi":
+          full_pdb_string = xrs_sel.as_pdb_file()
+          st = gemmi.read_pdb_string(full_pdb_string)
+          calc = gemmi.DensityCalculatorX()
+          calc.d_min = d_min
+          calc.grid.unit_cell = st.cell
+          calc.grid.spacegroup = st.find_spacegroup()
+          calc.put_model_density_on_grid(st[0])
+          grid = calc.grid
+
+          # Get the integer grid dimensions before the FFT transforms it
+          Nu, Nv, Nw = grid.nu, grid.nv, grid.nw
+
+          complex_grid = gemmi.transform_map_to_f_phi(grid)
+
+          # --- 6. Generate Miller Indices (HKL) up to d_min ---
+          # We use cctbx here just to easily get the mathematically correct list of HKLs 
+          # for the asymmetric unit at this resolution limit.
+          miller_set = miller.build_set(
+            crystal_symmetry=xrs.crystal_symmetry(),
+            anomalous_flag=False, # We want unique reflections, assuming Friedel's law
+            d_min=d_min
+          )
+          hkls_flex = miller_set.indices()
+          hkls_np = np.array(hkls_flex)
+          
+          # --- 7. Vectorized Extraction from Gemmi Complex Grid ---
+          h = hkls_np[:, 0]
+          k = hkls_np[:, 1]
+          l = hkls_np[:, 2]
+          # Since we used half_l=False, the full reciprocal space grid is available.
+          # We just apply grid wrapping (modulo) for all dimensions based on periodic boundary conditions.
+          u = h % Nu
+          v = k % Nv
+          w = l % Nw
+
+          print("gemmi grid = ",Nu,Nv,Nw)
+          # Extract the complex values directly from the NumPy view of the grid
+          # Since we used half_l=False, the full reciprocal space grid is available.
+          # Apply the complex conjugate to the reflections where we used the Friedel mate
+        
+          complex_array = np.array(getattr(complex_grid, 'array', complex_grid), copy=False)
+          extracted_sf = complex_array[u, v, w]
+
+          extracted_sf = np.conjugate(extracted_sf)
+          for i in range(len(hkls_np)):
+            h_idx, k_idx, l_idx = hkls_np[i]
+            hkl_tuple = (int(h_idx), int(k_idx), int(l_idx))
+            d_spacing = st.cell.calculate_d(hkl_tuple)
+            inv_d2 = 1.0 / (d_spacing ** 2) if d_spacing > 0 else 0.0
+            
+            # This inherently removes the blur Gemmi applied during put_model_density_on_grid
+            extracted_sf[i] *= calc.reciprocal_space_multiplier(inv_d2)
+
+          # Convert complex numbers to standard Amplitude and Phase
+          amplitudes = np.abs(extracted_sf)
+          phases = np.angle(extracted_sf, deg=True)
+
+          #Fix type
+          extracted_sf = extracted_sf.astype(np.complex128)
+
+          # --- 8. Construct CCTBX Miller Array ---
+    
+          # Safely convert the complex numpy array into a cctbx flex.complex_double array.     
+          # np.ascontiguousarray ensures the memory layout aligns cleanly for the C++ backend.
+          sf_flex = flex.complex_double(np.ascontiguousarray(extracted_sf, dtype=np.complex128))
+    
+          # Combine the original miller_set and the flex array to build the final object
+          fcalc = miller.array(miller_set=miller_set, data=sf_flex)
+          
+          # Optional: Attach labels so CCTBX knows what this data represents
+          fcalc.set_info(miller.array_info(labels=["FWT", "PHIFWT"]))
+        else:  
           xrs_sel.scattering_type_registry(table=scattering_table)
 
-          fcalc = xrs_sel.structure_factors(d_min=d_min).f_calc()
+          fcalc = xrs_sel.structure_factors(d_min=d_min,algorithm="fft").f_calc()
           fcalc = fcalc.resolution_filter(d_min=d_min,d_max=d_max)
 
         if do_opt:
