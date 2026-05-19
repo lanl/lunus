@@ -280,6 +280,16 @@ if __name__=="__main__":
   else:
     d_max = float(args.pop(idx).split("=")[1])
 
+# gemmi_cutoff
+
+  try:
+    idx = [a.find("gemmi_cutoff")==0 for a in args].index(True)
+  except ValueError:
+    gemmi_cutoff = 0.01
+  else:
+    gemmi_cutoff = float(args.pop(idx).split("=")[1])
+
+
 # nsteps (use in lieu of "last" parameter)
 
   try:
@@ -561,6 +571,16 @@ if __name__=="__main__":
     engine = "cctbx"
   else:
     engine = args.pop(idx).split("=")[1]
+
+# CCTBX Method for calculating structure factors
+
+  #try:
+  #  idx = [a.find("cctbx_method")==0 for a in args].index(True)
+  #except ValueError:
+  #  cctbx_method = "fft"
+  #else:
+  #  cctbx_method = args.pop(idx).split("=")[1]
+  #  assert(cctbx_method=="direct")
 
 # Calculate difference with respect to reference (for optimization)
 
@@ -924,7 +944,6 @@ EOF
           miller_arrays = hkl_in.as_miller_arrays()
           fcalc = miller_arrays[1]
         elif engine == "gemmi":
-          ffttime1 = time.time()
           st = gemmi.Structure()
           st.cell = gemmi.UnitCell(*xrs_sel.unit_cell().parameters())
           st.spacegroup_hm = xrs_sel.space_group().type().lookup_symbol()
@@ -936,10 +955,10 @@ EOF
           res.seqid = gemmi.SeqId("1")
           
           # Extract flat arrays for fast iteration
-          coords = xrs.sites_cart()
-          u_isos = xrs.extract_u_iso_or_u_equiv()
-          occs = xrs.scatterers().extract_occupancies()
-          elements = [s.scattering_type for s in xrs.scatterers()]
+          coords = xrs_sel.sites_cart()
+          u_isos = xrs_sel.extract_u_iso_or_u_equiv()
+          occs = xrs_sel.scatterers().extract_occupancies()
+          elements = [s.scattering_type for s in xrs_sel.scatterers()]
           
           u_to_b = 8.0 * np.pi**2
     
@@ -957,15 +976,13 @@ EOF
           model.add_chain(chain)
           st.add_model(model)
 
-          print("Time after cctbx -> gemmi conversion = ",time.time() - ffttime1)
           calc = gemmi.DensityCalculatorX()
           calc.d_min = d_min
-          calc.blur = 0.0
-          calc.cutoff = 0.01
+          #calc.blur = 0.0
+          calc.cutoff = gemmi_cutoff
           calc.grid.unit_cell = st.cell
           calc.grid.spacegroup = st.find_spacegroup()
           calc.put_model_density_on_grid(st[0])
-          print("Time after density calculation ",time.time() - ffttime1)
           real_space_array = np.array(calc.grid, copy=False)
         
           # 2. Use SciPy's Inverse FFT to compute the positive exponent (+2pi i h x)
@@ -973,8 +990,7 @@ EOF
           # ifftn automatically normalizes the sum by (1 / N_voxels).
           
           complex_grid = scipy.fft.ifftn(real_space_array, workers=-1, overwrite_x=True)
-          print("Time after calculate fft = ",time.time() - ffttime1)
-        
+
           # 3. Multiply by unit cell Volume to complete the absolute scaling
           complex_grid *= st.cell.volume
           grid = calc.grid
@@ -986,7 +1002,7 @@ EOF
           # We use cctbx here just to easily get the mathematically correct list of HKLs 
           # for the asymmetric unit at this resolution limit.
           miller_set = miller.build_set(
-            crystal_symmetry=xrs.crystal_symmetry(),
+            crystal_symmetry=xrs_sel.crystal_symmetry(),
             anomalous_flag=False, # We want unique reflections, assuming Friedel's law
             d_min=d_min
           )
@@ -1003,7 +1019,6 @@ EOF
           v = k % Nv
           w = l % Nw
 
-          print("gemmi grid = ",Nu,Nv,Nw)
           # Extract the complex values directly from the NumPy view of the grid
           # Since we used half_l=False, the full reciprocal space grid is available.
           # Apply the complex conjugate to the reflections where we used the Friedel mate
@@ -1035,7 +1050,8 @@ EOF
           
           # Optional: Attach labels so CCTBX knows what this data represents
           fcalc.set_info(miller.array_info(labels=["FWT", "PHIFWT"]))
-        else:  
+          fcalc = fcalc.resolution_filter(d_min=d_min,d_max=d_max)
+        else:
           xrs_sel.scattering_type_registry(table=scattering_table)
 
           fcalc = xrs_sel.structure_factors(d_min=d_min,algorithm="fft").f_calc()
