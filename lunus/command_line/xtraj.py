@@ -29,9 +29,94 @@ import cctbx.sgtbx
 import subprocess
 import pickle
 import h5py
+import math
+from scipy.interpolate import CubicSpline
 
 def mpi_enabled():
   return 'OMPI_COMM_WORLD_SIZE' in os.environ.keys()
+
+
+def to_aniso(miller_array):
+    """
+    Calculates and subtracts the isotropic component from a cctbx miller_array in place.
+    
+    The isotropic component is calculated by averaging the data in spherical shells 
+    in reciprocal space. The shell thickness is defined by the length of the reciprocal 
+    unit cell diagonal (d* of the 1,1,1 reflection). A natural cubic spline is then 
+    used to interpolate the background for each specific reflection, which is 
+    subtracted directly from the input array.
+    
+    Args:
+        miller_array (cctbx.miller.array): The non-anomalous Miller array to process.
+                                           Must contain data of type double.
+                                           
+    Returns:
+        cctbx.miller.array: The same input array, modified in place to contain 
+                            only the anisotropic values.
+                            
+    Raises:
+        ValueError: If there are fewer than 4 populated resolution shells, making 
+                    cubic spline interpolation impossible.
+    """
+    # 1. Extract unit cell and determine reciprocal cell diagonal (shell thickness)
+    uc = miller_array.unit_cell()
+    shell_thickness = math.sqrt(uc.d_star_sq((1, 1, 1)))
+
+    # Extract d* values (magnitudes in reciprocal space)
+    d_star_sq_flex = miller_array.d_star_sq().data()
+    d_star_flex = flex.sqrt(d_star_sq_flex)
+
+    # Convert to numpy for vectorized binning
+    d_star_np = d_star_flex.as_numpy_array()
+    data_np = miller_array.data().as_numpy_array()
+
+    # 2. Determine spherical shell bins
+    max_d_star = np.max(d_star_np)
+    num_bins = int(np.ceil(max_d_star / shell_thickness))
+    
+    # Handle edge case where the array might be entirely empty
+    if num_bins == 0:
+        return miller_array
+        
+    bin_edges = np.linspace(0, num_bins * shell_thickness, num_bins + 1)
+    bin_indices = np.digitize(d_star_np, bin_edges)
+
+    bin_centers = []
+    bin_averages = []
+
+    # 3. Calculate mean values for each populated shell
+    for i in range(1, len(bin_edges)):
+        mask = (bin_indices == i)
+        if np.any(mask):
+            bin_data = data_np[mask]
+            mean_val = np.mean(bin_data)
+            
+            center = (bin_edges[i-1] + bin_edges[i]) / 2.0
+            bin_centers.append(center)
+            bin_averages.append(mean_val)
+
+    bin_centers = np.array(bin_centers)
+    bin_averages = np.array(bin_averages)
+
+    # 4. Fit the interpolating function
+    if len(bin_centers) < 4:
+        raise ValueError(
+            f"Only found {len(bin_centers)} populated shells. "
+            "A minimum of 4 is required for cubic spline interpolation."
+        )
+        
+    spline = CubicSpline(bin_centers, bin_averages, bc_type='natural')
+
+    # 5. Evaluate and subtract in place
+    isotropic_bg_np = spline(d_star_np)
+    #isotropic_bg_flex = flex.double(isotropic_bg_np)
+
+    # The -= operator directly mutates the underlying C++ memory block
+    data_np -= isotropic_bg_np
+    data_flex = flex.double(data_np)
+    miller_array = miller_array.customized_copy(data = data_flex)
+    
+    return miller_array
 
 def calc_msd(x):
   d = np.zeros(this_sites_frac.shape)
@@ -309,6 +394,19 @@ if __name__=="__main__":
     else:
       do_opt = True
 
+# Calculate correlations using anisotropic component 
+
+  try:
+    idx = [a.find("corr_aniso")==0 for a in args].index(True)
+  except ValueError:
+    corr_aniso = False
+  else:
+    corr_aniso_str = args.pop(idx).split("=")[1]
+    if corr_aniso_str == "True":
+      corr_aniso = True
+    else:
+      corr_aniso = False
+
   try:
     idx = [a.find("checkpoint")==0 for a in args].index(True)
   except ValueError:
@@ -432,6 +530,8 @@ if __name__=="__main__":
       hkl_in = any_reflection_file(file_name=diffuse_data_file)
       miller_arrays = hkl_in.as_miller_arrays()
       diffuse_expt = miller_arrays[0].as_non_anomalous_array()
+      if corr_aniso:
+        to_aniso(diffuse_expt)
     else:
       diffuse_expt = None
     diffuse_expt = mpi_comm.bcast(diffuse_expt,root=0)
@@ -843,6 +943,7 @@ EOF
     print("TIMING: Total diffuse calculation = ",etime-stime)
 
 # Compute the correlation with the data, if available
+
     if diffuse_data_file is not None:
       print("Calculating Correlation")
       if do_opt:
@@ -850,6 +951,8 @@ EOF
         diffuse_array_common = diffuse_array
       else:
         diffuse_expt_common, diffuse_array_common = diffuse_expt.common_sets(diffuse_array.as_non_anomalous_array())
+      if corr_aniso:
+        to_aniso(diffuse_array_common)
       C = np.corrcoef(np.array([diffuse_expt_common.data(),diffuse_array_common.data()]))
       print("Pearson correlation between diffuse simulation and data = ",C[0,1])
       Camp = np.corrcoef(np.sqrt(np.abs(np.array([diffuse_expt_common.data(),diffuse_array_common.data()]))))
@@ -905,9 +1008,14 @@ EOF
 
 #Perform optimization      
   if do_opt:
+    
     if mpi_rank == 0:
       stime = time.time()
       print("Doing optimization using ",ct," initial frames")
+    else:
+      diffuse_array_common = None
+
+    diffuse_array_common = mpi_comm.bcast(diffuse_array_common,root=0)
 
     #Initialize correlations array
     w = np.ones(ct)
@@ -992,7 +1100,12 @@ EOF
       tot_sig_fcalc_np = sig_fcalc_np
       tot_sig_icalc_np = sig_icalc_np
 
-    diffuse_this = (ct_nonzero*tot_sig_icalc_np - tot_sig_fcalc_np * tot_sig_fcalc_np.conjugate()).real
+    diffuse_this = np.ascontiguousarray((ct_nonzero*tot_sig_icalc_np - tot_sig_fcalc_np * tot_sig_fcalc_np.conjugate()).real)
+    if corr_aniso:
+      flex_diffuse_this = flex.double(diffuse_this)
+      diffuse_array_common = diffuse_array_common.customized_copy(data = flex_diffuse_this)
+      to_aniso(diffuse_array_common)
+      diffuse_this = np.array(difuse_array_common.data())
     diffuse_expt_np = np.array(diffuse_expt_common.data())
     C_ref = np.corrcoef(np.array([diffuse_expt_np,diffuse_this]))[0,1]
     if mpi_rank == 0:
