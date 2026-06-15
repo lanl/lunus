@@ -531,7 +531,7 @@ if __name__=="__main__":
       miller_arrays = hkl_in.as_miller_arrays()
       diffuse_expt = miller_arrays[0].as_non_anomalous_array()
       if corr_aniso:
-        to_aniso(diffuse_expt)
+        diffuse_expt = to_aniso(diffuse_expt)
     else:
       diffuse_expt = None
     diffuse_expt = mpi_comm.bcast(diffuse_expt,root=0)
@@ -952,7 +952,7 @@ EOF
       else:
         diffuse_expt_common, diffuse_array_common = diffuse_expt.common_sets(diffuse_array.as_non_anomalous_array())
       if corr_aniso:
-        to_aniso(diffuse_array_common)
+        diffuse_array_common = to_aniso(diffuse_array_common)
       C = np.corrcoef(np.array([diffuse_expt_common.data(),diffuse_array_common.data()]))
       print("Pearson correlation between diffuse simulation and data = ",C[0,1])
       Camp = np.corrcoef(np.sqrt(np.abs(np.array([diffuse_expt_common.data(),diffuse_array_common.data()]))))
@@ -1104,8 +1104,8 @@ EOF
     if corr_aniso:
       flex_diffuse_this = flex.double(diffuse_this)
       diffuse_array_common = diffuse_array_common.customized_copy(data = flex_diffuse_this)
-      to_aniso(diffuse_array_common)
-      diffuse_this = np.array(difuse_array_common.data())
+      diffuse_array_common = to_aniso(diffuse_array_common)
+      diffuse_this = np.array(diffuse_array_common.data())
     diffuse_expt_np = np.array(diffuse_expt_common.data())
     C_ref = np.corrcoef(np.array([diffuse_expt_np,diffuse_this]))[0,1]
     if mpi_rank == 0:
@@ -1128,7 +1128,12 @@ EOF
           except:
             print("Couldn't calculate icalc difference on worker ",work_rank," with len(C_this), ct_nonzero, x = ",len(C_this),ct_nonzero,x)
             print("Types of tot_sig_icalc_np, icalc_list[x] = ",type(tot_sig_icalc_np),type(icalc_list[x]))
-          diffuse_this = (ct_nonzero*sig_icalc_this - sig_fcalc_this * sig_fcalc_this.conjugate()).real
+          diffuse_this = np.ascontiguousarray((ct_nonzero*sig_icalc_this - sig_fcalc_this * sig_fcalc_this.conjugate()).real)
+          if corr_aniso:
+            flex_diffuse_this = flex.double(diffuse_this)
+            diffuse_array_common = diffuse_array_common.customized_copy(data = flex_diffuse_this)
+            diffuse_array_common = to_aniso(diffuse_array_common)
+            diffuse_this = np.array(diffuse_array_common.data())
           C_this[x] = np.corrcoef(np.array([diffuse_expt_np,diffuse_this]))[0,1]
       C_all = np.zeros(ct)
       mpi_comm.Allreduce(C_all_this,C_all,op=MPI.SUM)
