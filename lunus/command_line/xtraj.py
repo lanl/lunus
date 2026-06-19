@@ -36,7 +36,75 @@ def mpi_enabled():
   return 'OMPI_COMM_WORLD_SIZE' in os.environ.keys()
 
 
-def to_aniso(miller_array):
+from cctbx import sgtbx, crystal
+
+def force_exact_reflections(input_array, processed_array, fill_value=0.0):
+    """
+    Takes a processed (e.g., Laue-averaged) array and maps its data 
+    back onto the exact unmerged indices of the original input array.
+    
+    Args:
+        input_array (cctbx.miller.array): The original raw data array.
+        processed_array (cctbx.miller.array): The merged/processed array.
+        fill_value (float): The value to use if a reflection was dropped 
+                            during processing.
+                            
+    Returns:
+        cctbx.miller.array: An array identical to input_array in symmetry, 
+                            indices, and order, but containing the processed data.
+    """
+    
+    # 1. Temporarily cast the input array into the processed array's symmetry.
+    # This ensures that when we map to the ASU, we hit the exact same wedge 
+    # of reciprocal space that the processed array lives in.
+    temp_array = input_array.customized_copy(
+        crystal_symmetry=processed_array.crystal_symmetry()
+    )
+    
+    # 2. Map the original indices to the target ASU.
+    # Because your data is non-anomalous, this naturally collapses Friedel pairs 
+    # (e.g., mapping -h,-k,-l to h,k,l) to match the processed array.
+    mapped_input = temp_array.map_to_asu()
+    
+    # 3. Create a fast Python lookup dictionary from the processed array.
+    # flex.miller_index behaves as an iterable of tuples, which make perfect dict keys.
+    processed_dict = dict(zip(processed_array.indices(), processed_array.data()))
+    
+    # 4. Iterate through the mapped original indices and look up the new values.
+    new_data = flex.double()
+    for hkl in mapped_input.indices():
+        val = processed_dict.get(hkl, fill_value) 
+        new_data.append(val)
+        
+    # 5. Inject the extracted data back into a copy of the ORIGINAL array framework.
+    # This guarantees the returned array has the EXACT indices, original symmetry, 
+    # and sort order that you started with.
+    final_array = input_array.customized_copy(data=new_data)
+    
+    return final_array
+
+def symmetry_average(miller_array, space_group_symbol):
+    
+    # 1. Parse the user's specific space group
+    sg_info = sgtbx.space_group_info(space_group_symbol)
+    original_sg = sg_info.group()
+    
+    # 2. Ask cctbx for the Patterson group (Laue symmetry + Lattice centering)
+    patterson_sg = original_sg.build_derived_patterson_group()
+    
+    # 3. Create the target crystal symmetry using the Patterson group
+    target_symm = crystal.symmetry(
+        unit_cell=miller_array.unit_cell(),
+        space_group=patterson_sg 
+    )
+    
+    # 4. Merge as before
+    array_with_laue = miller_array.customized_copy(crystal_symmetry=target_symm)
+    merged_obj = array_with_laue.merge_equivalents()
+    
+    return force_exact_reflections(miller_array,merged_obj.array())
+
+def to_aniso(miller_array,apply_symmetry_str="P1"):
     """
     Calculates and subtracts the isotropic component from a cctbx miller_array in place.
     
@@ -116,6 +184,8 @@ def to_aniso(miller_array):
     data_flex = flex.double(data_np)
     miller_array = miller_array.customized_copy(data = data_flex)
     
+    miller_array = symmetry_average(miller_array,apply_symmetry_str)
+
     return miller_array
 
 def calc_msd(x):
@@ -355,6 +425,15 @@ if __name__=="__main__":
   else:
     space_group_str = args.pop(idx).split("=")[1]
 
+# Space group to use for applying symmetry after calculation
+
+  try:
+    idx = [a.find("apply_symmetry")==0 for a in args].index(True)
+  except ValueError:
+    apply_symmetry_str = "P1"
+  else:
+    apply_symmetry_str = args.pop(idx).split("=")[1]
+
 # Apply B factor in structure calculations, then reverse after calc
 
   try:
@@ -531,7 +610,7 @@ if __name__=="__main__":
       miller_arrays = hkl_in.as_miller_arrays()
       diffuse_expt = miller_arrays[0].as_non_anomalous_array()
       if corr_aniso:
-        diffuse_expt = to_aniso(diffuse_expt)
+        diffuse_expt = to_aniso(diffuse_expt,apply_symmetry_str)
     else:
       diffuse_expt = None
     diffuse_expt = mpi_comm.bcast(diffuse_expt,root=0)
@@ -952,7 +1031,7 @@ EOF
       else:
         diffuse_expt_common, diffuse_array_common = diffuse_expt.common_sets(diffuse_array.as_non_anomalous_array())
       if corr_aniso:
-        diffuse_array_common = to_aniso(diffuse_array_common)
+        diffuse_array_common = to_aniso(diffuse_array_common,apply_symmetry_str)
       C = np.corrcoef(np.array([diffuse_expt_common.data(),diffuse_array_common.data()]))
       print("Pearson correlation between diffuse simulation and data = ",C[0,1])
       Camp = np.corrcoef(np.sqrt(np.abs(np.array([diffuse_expt_common.data(),diffuse_array_common.data()]))))
@@ -1104,7 +1183,7 @@ EOF
     if corr_aniso:
       flex_diffuse_this = flex.double(diffuse_this)
       diffuse_array_common = diffuse_array_common.customized_copy(data = flex_diffuse_this)
-      diffuse_array_common = to_aniso(diffuse_array_common)
+      diffuse_array_common = to_aniso(diffuse_array_common,apply_symmetry_str)
       diffuse_this = np.array(diffuse_array_common.data())
     diffuse_expt_np = np.array(diffuse_expt_common.data())
     C_ref = np.corrcoef(np.array([diffuse_expt_np,diffuse_this]))[0,1]
@@ -1132,7 +1211,7 @@ EOF
           if corr_aniso:
             flex_diffuse_this = flex.double(diffuse_this)
             diffuse_array_common = diffuse_array_common.customized_copy(data = flex_diffuse_this)
-            diffuse_array_common = to_aniso(diffuse_array_common)
+            diffuse_array_common = to_aniso(diffuse_array_common,apply_symmetry_str)
             diffuse_this = np.array(diffuse_array_common.data())
           C_this[x] = np.corrcoef(np.array([diffuse_expt_np,diffuse_this]))[0,1]
       C_all = np.zeros(ct)
