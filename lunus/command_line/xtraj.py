@@ -138,43 +138,44 @@ def to_aniso(miller_array,apply_symmetry_str="P1"):
     d_star_np = d_star_flex.as_numpy_array()
     data_np = miller_array.data().as_numpy_array()
 
-    # 2. Determine spherical shell bins
-    max_d_star = np.max(d_star_np)
-    num_bins = int(np.ceil(max_d_star / shell_thickness))
-    
-    # Handle edge case where the array might be entirely empty
-    if num_bins == 0:
-        return miller_array
-        
-    bin_edges = np.linspace(0, num_bins * shell_thickness, num_bins + 1)
-    bin_indices = np.digitize(d_star_np, bin_edges)
+    # ... (Previous code extracting d_star_np and data_np) ...
 
+    # 1. Normalize the distances against the shell thickness (rscale equivalent)
+    normalized_d_star = d_star_np / shell_thickness
+
+    # 2. Replicate the C rounding logic: (size_t)(val + 0.5)
+    # np.floor(val + 0.5) is mathematically identical to the C rounding behavior.
+    # This assigns each reflection to a bin index 'r'
+    bin_indices = np.floor(normalized_d_star + 0.5).astype(int)
+    
     bin_centers = []
     bin_averages = []
 
-    # 3. Calculate mean values for each populated shell
-    for i in range(1, len(bin_edges)):
-        mask = (bin_indices == i)
-        if np.any(mask):
-            bin_data = data_np[mask]
-            mean_val = np.mean(bin_data)
-            
-            center = (bin_edges[i-1] + bin_edges[i]) / 2.0
-            bin_centers.append(center)
-            bin_averages.append(mean_val)
+    # Get all unique 'r' values generated
+    unique_r_bins = np.unique(bin_indices)
 
-    bin_centers = np.array(bin_centers)
-    bin_averages = np.array(bin_averages)
-
-    # 4. Fit the interpolating function
-    if len(bin_centers) < 4:
-        raise ValueError(
-            f"Only found {len(bin_centers)} populated shells. "
-            "A minimum of 4 is required for cubic spline interpolation."
-        )
+    # 3. Average the data
+    for r in unique_r_bins:
+      # Find all reflections assigned to this radius 'r'
+      mask = (bin_indices == r)
+      bin_data = data_np[mask]
+      
+      # Replicate: if (lat->lattice[lat_index] != lat->mask_tag)
+      # Filter out NaNs (or substitute your specific mask value if applicable)
+      valid_data = bin_data[~np.isnan(bin_data)]
+    
+      # Replicate: if (ct[r] == 0) vs ct[r] > 0
+      if len(valid_data) > 0:
+        mean_val = np.mean(valid_data)
         
-    spline = CubicSpline(bin_centers, bin_averages, bc_type='natural')
+        # The center of the bin is exactly r * shell_thickness
+        center = r * shell_thickness
+        
+        bin_centers.append(center)
+        bin_averages.append(mean_val)
 
+    spline = CubicSpline(bin_centers, bin_averages, bc_type='not-a-knot', extrapolate=True)
+    
     # 5. Evaluate and subtract in place
     isotropic_bg_np = spline(d_star_np)
     #isotropic_bg_flex = flex.double(isotropic_bg_np)
