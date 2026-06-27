@@ -267,6 +267,15 @@ if __name__=="__main__":
   else:
     d_min = float(args.pop(idx).split("=")[1])
 
+# d_max
+
+  try:
+    idx = [a.find("d_max")==0 for a in args].index(True)
+  except ValueError:
+    d_max = 0.9
+  else:
+    d_max = float(args.pop(idx).split("=")[1])
+
 # nsteps (use in lieu of "last" parameter)
 
   try:
@@ -863,6 +872,7 @@ EOF
       xrs_sel = xrs.select(selection)
       if sig_fcalc is None:
         sig_fcalc = xrs_sel.structure_factors(d_min=d_min).f_calc() * 0.0
+        sig_fcalc = sig_fcalc.resolution_filter(d_min=d_min,d_max=d_max)
       if sig_icalc is None:
         sig_icalc = abs(sig_fcalc).set_observation_type_xray_amplitude().f_as_f_sq()
       print("WARNING: Worker ",work_rank," is idle")
@@ -909,6 +919,7 @@ EOF
         else:
           xrs_sel.scattering_type_registry(table=scattering_table)
           fcalc = xrs_sel.structure_factors(d_min=d_min).f_calc()
+          fcalc = fcalc.resolution_filter(d_min=d_min,d_max=d_max)
 
         if do_opt:
           diffuse_expt_common,fcalc_common = diffuse_expt.common_sets(fcalc.as_non_anomalous_array())
@@ -924,7 +935,7 @@ EOF
           icalc_list[ct] = icalc_common_data
     # Commented out some density trajectory code
     #    if not (dens_file is None):
-    #      this_map = fcalc.fft_map(d_min=d_min, resolution_factor = 0.5)
+    #      this_map = fcalc.fft_map(d_min=d_min, d_max=d_max, resolution_factor = 0.5)
     #      real_map_np = this_map.real_map_unpadded().as_numpy_array()
     #      map_data.append(real_map_np)
         else:
@@ -1068,7 +1079,7 @@ EOF
 
 #    if not partial_sum_mode:
 #      symmetry_flags = maptbx.use_space_group_symmetry
-#      dmap = avg_fcalc.fft_map(d_min=d_min,resolution_factor=0.5,symmetry_flags=symmetry_flags)
+#      dmap = avg_fcalc.fft_map(d_min=d_min,d_max=d_max,resolution_factor=0.5,symmetry_flags=symmetry_flags)
 #      dmap.apply_volume_scaling()
 #      dmap = avg_fcalc.fft_map(f_000=f_000.f_000)
 #      dmap.as_ccp4_map(file_name=density_file)
