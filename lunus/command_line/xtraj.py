@@ -29,9 +29,184 @@ import cctbx.sgtbx
 import subprocess
 import pickle
 import h5py
+import math
+from scipy.interpolate import CubicSpline
 
 def mpi_enabled():
   return 'OMPI_COMM_WORLD_SIZE' in os.environ.keys()
+
+
+from cctbx import sgtbx, crystal
+
+def force_exact_reflections(input_array, processed_array, fill_value=0.0):
+    """
+    Takes a processed (e.g., Laue-averaged) array and maps its data 
+    back onto the exact unmerged indices of the original input array.
+    
+    Args:
+        input_array (cctbx.miller.array): The original raw data array.
+        processed_array (cctbx.miller.array): The merged/processed array.
+        fill_value (float): The value to use if a reflection was dropped 
+                            during processing.
+                            
+    Returns:
+        cctbx.miller.array: An array identical to input_array in symmetry, 
+                            indices, and order, but containing the processed data.
+    """
+    
+    # 1. Temporarily cast the input array into the processed array's symmetry.
+    # This ensures that when we map to the ASU, we hit the exact same wedge 
+    # of reciprocal space that the processed array lives in.
+    temp_array = input_array.customized_copy(
+        crystal_symmetry=processed_array.crystal_symmetry()
+    )
+    
+    # 2. Map the original indices to the target ASU.
+    # Because your data is non-anomalous, this naturally collapses Friedel pairs 
+    # (e.g., mapping -h,-k,-l to h,k,l) to match the processed array.
+    mapped_input = temp_array.map_to_asu()
+    
+    # 3. Create a fast Python lookup dictionary from the processed array.
+    # flex.miller_index behaves as an iterable of tuples, which make perfect dict keys.
+    processed_dict = dict(zip(processed_array.indices(), processed_array.data()))
+    
+    # 4. Iterate through the mapped original indices and look up the new values.
+    new_data = flex.double()
+    for hkl in mapped_input.indices():
+        val = processed_dict.get(hkl, fill_value) 
+        new_data.append(val)
+        
+    # 5. Inject the extracted data back into a copy of the ORIGINAL array framework.
+    # This guarantees the returned array has the EXACT indices, original symmetry, 
+    # and sort order that you started with.
+    final_array = input_array.customized_copy(data=new_data)
+    
+    return final_array
+
+def symmetry_average(miller_array, space_group_symbol):
+    
+    # 1. Parse the user's specific space group
+    sg_info = sgtbx.space_group_info(space_group_symbol)
+    original_sg = sg_info.group()
+    
+    # 2. Ask cctbx for the Patterson group (Laue symmetry + Lattice centering)
+    patterson_sg = original_sg.build_derived_patterson_group()
+    
+    # 3. Create the target crystal symmetry using the Patterson group
+    target_symm = crystal.symmetry(
+        unit_cell=miller_array.unit_cell(),
+        space_group=patterson_sg 
+    )
+    
+    # 4. Merge as before
+    array_with_laue = miller_array.customized_copy(crystal_symmetry=target_symm)
+    merged_obj = array_with_laue.merge_equivalents()
+    
+    return force_exact_reflections(miller_array,merged_obj.array())
+
+def to_aniso(miller_array, apply_symmetry_str="P1", mask_value=np.nan):
+    """
+    Calculates and subtracts the isotropic component from a cctbx miller_array.
+
+    The isotropic component is calculated by averaging the data in spherical shells
+    in reciprocal space. The shell thickness is defined by the length of the reciprocal
+    unit cell diagonal (d* of the 1,1,1 reflection). A not-a-knot cubic spline is then
+    used to interpolate the background for each specific reflection, which is
+    subtracted directly from the input array.
+
+    Args:
+        miller_array (cctbx.miller.array): The non-anomalous Miller array to process.
+                                           Must contain data of type double.
+        apply_symmetry_str (str): The space group symbol to use for downstream averaging.
+        mask_value (float): The value used to denote unmeasured/invalid data. 
+                            Defaults to np.nan.
+
+    Returns:
+        cctbx.miller.array: A new array, modified to contain only the anisotropic 
+                            values, merged according to the target symmetry.
+
+    Raises:
+        ValueError: If there are fewer than 4 populated resolution shells, making
+                    cubic spline interpolation impossible.
+    """
+    # 1. Extract unit cell and determine reciprocal cell diagonal (shell thickness)
+    uc = miller_array.unit_cell()
+    shell_thickness = math.sqrt(uc.d_star_sq((1, 1, 1)))
+
+    # Extract d* values (magnitudes in reciprocal space)
+    d_star_sq_flex = miller_array.d_star_sq().data()
+    d_star_flex = flex.sqrt(d_star_sq_flex)
+
+    # Convert to numpy for vectorized binning
+    d_star_np = d_star_flex.as_numpy_array()
+    
+    # Use .copy() to ensure we don't accidentally mutate the bound C++ memory block
+    data_np = miller_array.data().as_numpy_array().copy()
+
+    # 1. Normalize the distances against the shell thickness (rscale equivalent)
+    normalized_d_star = d_star_np / shell_thickness
+
+    # 2. Replicate the C rounding logic: (size_t)(val + 0.5)
+    bin_indices = np.floor(normalized_d_star + 0.5).astype(int)
+
+    bin_centers = []
+    bin_averages = []
+
+    # Get all unique 'r' values generated
+    unique_r_bins = np.unique(bin_indices)
+
+    # 3. Average the data
+    for r in unique_r_bins:
+        # Find all reflections assigned to this radius 'r'
+        mask = (bin_indices == r)
+        bin_data = data_np[mask]
+
+        # Filter out the mask value (handles both NaN and specific floats)
+        if np.isnan(mask_value):
+            valid_data = bin_data[~np.isnan(bin_data)]
+        else:
+            valid_data = bin_data[bin_data != mask_value]
+
+        # Only process shells that contain valid data
+        if len(valid_data) > 0:
+            mean_val = np.mean(valid_data)
+            
+            # The center of the bin is exactly r * shell_thickness
+            center = r * shell_thickness
+            bin_centers.append(center)
+            bin_averages.append(mean_val)
+
+    if len(bin_centers) < 4:
+        raise ValueError(
+            f"Only found {len(bin_centers)} populated shells. "
+            "A minimum of 4 is required for cubic spline interpolation."
+        )
+
+    # 4. Fit the interpolating function
+    spline = CubicSpline(bin_centers, bin_averages, bc_type='not-a-knot', extrapolate=True)
+
+    # 5. Evaluate the background
+    isotropic_bg_np = spline(d_star_np)
+
+    # 6. Safe Subtraction: Create a boolean mask of valid data points
+    # This prevents the mask_value flag itself from being subtracted from
+    if np.isnan(mask_value):
+        valid_mask = ~np.isnan(data_np)
+    else:
+        valid_mask = (data_np != mask_value)
+
+    # Apply the subtraction exclusively to valid reflections
+    data_np[valid_mask] -= isotropic_bg_np[valid_mask]
+    
+    # 7. Convert back to flex and assign
+    data_flex = flex.double(data_np)
+    miller_array = miller_array.customized_copy(data=data_flex)
+
+    # 8. Apply downstream symmetry merging
+    # Note: Assumes symmetry_average() is defined elsewhere in your module
+    miller_array = symmetry_average(miller_array, apply_symmetry_str)
+
+    return miller_array
 
 def calc_msd(x):
   d = np.zeros(this_sites_frac.shape)
@@ -91,6 +266,15 @@ if __name__=="__main__":
     d_min = 0.9
   else:
     d_min = float(args.pop(idx).split("=")[1])
+
+# d_max
+
+  try:
+    idx = [a.find("d_max")==0 for a in args].index(True)
+  except ValueError:
+    d_max = 0.9
+  else:
+    d_max = float(args.pop(idx).split("=")[1])
 
 # nsteps (use in lieu of "last" parameter)
 
@@ -270,6 +454,15 @@ if __name__=="__main__":
   else:
     space_group_str = args.pop(idx).split("=")[1]
 
+# Space group to use for applying symmetry after calculation
+
+  try:
+    idx = [a.find("apply_symmetry")==0 for a in args].index(True)
+  except ValueError:
+    apply_symmetry_str = "P1"
+  else:
+    apply_symmetry_str = args.pop(idx).split("=")[1]
+
 # Apply B factor in structure calculations, then reverse after calc
 
   try:
@@ -308,6 +501,19 @@ if __name__=="__main__":
       do_opt = False
     else:
       do_opt = True
+
+# Calculate correlations using anisotropic component 
+
+  try:
+    idx = [a.find("corr_aniso")==0 for a in args].index(True)
+  except ValueError:
+    corr_aniso = False
+  else:
+    corr_aniso_str = args.pop(idx).split("=")[1]
+    if corr_aniso_str == "True":
+      corr_aniso = True
+    else:
+      corr_aniso = False
 
   try:
     idx = [a.find("checkpoint")==0 for a in args].index(True)
@@ -432,6 +638,8 @@ if __name__=="__main__":
       hkl_in = any_reflection_file(file_name=diffuse_data_file)
       miller_arrays = hkl_in.as_miller_arrays()
       diffuse_expt = miller_arrays[0].as_non_anomalous_array()
+      if corr_aniso:
+        diffuse_expt = to_aniso(diffuse_expt,apply_symmetry_str)
     else:
       diffuse_expt = None
     diffuse_expt = mpi_comm.bcast(diffuse_expt,root=0)
@@ -664,6 +872,7 @@ EOF
       xrs_sel = xrs.select(selection)
       if sig_fcalc is None:
         sig_fcalc = xrs_sel.structure_factors(d_min=d_min).f_calc() * 0.0
+        sig_fcalc = sig_fcalc.resolution_filter(d_min=d_min,d_max=d_max)
       if sig_icalc is None:
         sig_icalc = abs(sig_fcalc).set_observation_type_xray_amplitude().f_as_f_sq()
       print("WARNING: Worker ",work_rank," is idle")
@@ -710,6 +919,7 @@ EOF
         else:
           xrs_sel.scattering_type_registry(table=scattering_table)
           fcalc = xrs_sel.structure_factors(d_min=d_min).f_calc()
+          fcalc = fcalc.resolution_filter(d_min=d_min,d_max=d_max)
 
         if do_opt:
           diffuse_expt_common,fcalc_common = diffuse_expt.common_sets(fcalc.as_non_anomalous_array())
@@ -725,7 +935,7 @@ EOF
           icalc_list[ct] = icalc_common_data
     # Commented out some density trajectory code
     #    if not (dens_file is None):
-    #      this_map = fcalc.fft_map(d_min=d_min, resolution_factor = 0.5)
+    #      this_map = fcalc.fft_map(d_min=d_min, d_max=d_max, resolution_factor = 0.5)
     #      real_map_np = this_map.real_map_unpadded().as_numpy_array()
     #      map_data.append(real_map_np)
         else:
@@ -843,6 +1053,7 @@ EOF
     print("TIMING: Total diffuse calculation = ",etime-stime)
 
 # Compute the correlation with the data, if available
+
     if diffuse_data_file is not None:
       print("Calculating Correlation")
       if do_opt:
@@ -850,6 +1061,8 @@ EOF
         diffuse_array_common = diffuse_array
       else:
         diffuse_expt_common, diffuse_array_common = diffuse_expt.common_sets(diffuse_array.as_non_anomalous_array())
+      if corr_aniso:
+        diffuse_array_common = to_aniso(diffuse_array_common,apply_symmetry_str)
       C = np.corrcoef(np.array([diffuse_expt_common.data(),diffuse_array_common.data()]))
       print("Pearson correlation between diffuse simulation and data = ",C[0,1])
       Camp = np.corrcoef(np.sqrt(np.abs(np.array([diffuse_expt_common.data(),diffuse_array_common.data()]))))
@@ -866,7 +1079,7 @@ EOF
 
 #    if not partial_sum_mode:
 #      symmetry_flags = maptbx.use_space_group_symmetry
-#      dmap = avg_fcalc.fft_map(d_min=d_min,resolution_factor=0.5,symmetry_flags=symmetry_flags)
+#      dmap = avg_fcalc.fft_map(d_min=d_min,d_max=d_max,resolution_factor=0.5,symmetry_flags=symmetry_flags)
 #      dmap.apply_volume_scaling()
 #      dmap = avg_fcalc.fft_map(f_000=f_000.f_000)
 #      dmap.as_ccp4_map(file_name=density_file)
@@ -905,9 +1118,14 @@ EOF
 
 #Perform optimization      
   if do_opt:
+    
     if mpi_rank == 0:
       stime = time.time()
       print("Doing optimization using ",ct," initial frames")
+    else:
+      diffuse_array_common = None
+
+    diffuse_array_common = mpi_comm.bcast(diffuse_array_common,root=0)
 
     #Initialize correlations array
     w = np.ones(ct)
@@ -992,7 +1210,12 @@ EOF
       tot_sig_fcalc_np = sig_fcalc_np
       tot_sig_icalc_np = sig_icalc_np
 
-    diffuse_this = (ct_nonzero*tot_sig_icalc_np - tot_sig_fcalc_np * tot_sig_fcalc_np.conjugate()).real
+    diffuse_this = np.ascontiguousarray((ct_nonzero*tot_sig_icalc_np - tot_sig_fcalc_np * tot_sig_fcalc_np.conjugate()).real)
+    if corr_aniso:
+      flex_diffuse_this = flex.double(diffuse_this)
+      diffuse_array_common = diffuse_array_common.customized_copy(data = flex_diffuse_this)
+      diffuse_array_common = to_aniso(diffuse_array_common,apply_symmetry_str)
+      diffuse_this = np.array(diffuse_array_common.data())
     diffuse_expt_np = np.array(diffuse_expt_common.data())
     C_ref = np.corrcoef(np.array([diffuse_expt_np,diffuse_this]))[0,1]
     if mpi_rank == 0:
@@ -1015,7 +1238,12 @@ EOF
           except:
             print("Couldn't calculate icalc difference on worker ",work_rank," with len(C_this), ct_nonzero, x = ",len(C_this),ct_nonzero,x)
             print("Types of tot_sig_icalc_np, icalc_list[x] = ",type(tot_sig_icalc_np),type(icalc_list[x]))
-          diffuse_this = (ct_nonzero*sig_icalc_this - sig_fcalc_this * sig_fcalc_this.conjugate()).real
+          diffuse_this = np.ascontiguousarray((ct_nonzero*sig_icalc_this - sig_fcalc_this * sig_fcalc_this.conjugate()).real)
+          if corr_aniso:
+            flex_diffuse_this = flex.double(diffuse_this)
+            diffuse_array_common = diffuse_array_common.customized_copy(data = flex_diffuse_this)
+            diffuse_array_common = to_aniso(diffuse_array_common,apply_symmetry_str)
+            diffuse_this = np.array(diffuse_array_common.data())
           C_this[x] = np.corrcoef(np.array([diffuse_expt_np,diffuse_this]))[0,1]
       C_all = np.zeros(ct)
       mpi_comm.Allreduce(C_all_this,C_all,op=MPI.SUM)
