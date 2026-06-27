@@ -104,26 +104,29 @@ def symmetry_average(miller_array, space_group_symbol):
     
     return force_exact_reflections(miller_array,merged_obj.array())
 
-def to_aniso(miller_array,apply_symmetry_str="P1"):
+def to_aniso(miller_array, apply_symmetry_str="P1", mask_value=np.nan):
     """
-    Calculates and subtracts the isotropic component from a cctbx miller_array in place.
-    
-    The isotropic component is calculated by averaging the data in spherical shells 
-    in reciprocal space. The shell thickness is defined by the length of the reciprocal 
-    unit cell diagonal (d* of the 1,1,1 reflection). A natural cubic spline is then 
-    used to interpolate the background for each specific reflection, which is 
+    Calculates and subtracts the isotropic component from a cctbx miller_array.
+
+    The isotropic component is calculated by averaging the data in spherical shells
+    in reciprocal space. The shell thickness is defined by the length of the reciprocal
+    unit cell diagonal (d* of the 1,1,1 reflection). A not-a-knot cubic spline is then
+    used to interpolate the background for each specific reflection, which is
     subtracted directly from the input array.
-    
+
     Args:
         miller_array (cctbx.miller.array): The non-anomalous Miller array to process.
                                            Must contain data of type double.
-                                           
+        apply_symmetry_str (str): The space group symbol to use for downstream averaging.
+        mask_value (float): The value used to denote unmeasured/invalid data. 
+                            Defaults to np.nan.
+
     Returns:
-        cctbx.miller.array: The same input array, modified in place to contain 
-                            only the anisotropic values.
-                            
+        cctbx.miller.array: A new array, modified to contain only the anisotropic 
+                            values, merged according to the target symmetry.
+
     Raises:
-        ValueError: If there are fewer than 4 populated resolution shells, making 
+        ValueError: If there are fewer than 4 populated resolution shells, making
                     cubic spline interpolation impossible.
     """
     # 1. Extract unit cell and determine reciprocal cell diagonal (shell thickness)
@@ -136,18 +139,16 @@ def to_aniso(miller_array,apply_symmetry_str="P1"):
 
     # Convert to numpy for vectorized binning
     d_star_np = d_star_flex.as_numpy_array()
-    data_np = miller_array.data().as_numpy_array()
-
-    # ... (Previous code extracting d_star_np and data_np) ...
+    
+    # Use .copy() to ensure we don't accidentally mutate the bound C++ memory block
+    data_np = miller_array.data().as_numpy_array().copy()
 
     # 1. Normalize the distances against the shell thickness (rscale equivalent)
     normalized_d_star = d_star_np / shell_thickness
 
     # 2. Replicate the C rounding logic: (size_t)(val + 0.5)
-    # np.floor(val + 0.5) is mathematically identical to the C rounding behavior.
-    # This assigns each reflection to a bin index 'r'
     bin_indices = np.floor(normalized_d_star + 0.5).astype(int)
-    
+
     bin_centers = []
     bin_averages = []
 
@@ -156,36 +157,54 @@ def to_aniso(miller_array,apply_symmetry_str="P1"):
 
     # 3. Average the data
     for r in unique_r_bins:
-      # Find all reflections assigned to this radius 'r'
-      mask = (bin_indices == r)
-      bin_data = data_np[mask]
-      
-      # Replicate: if (lat->lattice[lat_index] != lat->mask_tag)
-      # Filter out NaNs (or substitute your specific mask value if applicable)
-      valid_data = bin_data[~np.isnan(bin_data)]
-    
-      # Replicate: if (ct[r] == 0) vs ct[r] > 0
-      if len(valid_data) > 0:
-        mean_val = np.mean(valid_data)
-        
-        # The center of the bin is exactly r * shell_thickness
-        center = r * shell_thickness
-        
-        bin_centers.append(center)
-        bin_averages.append(mean_val)
+        # Find all reflections assigned to this radius 'r'
+        mask = (bin_indices == r)
+        bin_data = data_np[mask]
 
+        # Filter out the mask value (handles both NaN and specific floats)
+        if np.isnan(mask_value):
+            valid_data = bin_data[~np.isnan(bin_data)]
+        else:
+            valid_data = bin_data[bin_data != mask_value]
+
+        # Only process shells that contain valid data
+        if len(valid_data) > 0:
+            mean_val = np.mean(valid_data)
+            
+            # The center of the bin is exactly r * shell_thickness
+            center = r * shell_thickness
+            bin_centers.append(center)
+            bin_averages.append(mean_val)
+
+    if len(bin_centers) < 4:
+        raise ValueError(
+            f"Only found {len(bin_centers)} populated shells. "
+            "A minimum of 4 is required for cubic spline interpolation."
+        )
+
+    # 4. Fit the interpolating function
     spline = CubicSpline(bin_centers, bin_averages, bc_type='not-a-knot', extrapolate=True)
-    
-    # 5. Evaluate and subtract in place
-    isotropic_bg_np = spline(d_star_np)
-    #isotropic_bg_flex = flex.double(isotropic_bg_np)
 
-    # The -= operator directly mutates the underlying C++ memory block
-    data_np -= isotropic_bg_np
-    data_flex = flex.double(data_np)
-    miller_array = miller_array.customized_copy(data = data_flex)
+    # 5. Evaluate the background
+    isotropic_bg_np = spline(d_star_np)
+
+    # 6. Safe Subtraction: Create a boolean mask of valid data points
+    # This prevents the mask_value flag itself from being subtracted from
+    if np.isnan(mask_value):
+        valid_mask = ~np.isnan(data_np)
+    else:
+        valid_mask = (data_np != mask_value)
+
+    # Apply the subtraction exclusively to valid reflections
+    data_np[valid_mask] -= isotropic_bg_np[valid_mask]
     
-    miller_array = symmetry_average(miller_array,apply_symmetry_str)
+    # 7. Convert back to flex and assign
+    data_flex = flex.double(data_np)
+    miller_array = miller_array.customized_copy(data=data_flex)
+
+    # 8. Apply downstream symmetry merging
+    # Note: Assumes symmetry_average() is defined elsewhere in your module
+    miller_array = symmetry_average(miller_array, apply_symmetry_str)
 
     return miller_array
 
