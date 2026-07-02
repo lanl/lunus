@@ -272,7 +272,7 @@ if __name__=="__main__":
   try:
     idx = [a.find("d_max")==0 for a in args].index(True)
   except ValueError:
-    d_max = 0.9
+    d_max = 999
   else:
     d_max = float(args.pop(idx).split("=")[1])
 
