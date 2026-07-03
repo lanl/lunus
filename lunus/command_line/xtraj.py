@@ -574,13 +574,12 @@ if __name__=="__main__":
 
 # CCTBX Method for calculating structure factors
 
-  #try:
-  #  idx = [a.find("cctbx_method")==0 for a in args].index(True)
-  #except ValueError:
-  #  cctbx_method = "fft"
-  #else:
-  #  cctbx_method = args.pop(idx).split("=")[1]
-  #  assert(cctbx_method=="direct")
+  try:
+    idx = [a.find("cctbx_method")==0 for a in args].index(True)
+  except ValueError:
+    cctbx_method = "fft"
+  else:
+    cctbx_method = args.pop(idx).split("=")[1]
 
 # Calculate difference with respect to reference (for optimization)
 
@@ -737,7 +736,7 @@ EOF
       print("f_000 = %g, volume = %g" % (f_000.f_000,volume))
 
   if engine == "sfall":
-    fcalc = xrs_sel.structure_factors(d_min=d_min).f_calc()
+    fcalc = xrs_sel.structure_factors(d_min=d_min,algorithm=cctbx_method).f_calc()
     mtz_dataset = fcalc.as_mtz_dataset('FWT')
     famp = abs(fcalc)
     famp.set_observation_type_xray_amplitude()
@@ -898,8 +897,9 @@ EOF
     if (num_elems <= 0 or skip_calc):
       num_elems = 0
       xrs_sel = xrs.select(selection)
+      xrs_sel.scattering_type_registry(table=scattering_table)
       if sig_fcalc is None:
-        sig_fcalc = xrs_sel.structure_factors(d_min=d_min).f_calc() * 0.0
+        sig_fcalc = xrs_sel.structure_factors(d_min=d_min,algorithm=cctbx_method).f_calc() * 0.0
         sig_fcalc = sig_fcalc.resolution_filter(d_min=d_min,d_max=d_max)
       if sig_icalc is None:
         sig_icalc = abs(sig_fcalc).set_observation_type_xray_amplitude().f_as_f_sq()
@@ -1053,7 +1053,7 @@ EOF
         else:
           xrs_sel.scattering_type_registry(table=scattering_table)
 
-          fcalc = xrs_sel.structure_factors(d_min=d_min,algorithm="fft").f_calc()
+          fcalc = xrs_sel.structure_factors(d_min=d_min,algorithm=cctbx_method).f_calc()
           fcalc = fcalc.resolution_filter(d_min=d_min,d_max=d_max)
 
         if do_opt:
