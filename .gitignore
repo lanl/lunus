@@ -7,3 +7,5 @@ tmp*
 !tmpdir_common
 \#SConscript\#
 c/src/.\#*
+examples/xtraj/*.hkl
+examples/xtraj/*.mtz

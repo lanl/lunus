@@ -1,0 +1,34 @@
+name: lunus
+channels:
+  - conda-forge
+dependencies:
+  - python == 3.12
+  - dacase::ambertools-dac=25
+  - parmed
+  - cctbx
+  - nexusformat
+  - pandas
+  - scipy
+  - numexpr
+  - joblib
+  - matplotlib
+  - ipykernel
+  - ipython
+  - jupyterlab
+  - nb_conda_kernels
+  - gtk3
+  - xarray
+  - nexpy
+  - scons
+  - git
+  - vim
+  - curl
+  - scp
+  - mdtraj
+  - openmpi
+  - mpi4py
+  - openssh
+  - cmake <4
+  - awscli
+  - gnuplot
+  - gemmi

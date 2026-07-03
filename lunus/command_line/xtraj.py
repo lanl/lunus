@@ -14,6 +14,8 @@
 from __future__ import print_function
 from iotbx.pdb import hierarchy
 from cctbx.array_family import flex
+import cProfile
+import pstats
 import mmtbx.utils
 import mmtbx.model
 from cctbx import maptbx
@@ -25,12 +27,14 @@ import scipy.optimize
 import os
 from libtbx.utils import Keep
 from cctbx import crystal
+from cctbx import miller
 import cctbx.sgtbx
 import subprocess
 import pickle
 import h5py
 import math
 from scipy.interpolate import CubicSpline
+import gemmi
 
 def mpi_enabled():
   return 'OMPI_COMM_WORLD_SIZE' in os.environ.keys()
@@ -275,6 +279,16 @@ if __name__=="__main__":
     d_max = 999
   else:
     d_max = float(args.pop(idx).split("=")[1])
+
+# gemmi_cutoff
+
+  try:
+    idx = [a.find("gemmi_cutoff")==0 for a in args].index(True)
+  except ValueError:
+    gemmi_cutoff = 0.01
+  else:
+    gemmi_cutoff = float(args.pop(idx).split("=")[1])
+
 
 # nsteps (use in lieu of "last" parameter)
 
@@ -558,6 +572,15 @@ if __name__=="__main__":
   else:
     engine = args.pop(idx).split("=")[1]
 
+# CCTBX Method for calculating structure factors
+
+  try:
+    idx = [a.find("cctbx_method")==0 for a in args].index(True)
+  except ValueError:
+    cctbx_method = "fft"
+  else:
+    cctbx_method = args.pop(idx).split("=")[1]
+
 # Calculate difference with respect to reference (for optimization)
 
   try:
@@ -619,6 +642,9 @@ if __name__=="__main__":
       apply_bfac = False
       
 # If in diff_mode, read the reference .mtz files
+
+  profiler = cProfile.Profile()
+  #profiler.enable()
 
   if diff_mode:
     if mpi_rank == 0:      
@@ -710,7 +736,7 @@ EOF
       print("f_000 = %g, volume = %g" % (f_000.f_000,volume))
 
   if engine == "sfall":
-    fcalc = xrs_sel.structure_factors(d_min=d_min).f_calc()
+    fcalc = xrs_sel.structure_factors(d_min=d_min,algorithm=cctbx_method).f_calc()
     mtz_dataset = fcalc.as_mtz_dataset('FWT')
     famp = abs(fcalc)
     famp.set_observation_type_xray_amplitude()
@@ -813,6 +839,7 @@ EOF
   fcalc_list = None
   
   itime = time.time()
+
   
   for tt in ti:
     
@@ -870,8 +897,9 @@ EOF
     if (num_elems <= 0 or skip_calc):
       num_elems = 0
       xrs_sel = xrs.select(selection)
+      xrs_sel.scattering_type_registry(table=scattering_table)
       if sig_fcalc is None:
-        sig_fcalc = xrs_sel.structure_factors(d_min=d_min).f_calc() * 0.0
+        sig_fcalc = xrs_sel.structure_factors(d_min=d_min,algorithm=cctbx_method).f_calc() * 0.0
         sig_fcalc = sig_fcalc.resolution_filter(d_min=d_min,d_max=d_max)
       if sig_icalc is None:
         sig_icalc = abs(sig_fcalc).set_observation_type_xray_amplitude().f_as_f_sq()
@@ -901,7 +929,6 @@ EOF
     #        print ("Time to optimize = ",otime2-otime1)
 
     # select the atoms for the structure factor calculation
-
         xrs_sel = xrs.select(selection)
         if engine == "sfall":
           pdbtmp = xrs_sel.as_pdb_file()
@@ -916,9 +943,117 @@ EOF
           hkl_in = any_reflection_file(file_name=fcalcnam_tmp)
           miller_arrays = hkl_in.as_miller_arrays()
           fcalc = miller_arrays[1]
+        elif engine == "gemmi":
+          st = gemmi.Structure()
+          st.cell = gemmi.UnitCell(*xrs_sel.unit_cell().parameters())
+          st.spacegroup_hm = xrs_sel.space_group().type().lookup_symbol()
+          
+          model = gemmi.Model("1")
+          chain = gemmi.Chain("A")
+          res = gemmi.Residue()
+          res.name = "UNK"
+          res.seqid = gemmi.SeqId("1")
+          
+          # Extract flat arrays for fast iteration
+          coords = xrs_sel.sites_cart()
+          u_isos = xrs_sel.extract_u_iso_or_u_equiv()
+          occs = xrs_sel.scatterers().extract_occupancies()
+          elements = [s.scattering_type for s in xrs_sel.scatterers()]
+          
+          u_to_b = 8.0 * np.pi**2
+    
+          # zip() executes in C, minimizing Python loop overhead
+          for (x, y, z), u, occ, el in zip(coords, u_isos, occs, elements):
+            atom = gemmi.Atom()
+            atom.name = el
+            atom.element = gemmi.Element(el)
+            atom.pos = gemmi.Position(x, y, z)
+            atom.b_iso = u * u_to_b
+            atom.occ = occ
+            res.add_atom(atom)
+        
+          chain.add_residue(res)
+          model.add_chain(chain)
+          st.add_model(model)
+
+          calc = gemmi.DensityCalculatorX()
+          calc.d_min = d_min
+          calc.cutoff = gemmi_cutoff
+          calc.grid.unit_cell = st.cell
+          calc.grid.spacegroup = st.find_spacegroup()
+          calc.put_model_density_on_grid(st[0])
+          real_space_array = np.array(calc.grid, copy=False)
+        
+          # 2. Use SciPy's Inverse FFT to compute the positive exponent (+2pi i h x)
+          # Setting workers=-1 tells SciPy to use all available CPU cores.
+          # ifftn automatically normalizes the sum by (1 / N_voxels).
+          
+          complex_grid = scipy.fft.ifftn(real_space_array, workers=-1, overwrite_x=True)
+
+          # 3. Multiply by unit cell Volume to complete the absolute scaling
+          complex_grid *= st.cell.volume
+          grid = calc.grid
+
+          # Get the integer grid dimensions before the FFT transforms it
+          Nu, Nv, Nw = grid.nu, grid.nv, grid.nw
+
+          # --- 6. Generate Miller Indices (HKL) up to d_min ---
+          # We use cctbx here just to easily get the mathematically correct list of HKLs 
+          # for the asymmetric unit at this resolution limit.
+          miller_set = miller.build_set(
+            crystal_symmetry=xrs_sel.crystal_symmetry(),
+            anomalous_flag=False, # We want unique reflections, assuming Friedel's law
+            d_min=d_min
+          )
+          hkls_flex = miller_set.indices()
+          hkls_np = np.array(hkls_flex)
+          
+          # --- 7. Vectorized Extraction from Gemmi Complex Grid ---
+          h = hkls_np[:, 0]
+          k = hkls_np[:, 1]
+          l = hkls_np[:, 2]
+          # Since we used half_l=False, the full reciprocal space grid is available.
+          # We just apply grid wrapping (modulo) for all dimensions based on periodic boundary conditions.
+          u = h % Nu
+          v = k % Nv
+          w = l % Nw
+
+          # Extract the complex values directly from the NumPy view of the grid
+          # Since we used half_l=False, the full reciprocal space grid is available.
+          # Apply the complex conjugate to the reflections where we used the Friedel mate
+        
+          complex_array = np.array(getattr(complex_grid, 'array', complex_grid), copy=False)
+          extracted_sf = complex_array[u, v, w]
+
+          extracted_sf = np.conjugate(extracted_sf)
+          d_spacings_np = np.array(miller_set.d_spacings().data())
+        
+          # The un-blur math is mathematically: exp( B / (4 * d^2) )
+          inv_d2 = 1.0 / (d_spacings_np ** 2)
+          unblur_multiplier = np.exp(calc.blur * 0.25 * inv_d2)
+        
+          # Apply the multiplier across all reflections instantly
+          extracted_sf *= unblur_multiplier
+
+          #Fix type
+          extracted_sf = extracted_sf.astype(np.complex128)
+
+          # --- 8. Construct CCTBX Miller Array ---
+    
+          # Safely convert the complex numpy array into a cctbx flex.complex_double array.     
+          # np.ascontiguousarray ensures the memory layout aligns cleanly for the C++ backend.
+          sf_flex = flex.complex_double(np.ascontiguousarray(extracted_sf, dtype=np.complex128))
+    
+          # Combine the original miller_set and the flex array to build the final object
+          fcalc = miller.array(miller_set=miller_set, data=sf_flex)
+          
+          # Optional: Attach labels so CCTBX knows what this data represents
+          fcalc.set_info(miller.array_info(labels=["FWT", "PHIFWT"]))
+          fcalc = fcalc.resolution_filter(d_min=d_min,d_max=d_max)
         else:
           xrs_sel.scattering_type_registry(table=scattering_table)
-          fcalc = xrs_sel.structure_factors(d_min=d_min).f_calc()
+
+          fcalc = xrs_sel.structure_factors(d_min=d_min,algorithm=cctbx_method).f_calc()
           fcalc = fcalc.resolution_filter(d_min=d_min,d_max=d_max)
 
         if do_opt:
@@ -949,7 +1084,7 @@ EOF
 
     chunk_ct = chunk_ct + 1
 
-    print("Worker ",work_rank," processed chunk ",chunk_ct," of ",nchunklist[work_rank]," with ",chunklist[work_rank]," frames in ",time.time()-mtime," seconds")
+    print("Worker ",work_rank,"on MPI rank ",mpi_rank," processed chunk ",chunk_ct," of ",nchunklist[work_rank]," with ",chunklist[work_rank]," frames in ",time.time()-mtime," seconds")
 
     if (chunk_ct >= nchunklist[work_rank]):
       break
@@ -963,7 +1098,14 @@ EOF
 #    Nj = map_data[0].shape[1]
 #    Nk = map_data[0].shape[2]
 #    map_grid_3D = np.reshape(map_grid,(len(tsites),Ni,Nj,Nk))
-#    np.save(dens_file,map_grid_3D)                           
+#    np.save(dens_file,map_grid_3D)
+
+  #profiler.disable()
+
+  #stats = pstats.Stats(profiler)
+
+  # Sort by 'tottime' or 'cumtime', and print the top 20 slowest functions
+  #stats.sort_stats('tottime').print_stats(50)
 
   print("Worker ",work_rank," is done with individual calculations")
   sys.stdout.flush()
