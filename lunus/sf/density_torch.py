@@ -467,6 +467,8 @@ def splat_density(
     max_atoms_per_batch: int = 50_000,
     max_pairs_per_batch: int = 4_000_000,
     compile_core: bool = True,
+    out: torch.Tensor = None,        # optional preallocated flat grid, see below
+    stats: dict = None,              # optional dict; work counters written into it
 ) -> torch.Tensor:
     """
     Returns the real-space electron density grid, shape (Nu, Nv, Nw),
@@ -509,6 +511,22 @@ def splat_density(
     the heavy part to BLAS. It also removes the minimum-image wrap, which can
     never fire here (precompute_element_offsets checks that a local box stays
     well inside the cell, and raises if it does not).
+
+    out, if given, is a preallocated FLAT (Nu*Nv*Nw,) grid, zeroed in place and
+    accumulated into instead of allocating a fresh one per call. It exists to
+    test whether repeated calls that reuse one buffer run faster than repeated
+    calls that each get a new allocation -- the difference between how this is
+    benchmarked and how xtraj's frame loop calls it. Forward-only: reusing a
+    buffer that an autograd graph still references would corrupt it, so grad
+    must be disabled.
+
+    stats, if given, is filled with the work actually done -- atoms, chunks,
+    pairs_ideal (each atom's own offset prefix, the figure bench_splat.py
+    reports) and pairs_actual (what the chunked batching evaluates, where every
+    atom in a chunk pays the chunk's largest prefix). Their ratio is the
+    padding overhead, which depends on how the per-atom reach is distributed
+    and so can differ between one set of coordinates and another. Counting is
+    free: both come from values already resident on the host.
     """
     Nu, Nv, Nw = grid_shape
     device = frac_coords.device
@@ -523,7 +541,17 @@ def splat_density(
     grid_dims = torch.tensor([Nu, Nv, Nw], device=device, dtype=dtype)
     extents = (Nu, Nv, Nw)
 
-    grid_flat = torch.zeros(Nu * Nv * Nw, device=device, dtype=dtype)
+    if out is None:
+        grid_flat = torch.zeros(Nu * Nv * Nw, device=device, dtype=dtype)
+    else:
+        assert not torch.is_grad_enabled(), (
+            "splat_density(out=...) reuses the caller's buffer in place, which "
+            "would corrupt any autograd graph still holding it; use it only "
+            "under torch.no_grad()")
+        assert out.shape == (Nu * Nv * Nw,) and out.dtype == dtype and out.device == device, (
+            f"out must be a flat ({Nu*Nv*Nw},) {dtype} tensor on {device}, got "
+            f"{tuple(out.shape)} {out.dtype} on {out.device}")
+        grid_flat = out.zero_()
     core = _resolve_compiled(_density_core, compile_core)
     scatter = _resolve_compiled(_scatter_core, compile_core)
 
@@ -546,6 +574,12 @@ def splat_density(
     # driven to ~0, since a point near |c_off| = reach sits at true r ~ R.
     reach_all = atom_radius_ang + c_rem_all.detach().norm(dim=-1)
 
+    if stats is not None:
+        stats["atoms"] = int(frac_coords.shape[0])
+        stats["chunks"] = 0
+        stats["pairs_ideal"] = 0
+        stats["pairs_actual"] = 0
+
     n_elements = len(elem_offsets)
     for e in range(n_elements):
         mask = element_idx == e
@@ -564,6 +598,8 @@ def splat_density(
             eo.c_off_norm, reach[order].to(eo.c_off_norm.dtype), right=True,
         )
         K_needed_cpu = K_needed.detach().to("cpu", torch.int64).numpy()
+        if stats is not None:
+            stats["pairs_ideal"] += int(K_needed_cpu.sum())
 
         M = atom_indices.shape[0]
         start = 0
@@ -575,6 +611,9 @@ def splat_density(
             start += n
             if K == 0:
                 continue
+            if stats is not None:
+                stats["chunks"] += 1
+                stats["pairs_actual"] += n * K
 
             dens = core(
                 c_rem_all[sel], eo.c_off[:K], eo.c_off_sq[:K],

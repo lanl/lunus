@@ -911,7 +911,11 @@ EOF
 
         # overwrite crystal structure coords with trajectory coords
 
-        tmp = flex.vec3_double(tsites[i,:,:])
+        # flex.vec3_double(ndarray) converts row by row: 85 ms for 135,834
+        # atoms, measured, against 0.5 ms for a flex.double built from the
+        # flattened array, with bit-identical output. tsites is C-contiguous,
+        # so ravel() is a view. See lunus/sf/docs/performance.md.
+        tmp = flex.vec3_double(flex.double(tsites[i].ravel()))
         xrs.set_sites_cart(tmp)
 
     # perform translational fit with respect to the alpha carbons in the topology file
@@ -925,7 +929,8 @@ EOF
           for j in range(3):
             sites_frac[:,j] +=res.x[j]        
             otime2 = time.time()
-            xrs.set_sites_frac(flex.vec3_double(sites_frac))
+            # Same per-row conversion as above; sites_frac is (na, 3) C-contiguous.
+            xrs.set_sites_frac(flex.vec3_double(flex.double(sites_frac.ravel())))
     #        print ("Time to optimize = ",otime2-otime1)
 
     # select the atoms for the structure factor calculation

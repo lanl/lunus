@@ -94,6 +94,14 @@ def bench_torch(elements, b_per_atom, cell, grid, cutoff, max_atoms, reps, compi
     if max_pairs is not None:
         kwargs["max_pairs_per_batch"] = max_pairs
 
+    # splat_density's own count of what the chunked batching evaluates, as
+    # against the ideal count above. xtraj reports the same pair of numbers
+    # per frame under torch_splat_stats=True, so the two are comparable and
+    # can settle whether the splat's in-situ cost is extra work or slower
+    # work. Counting is free; it reads values already on the host.
+    stats = {}
+    kwargs["stats"] = stats
+
     with torch.no_grad():
         t0 = time.time()
         g = splat_density(*args, **kwargs)
@@ -107,6 +115,7 @@ def bench_torch(elements, b_per_atom, cell, grid, cutoff, max_atoms, reps, compi
             times.append(time.time() - t0)
 
     return dict(setup=setup_s, first=first_s, best=min(times), pairs=pairs,
+                pairs_actual=stats["pairs_actual"], chunks=stats["chunks"],
                 total=float(g.sum()))
 
 
@@ -225,6 +234,8 @@ def main():
         extra = f"   first call {r['first']:.2f}s (includes compile)" if compile_core else ""
         print(f"{label:18s} {r['best']:6.2f}s   {r['pairs']/r['best']/1e6:7.1f}e6 pairs/s"
               f"   pairs {r['pairs']:,}{extra}")
+        print(f"{'':18s} as batched: {r['pairs_actual']:,} pairs in {r['chunks']:,} "
+              f"chunks (padding {r['pairs_actual']/r['pairs']:.4f}x)")
         if not compile_core:
             print(f"{'':18s} setup (kernels + offsets, once per run) {r['setup']:.2f}s")
 

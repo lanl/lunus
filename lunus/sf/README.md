@@ -130,6 +130,7 @@ torch/cctbx/gemmi/mpi4py, so a partial environment skips rather than errors.
 | `tools/compare_icalc_mtz.py` | two Icalc MTZs → correlation and R-factor, overall and by resolution shell. |
 | `tools/compare_density.py` | two real-space density grids (needs `save_density=True`). |
 | `tools/make_random_bfacs.py` | writes a PDB with a random B per residue, for exercising the per-atom-B path. Seeded. |
+| `tools/analyze_trace.py` | a `torch.profiler` Chrome trace (from `torch_profile_frames=N`) → GPU busy vs idle, the gap size distribution, what each large gap was blocked in, and a test for cgroup CPU-throttling. Standard library only. |
 | `examples/example_usage.py` | several configurations → `<F>`/diffuse → scalar loss → `backward()` → gradients on every atom. |
 | `examples/example_mpi_training.py` | the same under `mpirun`, via `training_mpi.py`. |
 | `examples/demo_taper_gradient.py` | why a hard cutoff is unusable for gradients. |
