@@ -2,10 +2,33 @@
 *.o
 .DS_Store
 *.pyc
+__pycache__/
+.pytest_cache/
 .adxv_beam_center
+
+# Python build artifacts (pyproject.toml / pip wheel / pixi)
+build/
+dist/
+*.egg-info/
+.pixi/
 tmp*
 !tmpdir_common
 \#SConscript\#
 c/src/.\#*
 examples/xtraj/*.hkl
 examples/xtraj/*.mtz
+
+# lunus/sf/examples/compare_gemmi/ runs in place, so its OUTPUTS are ignored
+# while its inputs are tracked. Tracked: run_xtraj.sh, top_bfac.pdb.gz and
+# traj.xtc (the 135,834-atom system every table in lunus/sf/docs/performance.md
+# was measured on -- kept in the repo so those numbers stay reproducible).
+# Ignored below: the reflection files each run produces, the optional density
+# dump (save_density=True, ~221 MB), and any UNCOMPRESSED .pdb, which is only
+# ever a regenerated intermediate.
+lunus/sf/examples/compare_gemmi/*.pdb
+lunus/sf/examples/compare_gemmi/*.mtz
+lunus/sf/examples/compare_gemmi/*.hkl
+lunus/sf/examples/compare_gemmi/*.npy
+lunus/sf/examples/compare_gemmi/*.ndx
+lunus/sf/examples/compare_gemmi/deleted_frames.txt
+lunus/sf/*-PROGRESS.md

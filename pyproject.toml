@@ -1,0 +1,151 @@
+# Python packaging metadata for the PURE-PYTHON parts of LUNUS.
+#
+# This is deliberately NOT the build for the C library, the ~280 command-line
+# tools, or the lunus_ext Boost extension -- those are built by SCons
+# (SConstruct) or as a cctbx module (libtbx_config + SConscript), and neither
+# path is affected by this file. What it packages is the importable Python
+# tree: lunus, lunus.sf, lunus.md and lunus.command_line.
+#
+# The point is that `lunus.sf` -- the differentiable structure-factor code,
+# which needs only numpy and torch -- can be installed and imported as an
+# ordinary dependency, without a cctbx build and without PYTHONPATH games.
+# lunus/__init__.py imports lunus_ext inside a try/except precisely so that an
+# install without the extension is usable; anything that genuinely needs
+# Process or LunusDIFFIMAGE still raises a clear ImportError at first use.
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lunus"
+version = "0.2a0"
+description = "Analysis and modeling of diffuse X-ray scattering from protein crystals"
+readme = { file = "README", content-type = "text/plain" }
+requires-python = ">=3.9"
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
+authors = [{ name = "Michael E. Wall" }]
+keywords = ["crystallography", "diffuse scattering", "structure factors", "X-ray"]
+classifiers = [
+  "Intended Audience :: Science/Research",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: Chemistry",
+  "Topic :: Scientific/Engineering :: Physics",
+]
+
+# Only numpy is unconditional. The heavy scientific stack is left to extras
+# (or to conda, see [tool.pixi] below) so that installing this package never
+# drags in a second copy of torch or cctbx alongside a conda-provided one.
+dependencies = ["numpy"]
+
+[project.optional-dependencies]
+# The differentiable pipeline: lunus.sf. gemmi supplies the IT92 scattering
+# coefficients that elements.py reads at run time (cctbx also works, but it is
+# far better installed from conda than from PyPI, so it is not listed here).
+sf = ["torch", "gemmi"]
+# The MD-trajectory pipeline, lunus.sf.xtraj. cctbx is deliberately absent for
+# the same reason; install it from conda-forge.
+xtraj = ["mdtraj", "scipy", "h5py"]
+dev = ["pytest"]
+
+[project.urls]
+Homepage = "https://github.com/lanl/lunus"
+
+[tool.setuptools]
+# Listed explicitly rather than auto-discovered: the repository root holds
+# c/, test/, examples/, scripts/ and generation/, none of which are Python
+# packages, and lunus/cuda and lunus/kokkos are SCons-built C/CUDA sources
+# with no __init__.py. Automatic discovery would either fail or guess.
+packages = ["lunus", "lunus.sf", "lunus.md", "lunus.command_line"]
+
+[tool.setuptools.package-data]
+# No data files ship in the wheel. lunus/sf/examples/compare_gemmi/ holds
+# ~7 MB of MD topology and trajectory used by the end-to-end comparison, and
+# lunus/sf/{tests,tools,examples,docs} are not packages, so none of it is
+# collected. Clone the repository if you want them.
+"*" = []
+
+# ---------------------------------------------------------------------------
+# pixi
+# ---------------------------------------------------------------------------
+# Conda-forge supplies the scientific stack (pytorch, cctbx, gemmi, mdtraj,
+# mpi4py all install far more reliably from conda than from PyPI), and the
+# local package is installed on top of it as an editable PyPI dependency.
+#
+#   pixi install          # create the environment
+#   pixi run test         # run the lunus.sf test suite
+#   pixi shell            # then: python -c "import lunus.sf"
+#
+# NOTE: these tables were written against pixi's current schema but have not
+# been resolved here (pixi is not installed on this machine). If you are on
+# pixi older than ~0.41, rename [tool.pixi.workspace] to [tool.pixi.project].
+# Everything above this line is plain PEP 621 and is what actually makes the
+# package installable -- pixi, uv and pip all consume it, so nothing here is
+# load-bearing for `pip install .`.
+
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+
+# linux-64 asserts a CUDA driver so the solver will consider cuda builds of
+# pytorch. pixi normally derives the __cuda virtual package by probing the
+# host, and that probe fails inside many containers even when the GPU is
+# perfectly usable -- it needs libcuda.so.1 or nvidia-smi visible at solve
+# time. The symptom is "pytorch ... would require __cuda *, for which no
+# candidates were found".
+#
+# The value is the maximum CUDA version the DRIVER supports, as reported top
+# right by `nvidia-smi`, not the runtime version of any package. Declaring the
+# true value satisfies every package requiring `__cuda >=` up to it, so
+# under-declaring is what causes spurious failures.
+platforms = [
+  "osx-arm64",
+  "osx-64",
+  { platform = "linux-64", cuda = "13" },
+]
+
+# One environment with everything the repository's workflows need, so that a
+# plain `pixi run ...` works. xtraj.py imports mdtraj, scipy and h5py at module
+# level -- they are needed to run it at all, including
+# examples/compare_gemmi/run_xtraj.sh -- and mpi4py is here so multi-rank runs
+# work without switching environments.
+[tool.pixi.dependencies]
+python = "3.12.*"
+numpy = "*"
+gemmi = "*"
+cctbx-base = "*"
+mdtraj = "*"
+scipy = "*"
+mpi4py = "*"
+openmpi = "*"
+pytest = "*"
+h5py = "*"
+
+# PyTorch is requested per platform because conda-forge ships CPU and CUDA
+# BUILD VARIANTS of the same `pytorch` package, and a bare `pytorch = "*"`
+# usually resolves to the CPU one -- which then reports
+# torch.cuda.is_available() == False on a perfectly good GPU machine.
+# `pytorch-gpu` is the metapackage that forces a cuda* build.
+[tool.pixi.target.linux-64.dependencies]
+pytorch-gpu = "*"
+# cuda.h, the CUDA driver API header. Triton compiles a small cuda_utils.c
+# against it on the first torch.compile, and a container that mounts the
+# driver still has no headers, so without this every compile attempt fails
+# with "fatal error: cuda.h: No such file or directory" and falls back to
+# eager. Left unpinned so the solver matches it to the CUDA version pytorch
+# already constrains. This is a speed fix only -- the eager fallback is
+# automatic and numerically identical.
+cuda-driver-dev = "*"
+
+[tool.pixi.target.osx-arm64.dependencies]
+pytorch = "*"
+
+[tool.pixi.target.osx-64.dependencies]
+pytorch = "*"
+
+[tool.pixi.pypi-dependencies]
+lunus = { path = ".", editable = true }
+
+[tool.pixi.tasks]
+test = { cmd = "pytest lunus/sf/tests -q", description = "Run the lunus.sf test suite" }
+compare = { cmd = "bash run_xtraj.sh gemmi && bash run_xtraj.sh torch && python ../../tools/compare_icalc_mtz.py icalc_gemmi.mtz icalc_torch.mtz", cwd = "lunus/sf/examples/compare_gemmi", description = "Run both engines end to end and compare" }
