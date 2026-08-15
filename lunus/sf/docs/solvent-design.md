@@ -1,10 +1,10 @@
 # Design note: bulk solvent for lunus.sf
 
-Status: **stage 1 implemented** — `solvent_torch.py`, `solvent=` on both entry
-points in `structure_factor_torch.py`, and `tests/test_solvent.py`. Still to do:
-gemmi `SolventMasker` parity, the scaling fit and shell-resolved R, the diffuse
-null and convergence studies, and per-configuration occupancies (see the API gap
-below).
+Status: **stages 1-2 implemented** — `solvent_torch.py`, `solvent=` on both entry
+points in `structure_factor_torch.py`, `tests/test_solvent.py`, and gemmi
+parity in `tests/test_solvent_gemmi.py` ("What the parity test found" below).
+Still to do: the scaling fit and shell-resolved R, the diffuse null and
+convergence studies, and per-configuration occupancies (see the API gap below).
 
 Written 2026-08-15, revised the same day against the current code — the API
 assumptions below were checked, the cost estimate was replaced with a
@@ -378,11 +378,8 @@ comparable.
 
 ## Validation
 
-- **Parity against gemmi's solvent masking** (`SolventMasker`, with its Refmac /
-  cctbx radii sets — check the current API), the same way `test_symmetry.py`
-  pins `symmetrize_sum` against `symmetrize_sum()`. Note this compares a
-  geometric mask against a density-threshold one, so expect agreement in
-  `F_mask` at the level of the model difference, not to machine precision.
+- ~~**Parity against gemmi's solvent masking**~~ **done** —
+  `tests/test_solvent_gemmi.py`. See "What the parity test found" below.
 - **R-factor against experimental amplitudes** for a structure with a known
   refined R. Bulk solvent mostly affects low resolution, so a shell-resolved
   comparison below ~5 Å is where a wrong model shows up.
@@ -422,6 +419,80 @@ comparable.
   set falls depends on how many were kept. If the diffuse does not change
   smoothly in both, the cutoff is sitting inside the hydration shell rather than
   outside it.
+
+## What the parity test found
+
+`tests/test_solvent_gemmi.py`, on 200 carbons clustered in a 30 Å cell at 0.625 Å
+grid spacing, cutoff calibrated so both models call the same fraction of the
+cell solvent (0.886).
+
+**The convention matches.** gemmi's mask is 1 in solvent and 0 in the molecule,
+same as `solvent_mask`. Asserted by sampling at atom centres, since a flipped
+mask is the easiest catastrophic error to make here and would otherwise show up
+only as a strange `F_mask`.
+
+**Agreement is inside the spread of gemmi's own conventions**, which is the
+only defensible yardstick for comparing two different models:
+
+| | binarised voxel agreement |
+|---|---|
+| ours vs gemmi `Cctbx` | **0.995** |
+| gemmi `Refmac` vs `Cctbx` | 0.987 |
+| gemmi `VanDerWaals` vs `Cctbx` | 0.985 |
+
+`|F_mask|` correlates at 0.9998 with R = 0.036 over the low-resolution
+reflections where bulk solvent contributes at all. So the threshold mask is a
+defensible stand-in — the model difference is smaller than the disagreement the
+field already tolerates between radii sets.
+
+### But matching gemmi exactly forces a nearly hard threshold
+
+This is the substantive finding, and it changes how the cutoff should be
+chosen. Matching gemmi's boundary puts the cutoff far out in the density tail
+(1.45e-3 of peak here), where the density falls through the taper's range in
+well under a voxel. The taper width cannot rescue it: `mask = 1` requires
+`ρ ≤ cutoff − width`, so a width approaching the cutoff eliminates the fully
+solvent region altogether (measured: width = 4× cutoff drops occupancy from
+0.83 to 0.12).
+
+The result is a mask that is smooth in principle and a hard threshold in
+practice — 31 shell voxels out of 110,592 — which is precisely what the
+gradients and the diffuse variance depend on.
+
+The curve, on the same fixture, with width = ½ cutoff throughout:
+
+| cutoff / peak ρ | solvent fraction | agreement vs gemmi | shell voxels |
+|---|---|---|---|
+| 1e-5 | 0.828 | 0.995 | 13 |
+| 1e-3 | 0.830 | 0.995 | 93 |
+| **1e-2** | **0.835** | **0.994** | **1,464** |
+| 3e-2 | 0.850 | 0.978 | 2,331 |
+| 1e-1 | 0.874 | 0.954 | 3,746 |
+| 3e-1 | 0.920 | 0.908 | 8,701 |
+
+(rows measured on the larger 400-atom fixture; the test's own numbers differ in
+magnitude and not in shape)
+
+**Recommendation: put the cutoff near 1% of peak density, not at whatever
+reproduces gemmi exactly.** That buys 15–20× more boundary to differentiate
+through at essentially no cost in agreement — still 0.994, still better than
+Refmac vs Cctbx. Past ~3% the agreement starts paying for the smoothness, and
+by 30% the mask is visibly tighter than any geometric one.
+
+Note what this means for the diffuse work: a 2–3 voxel shell, which is what the
+variance-bias argument asks for, is at the expensive end of this curve on a
+0.625 Å grid and will be more expensive on the finer grids real `d_min` values
+imply. The width, the grid and the diffuse bias have to be chosen together —
+the convergence study in Validation is where that gets settled, not here.
+
+### The cutoff is a calibration, not a constant
+
+The matched cutoff moves by 21× between B = 20 and B = 60 on the test fixture,
+and by three orders of magnitude on a larger one. Borrowing B = 20's cutoff for
+a B = 60 structure costs real agreement (0.996 → 0.974). A geometric mask does
+not move with B and a density threshold does — so the cutoff must be calibrated
+for the system, B convention and grid in use. The test asserts this rather than
+describing it, so that a future hard-coded default fails loudly.
 
 ## Cost
 
