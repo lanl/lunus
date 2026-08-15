@@ -72,7 +72,15 @@ orbit. Build the mask from the pre-symmetrization grid and sum it, and the
 result reaches |orbit| rather than 1 and means nothing. The natural insertion
 point is right after the `if grid_ops:` line in `structure_factors_one_config`,
 which is correct — but this is a silent wrong answer, not an exception, so it is
-written down here rather than left to be rediscovered.
+pinned in `tests/test_solvent_symmetry.py`.
+
+Measured there, on P4₃, the error is not distributed the way one would guess.
+The summed mask is roughly `(|orbit| − 1) +` the correct mask, and a constant
+offset lands **entirely in F(000)** — 4.3× too large against an orbit of 4.
+What survives for `h ≠ 0` is only the structure where orbit copies overlap:
+22% on that system, and less on a sparser one. So the reliable detector is the
+**grid**, not the transform: a mask whose values exceed 1 is wrong whatever its
+`F_mask` happens to look like. `mask_occupancy()` sees this immediately.
 
 **A known limitation, for the parity test's sake.** A density threshold is not
 invariant to grid spacing, B-factors or `taper_width`, and a geometric mask is
