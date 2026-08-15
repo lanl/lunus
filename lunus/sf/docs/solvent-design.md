@@ -3,7 +3,13 @@
 Status: proposed, not implemented. Written 2026-08-15, revised the same day
 against the current code — the API assumptions below were checked, the cost
 estimate was replaced with a measurement, and three constraints were added
-(symmetry ordering, B-factor differentiation, diffuse scattering).
+(symmetry ordering, B-factor differentiation, and the explicit/bulk boundary).
+
+Scope, decided: the model is **explicit ordered waters plus a mask for the
+disordered remainder**, and it is aimed at **ensemble models** — N
+configurations sharing one atom list — rather than at MD trajectories, where a
+frozen hydration shell stops meaning anything. Solvent **is** applied to the
+diffuse observable, `per_conformer`.
 
 lunus.sf currently computes `F_protein` only. Fitting experimental amplitudes —
 and matching what SFcalculator, Phenix and REFMAC produce — needs a bulk-solvent
@@ -132,19 +138,114 @@ These are different physical models. sampleworks already exposes exactly this
 distinction as `bulk_solvent="combined"` vs `"per_conformer"`. Make it a named
 argument in `structure_factors_batch`, not an accident of where the sum lands.
 
-### And the diffuse observable is a third question, not a special case
+### The diffuse observable: compute it, and only per conformer
 
-`mean_and_diffuse` computes `⟨|F|²⟩ − |⟨F⟩|²`, which is what lunus exists for.
-Apply solvent per conformer and that difference picks up the **variance of a
-static solvent mask** — fluctuations of a model with no thermal physics in it.
-Whether that means anything is a research question, not a defaults question.
+`mean_and_diffuse` computes `⟨|F|²⟩ − |⟨F⟩|²`, which is what lunus exists for,
+and solvent belongs in it. **Decision: compute it, `per_conformer`.**
 
-So: scope `solvent=` to the Bragg / `F_total` path first, and have the diffuse
-path either document explicitly what it does with solvent or refuse the
-combination. What must not happen is diffuse intensities quietly changing for
-people who have been comparing them against experiment. The "combined" vs
-"per_conformer" naming inherited from sampleworks is a Bragg-side distinction
-and should not be assumed to settle this one.
+The physics is the excluded volume. The mask fluctuation is *anti-correlated*
+with the protein's — where an atom moves out, solvent moves in — so per-conformer
+solvent does not add diffuse near the surface so much as **cancel** part of it.
+Diffuse computed from `F_protein` alone overestimates the contrast at low
+resolution, and this is the correction.
+
+Note that `combined` is not a weaker version of this: one mask shared by all
+configurations has zero variance and contributes **exactly nothing** to diffuse
+while still changing Bragg. The `combined` / `per_conformer` choice is the
+difference between having the effect and not having it.
+
+**What the mask cannot give back.** A static mask fluctuates only where the
+protein boundary moves. Explicit water additionally produces water–water
+correlated scattering — the diffuse water ring near ~3.5 Å, and low-angle
+solvent density fluctuations — which are real, measurable components of a
+crystal's diffuse signal. Replacing waters with a mask removes that
+contribution rather than approximating it. For the diffuse observable an
+all-atom model is therefore *more* physical than the hybrid; the hybrid's
+justification is cost, or a trajectory whose far-field solvent is not
+trustworthy. Say which claim is being made, because a low-resolution diffuse
+comparison will show the difference.
+
+### Diffuse is a variance, so mask noise biases it upward
+
+This is the constraint that should drive the parameter choices. In the Bragg
+average, per-configuration numerical jitter in the mask averages out. In
+`⟨|F|²⟩ − |⟨F⟩|²` it does not: **variance of noise adds**, so any
+frame-to-frame jitter that is not physics becomes a systematic *positive bias*
+in the diffuse signal, not a random error.
+
+Two sources, both controllable:
+
+- **Level-set discretization.** The mask is a level set sampled on a grid; as
+  atoms move, voxels flip across the taper shell partly discretely. This argues
+  for a **wider** taper for diffuse work than forward Bragg accuracy would
+  suggest — the opposite of the usual pressure, and a decision to make
+  deliberately rather than by inheriting a Bragg-tuned width.
+- **Discrete changes in the atom set** — see the next section.
+
+And the existing precision floor gets worse exactly where solvent matters:
+`docs/performance.md` records diffuse reproducing to 2e-4 on CUDA against 4e-5
+for Icalc, because it is a difference of two large nearly-equal numbers. The
+cancellation above shrinks the low-resolution diffuse signal further, so the
+same absolute noise is a larger relative error in the shells the solvent model
+was added for. Re-measure that floor with solvent on — two identical CUDA runs —
+before trusting low-resolution diffuse; float64 for the mask FFT is the
+fallback.
+
+Finally, `k_overall` and `exp(−h·U·h)` are Bragg scaling parameters. Applied per
+conformer they scale diffuse by their square. That is probably what is wanted
+for comparison, but it should be explicit rather than incidental.
+
+## The explicit/bulk boundary: ordered waters stay explicit
+
+The intended model is the crystallographic one: **ordered waters are explicit
+atoms, and the mask covers the disordered remainder** — what Phenix and REFMAC
+do. The density-threshold mask suits this better than a geometric one, because
+it does not care which atoms produced the density: explicit waters raise the
+density where they sit and so exclude themselves from the solvent region, with
+no special handling of the boundary between the two models.
+
+**Do not police this with the atom selection.** "Water is selected" is not the
+failure; a fully solvated box is. Check the mask instead, once, at setup:
+
+```python
+occupancy = mask.mean()        # or the fraction of voxels above 0.5
+```
+
+| occupancy | meaning |
+|---|---|
+| ~0.3–0.7 | a plausible crystal solvent content; the hybrid is working |
+| ≈ 0 | the selected atoms already fill the cell — `F_mask ≈ 0` and the feature is a **silent no-op** |
+| ≈ 1 | cutoff too high, or almost nothing was selected |
+
+The middle row is the one that matters. `xtraj.py`'s `selection` defaults to
+`all`, and the tracked example system is 38.1% explicit water (51,690 of 135,834
+atoms), so the default path on a solvated trajectory produces an empty mask, no
+error, and the conclusion that bulk solvent does not matter. Print the occupancy
+and warn at the extremes.
+
+### The explicit waters must correspond across configurations
+
+Whatever waters are explicit must sit at the **same positions in the coordinate
+array in every configuration**. Two reasons:
+
+1. **Physics.** A water that enters or leaves the explicit set between
+   configurations is a whole atom's worth of density appearing and
+   disappearing. In a variance observable that lands as spurious diffuse
+   *precisely in the surface region the model is trying to get right*. This is
+   the second source of bias from the previous section, and it is much larger
+   than the discretization one.
+2. **Mechanics.** The atom set is fixed at setup throughout: kernels are built
+   once from a fixed element and B list, and `xtraj.py`'s `xray.structure`
+   bypass resolves the selection, occupancies and element indices once. A
+   per-configuration selection would not be slow, it would be **silently
+   ignored**, with the setup-time set used for every configuration.
+
+This suits an **ensemble model** — N configurations sharing one atom list, each
+with the same explicit waters in the same slots — which is the case this feature
+is for. It does **not** suit an MD trajectory, where waters wander: a first-shell
+water at frame 0 is in the bulk a few hundred frames later, so a fixed subset
+stops meaning anything. For MD, use all atoms and no mask, or protein only and a
+mask, and do not try to freeze a hydration shell out of a diffusing solvent.
 
 ## Constraint 3: what a threshold mask does to ∂/∂B
 
@@ -265,6 +366,28 @@ comparable.
   mean much.
 - **Gradient check** in the style of `tests/test_torch_pipeline.py`: autograd
   through the mask against a finite difference.
+
+- **Mask occupancy**, asserted to be in a plausible range on the example
+  configuration, so the silent-no-op case above fails loudly in CI rather than
+  in someone's results.
+
+- **Diffuse null test.** Replicate one configuration N times: the true diffuse
+  is exactly zero, so whatever comes out is the numerical floor. Run it with
+  and without solvent — the difference is what the mask contributes to the
+  floor.
+
+- **Diffuse convergence in the taper width and the grid.** Compute diffuse with
+  solvent at width `w` and `2w`, and at two grid spacings. The physical part
+  converges; the bias from level-set discretization scales with `w` and the
+  spacing. Until this is done, a diffuse difference attributed to excluded
+  volume cannot be distinguished from a discretization artifact.
+
+  With explicit ordered waters this study is two-dimensional: vary the width
+  *and* the number of explicit waters. With waters present the density in the
+  hydration region is intermediate between protein and bulk, so where the level
+  set falls depends on how many were kept. If the diffuse does not change
+  smoothly in both, the cutoff is sitting inside the hydration shell rather than
+  outside it.
 
 ## Cost
 
