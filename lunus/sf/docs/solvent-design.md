@@ -1,10 +1,12 @@
 # Design note: bulk solvent for lunus.sf
 
-Status: **stages 1-2 implemented** — `solvent_torch.py`, `solvent=` on both entry
-points in `structure_factor_torch.py`, `tests/test_solvent.py`, and gemmi
-parity in `tests/test_solvent_gemmi.py` ("What the parity test found" below).
-Still to do: the scaling fit and shell-resolved R, the diffuse null and
-convergence studies, and per-configuration occupancies (see the API gap below).
+Status: **stages 1-3 implemented** — `solvent_torch.py`, `solvent=` on both entry
+points in `structure_factor_torch.py`, `tests/test_solvent.py`, gemmi parity in
+`tests/test_solvent_gemmi.py`, and the diffuse discretization study in
+`tools/study_diffuse_solvent.py` (findings in the two sections named "What the
+... test found" below). Still to do: the scaling fit and shell-resolved R
+against experimental amplitudes, and per-configuration occupancies (see the API
+gap below).
 
 Written 2026-08-15, revised the same day against the current code — the API
 assumptions below were checked, the cost estimate was replaced with a
@@ -182,10 +184,15 @@ frame-to-frame jitter that is not physics becomes a systematic *positive bias*
 in the diffuse signal, not a random error.
 
 The source is **level-set discretization**: the mask is sampled on a grid, and
-as atoms move, voxels flip across the taper shell partly discretely. That argues
-for a **wider** taper for diffuse work than forward Bragg accuracy would
-suggest — the opposite of the usual pressure, and a decision to make
-deliberately rather than by inheriting a Bragg-tuned width.
+as atoms move, voxels flip across the taper shell partly discretely.
+
+*Measured since* — see "What the diffuse study found" below. The effect is real
+(the mask raises the pipeline's grid sensitivity about sevenfold) but the taper
+width barely controls it: a 16× wider shell buys ~25% less noise, because what
+dominates is where the sampled density crosses the cutoff rather than how
+smoothly it crosses. **Grid spacing is the lever**, with the noise falling as
+roughly its square. The "wider taper for diffuse" instinct is directionally
+right and quantitatively almost irrelevant.
 
 Note this is about *numerical* noise. Genuine variation between configurations —
 including which waters are associated and at what occupancy — is signal, not
@@ -402,23 +409,20 @@ comparable.
   configuration, so the silent-no-op case above fails loudly in CI rather than
   in someone's results.
 
-- **Diffuse null test.** Replicate one configuration N times: the true diffuse
-  is exactly zero, so whatever comes out is the numerical floor. Run it with
-  and without solvent — the difference is what the mask contributes to the
-  floor.
+- ~~**Diffuse null test / convergence study.**~~ **done** —
+  `tools/study_diffuse_solvent.py`, findings below. Note the null test as
+  originally proposed does not exist: replicating one configuration gives a
+  diffuse that is zero by construction and measures nothing, and the sub-voxel
+  translation that replaces it is not a null either, because the grid pipeline
+  does not commute with translation.
 
-- **Diffuse convergence in the taper width and the grid.** Compute diffuse with
-  solvent at width `w` and `2w`, and at two grid spacings. The physical part
-  converges; the bias from level-set discretization scales with `w` and the
-  spacing. Until this is done, a diffuse difference attributed to excluded
-  volume cannot be distinguished from a discretization artifact.
-
-  With explicit ordered waters this study is two-dimensional: vary the width
-  *and* the number of explicit waters. With waters present the density in the
-  hydration region is intermediate between protein and bulk, so where the level
-  set falls depends on how many were kept. If the diffuse does not change
-  smoothly in both, the cutoff is sitting inside the hydration shell rather than
-  outside it.
+  **Still open**, and now better targeted: the study run so far varies the width
+  and the grid on a water-free cluster. With explicit ordered waters the density
+  in the hydration region is intermediate between protein and bulk, so where the
+  level set falls depends on how many were kept — vary the **number of explicit
+  waters** as the second axis (the width having turned out to be the weak one).
+  If the diffuse does not change smoothly in it, the cutoff is sitting inside
+  the hydration shell rather than outside it.
 
 ## What the parity test found
 
@@ -493,6 +497,63 @@ a B = 60 structure costs real agreement (0.996 → 0.974). A geometric mask does
 not move with B and a density threshold does — so the cutoff must be calibrated
 for the system, B convention and grid in use. The test asserts this rather than
 describing it, so that a future hard-coded default fails loudly.
+
+## What the diffuse study found
+
+`tools/study_diffuse_solvent.py`, on a 200-atom cluster in a 30 Å cell, 8
+configurations displaced by σ = 0.3 Å, low-resolution reflections only, cutoff
+at 1% of peak density per the parity recommendation.
+
+**The instrument, and what it is not.** Displace every configuration by the
+same sub-voxel vector. For the underlying model this multiplies every `F(h)` by
+one common phase, so `⟨|F|²⟩` and `|⟨F⟩|²` are both unchanged and diffuse is
+exactly invariant. The grid pipeline does not reproduce that: `splat_density`
+samples each atom at fixed voxel centres, so a displaced structure is
+*resampled* rather than shifted, and recovering the true shift would require
+interpolation. The residual is therefore **not a null test** and not a bound on
+the error against the truth — it measures how far the discretized calculation
+is from a translation-invariant one. Grid refinement is the complementary
+measurement: it is closer to the continuum limit but moves the sampling of the
+density and the mask together, so it cannot separate them. Differencing with
+and without solvent is what isolates the mask's share.
+
+**The mask multiplies the pipeline's grid sensitivity by about seven.** At
+0.625 Å voxels, translation non-commutation is 3.6e-3 of the diffuse signal
+without solvent and 2.0e-2 with it. The reason is not subtle: the mask is
+nearly a step function, so it is far less bandlimited than the smooth atomic
+density and correspondingly worse sampled.
+
+**The solvent's contribution to diffuse is real and large** — 16% of the
+protein-only diffuse in this system, and stable across grids (0.166, 0.161,
+0.166 at three spacings). It is signal, not an artifact.
+
+**Grid spacing is the lever; the taper width is not.**
+
+| voxel | solvent signal | translation noise | refinement | signal / noise |
+|---|---|---|---|---|
+| 0.833 Å | 0.166 | 4.3e-2 | 2.8e-2 | 3.8 |
+| 0.625 Å | 0.161 | 2.0e-2 | 1.5e-2 | 8.1 |
+| 0.417 Å | 0.166 | 8.9e-3 | 5.7e-3 | 18.6 |
+
+The noise falls roughly as the **square of the voxel spacing** while the signal
+stays put. Against that, widening the taper barely helps: over a 16× change in
+shell voxels (width 0.05 → 0.9 × cutoff) the noise moves only ~25%, because
+what dominates is *where the sampled density crosses the cutoff*, not how
+smoothly it crosses. That is worth stating plainly because the earlier reasoning
+in this note — "diffuse wants a wider taper than Bragg" — is directionally right
+and quantitatively almost irrelevant.
+
+**Recommendation: oversample the grid for solvent + diffuse work.** The default
+`rate=1.5` in `grid_shape_for_resolution` gives spacing `d_min/3`, so a diffuse
+study at `d_min` 2 Å lands at 0.67 Å — signal/noise ≈ 8. Raising `rate` to 2–3
+buys the h² improvement and costs one FFT on a larger grid. Choose it from the
+required signal/noise, and re-run this study when the system changes; the
+numbers above are one cluster in one cell, and the *scaling* is the
+transferable part, not the values.
+
+A cheap regression guard lives in `tests/test_solvent.py`
+(`test_solvent_diffuse_signal_dominates_grid_alignment_noise`), pinned at a
+factor of three on a 0.62 Å grid where the measured ratio is ~5.
 
 ## Cost
 

@@ -20,6 +20,8 @@ The checks:
      while F_protein's own gradient still flows.
   7. Per-configuration masks reach the diffuse observable and a shared mask
      does not -- the distinction the ensemble semantics turn on.
+  8. The solvent's contribution to diffuse clears the grid-alignment noise it
+     also introduces (tools/study_diffuse_solvent.py maps that properly).
 """
 
 import math
@@ -323,3 +325,92 @@ def test_checkpointing_gives_the_same_answer_with_solvent():
 def test_taper_width_must_be_positive():
     with pytest.raises(ValueError, match="taper_width"):
         SolventModel(cutoff=0.1, taper_width=0.0)
+
+
+# --------------------------------------------------------------------------
+# 8. the diffuse study's conclusion, in miniature
+
+def test_solvent_diffuse_signal_dominates_grid_alignment_noise():
+    """Diffuse is a variance, so mask discretization biases it rather than
+    averaging out. The instrument is translation non-commutation: displacing
+    every configuration by the same sub-voxel vector leaves the MODEL's diffuse
+    exactly unchanged (one common phase on every F), but not the grid
+    calculation's, since splat_density resamples at fixed voxel centres rather
+    than shifting. Whatever comes out is grid alignment, not structure.
+
+    What must hold is that the solvent's contribution is well clear of it.
+    tools/study_diffuse_solvent.py maps this properly; the numbers there show
+    the noise falling as roughly the square of the voxel spacing while the
+    signal stays put, which is why the recommendation is to refine the grid
+    rather than to widen the taper. This is the cheap regression guard.
+    """
+    # A CLUSTERED blob with a 1.4 A minimum separation, not a loose cloud: the
+    # solvent boundary is the thing under test, and uniformly scattered atoms
+    # do not have one. Grid spacing matters as much -- at 0.62 A the signal
+    # clears the noise 5x, at 0.9 A only 1.9x, which is the h^2 scaling the
+    # study measures.
+    n_atoms, n_cfg, grid = 60, 4, (32, 32, 32)
+    rng = np.random.default_rng(0)
+    centre = np.array([10.0, 11.0, 12.0])
+    cart = []
+    while len(cart) < n_atoms:
+        u = rng.normal(size=3)
+        p = centre + 4.0 * rng.random() ** (1 / 3.0) * u / np.linalg.norm(u)
+        if all(np.linalg.norm(p - q) > 1.4 for q in cart):
+            cart.append(p)
+    cart = np.array(cart)
+    batch = cart[None] + 0.3 * rng.standard_normal((n_cfg, n_atoms, 3))
+
+    M_np = orth_matrix(*CELL)
+    A, lam, offsets, radius, taper_w, _ = build_element_kernels_torch(
+        ["C"], IT92_COEFFS, 20.0, 0.0, grid, M_np, cutoff=0.01,
+        device="cpu", dtype=DTYPE,
+    )
+    idx = torch.zeros(n_atoms, dtype=torch.long)
+    common = dict(
+        element_idx=idx, occ=torch.ones(n_atoms, dtype=DTYPE),
+        atom_A=A[idx], atom_lam=lam[idx], elem_offsets=offsets,
+        atom_radius_ang=radius[idx], grid_shape=grid,
+        orth_matrix=torch.tensor(M_np, dtype=DTYPE),
+        cell_volume=float(np.linalg.det(M_np)),
+        hkl=torch.tensor([[h, k, l] for h in range(-3, 4) for k in range(-3, 4)
+                          for l in range(-3, 4) if (h, k, l) != (0, 0, 0)],
+                         dtype=torch.long),
+        taper_width=taper_w,
+    )
+
+    def diffuse(coords, solvent):
+        frac = torch.tensor(coords @ np.linalg.inv(M_np).T, dtype=DTYPE)
+        F = structure_factors_batch(
+            frac, common["element_idx"], common["occ"], common["atom_A"],
+            common["atom_lam"], common["elem_offsets"],
+            common["atom_radius_ang"], common["grid_shape"],
+            common["orth_matrix"], common["cell_volume"], common["hkl"],
+            common["taper_width"], compile_core=False, solvent=solvent,
+        )
+        return mean_and_diffuse(F)[1]
+
+    rho = splat_density(
+        torch.tensor(batch[0] @ np.linalg.inv(M_np).T, dtype=DTYPE),
+        common["element_idx"], common["occ"], common["atom_A"],
+        common["atom_lam"], common["elem_offsets"], common["atom_radius_ang"],
+        grid, common["orth_matrix"], taper_w, compile_core=False,
+    )
+    cutoff = 0.01 * float(rho.max())
+    model = SolventModel(cutoff=cutoff, taper_width=0.5 * cutoff)
+
+    voxel = CELL[0] / grid[0]
+    d_none = diffuse(batch, None)
+    d_sol = diffuse(batch, model)
+    d_sol_shifted = diffuse(batch + 0.37 * voxel, model)
+
+    def rel(a, b):
+        return float((a - b).abs().mean() / b.abs().mean())
+
+    signal = rel(d_sol, d_none)
+    noise = rel(d_sol_shifted, d_sol)
+    assert signal > 0.01, signal            # solvent reaches diffuse at all
+    # Measured ratio here is ~5; the floor is set at 3 so that a real
+    # regression in mask discretization fails while ordinary
+    # platform-to-platform drift does not.
+    assert noise < signal / 3.0, (signal, noise)
