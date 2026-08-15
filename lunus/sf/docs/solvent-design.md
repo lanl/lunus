@@ -244,8 +244,18 @@ occupancy = mask.mean()        # or the fraction of voxels above 0.5
 The middle row is the one that matters. `xtraj.py`'s `selection` defaults to
 `all`, and the tracked example system is 38.1% explicit water (51,690 of 135,834
 atoms), so the default path on a solvated trajectory produces an empty mask, no
-error, and the conclusion that bulk solvent does not matter. Print the occupancy
-and warn at the extremes.
+error, and the conclusion that bulk solvent does not matter.
+
+**Implemented**: `SolventModel` measures the mask once, on the first
+configuration, and raises `SolventMaskWarning` outside [0.05, 0.99] — a band
+deliberately much wider than a real crystal's 0.3–0.7, since the point is to
+catch a model doing *nothing* rather than to second-guess an unusual one. The
+measurement is kept in `last_occupancy` / `last_shell_voxels` for callers that
+would rather report than be warned, `check_occupancy=False` disables it, and
+`warnings.simplefilter("error", SolventMaskWarning)` turns it into a failure —
+worth doing in a pipeline, since both degenerate cases otherwise produce
+numbers rather than exceptions. It costs one reduction per run, not per
+configuration, because reading the scalars back synchronises the device.
 
 ### The array must correspond; the hydration may vary
 

@@ -25,6 +25,7 @@ The checks:
 """
 
 import math
+import warnings
 
 import numpy as np
 import pytest
@@ -36,7 +37,8 @@ from lunus.sf.kernel_torch import build_element_kernels_torch
 from lunus.sf.elements import IT92_COEFFS
 from lunus.sf.cell_utils import orth_matrix
 from lunus.sf.solvent_torch import (
-    SolventModel, f_solvent, f_total, mask_occupancy, shell_voxels, solvent_mask,
+    SolventMaskWarning, SolventModel, f_solvent, f_total, mask_occupancy,
+    shell_voxels, solvent_mask,
 )
 from lunus.sf.structure_factor_torch import (
     compute_fcalc, mean_and_diffuse, reciprocal_inv_d2,
@@ -200,7 +202,11 @@ def test_detached_mask_carries_no_gradient():
         sys["taper_width"], compile_core=False,
     )
     cutoff = 0.1 * float(rho.detach().max())
-    common = dict(cutoff=cutoff, taper_width=0.25 * cutoff)
+    # check_occupancy off: this fixture is a nearly empty cell, so the
+    # degenerate-mask warning is CORRECT here and simply not what is under
+    # test. It has its own tests below.
+    common = dict(cutoff=cutoff, taper_width=0.25 * cutoff,
+                  check_occupancy=False)
     args = (rho, torch.zeros(len(sys["hkl"]), dtype=torch.complex128),
             sys["cell_volume"], sys["hkl"], sys["orth"])
 
@@ -220,7 +226,8 @@ def test_detach_mask_removes_the_solvent_path_from_the_gradient():
     sys = _system()
     rho = _density(sys)
     cutoff = 0.1 * float(rho.max())
-    common = dict(cutoff=cutoff, taper_width=0.25 * cutoff, k_sol=0.35)
+    common = dict(cutoff=cutoff, taper_width=0.25 * cutoff, k_sol=0.35,
+                  check_occupancy=False)
 
     def grad(**kw):
         frac = sys["frac"].clone().requires_grad_(True)
@@ -264,7 +271,8 @@ def test_per_configuration_masks_reach_diffuse_and_a_shared_one_does_not():
 
     rho = _density(sys)
     cutoff = 0.1 * float(rho.max())
-    model = SolventModel(cutoff=cutoff, taper_width=0.25 * cutoff, k_sol=0.35)
+    model = SolventModel(cutoff=cutoff, taper_width=0.25 * cutoff,
+                         k_sol=0.35, check_occupancy=False)
 
     def batch_sf(**kw):
         return structure_factors_batch(
@@ -308,7 +316,8 @@ def test_checkpointing_gives_the_same_answer_with_solvent():
     batch = sys["frac"].unsqueeze(0).repeat(2, 1, 1)
     rho = _density(sys)
     cutoff = 0.1 * float(rho.max())
-    model = SolventModel(cutoff=cutoff, taper_width=0.25 * cutoff)
+    model = SolventModel(cutoff=cutoff, taper_width=0.25 * cutoff,
+                         check_occupancy=False)
 
     def run(use_checkpoint):
         return structure_factors_batch(
@@ -414,3 +423,89 @@ def test_solvent_diffuse_signal_dominates_grid_alignment_noise():
     # regression in mask discretization fails while ordinary
     # platform-to-platform drift does not.
     assert noise < signal / 3.0, (signal, noise)
+
+
+# --------------------------------------------------------------------------
+# 9. the occupancy check, wired into the pipeline
+
+def _run_with(sys, model):
+    return _sf(sys, solvent=model)
+
+
+def _flooded(sys):
+    """A density with no empty space anywhere -- what an all-atom model with
+    explicit bulk water produces. It cannot be reached by thresholding the
+    toy fixture instead: outside the atomic cutoff radius the density is
+    EXACTLY zero, and zero is always below any positive cutoff, so vacuum is
+    solvent however small the cutoff is made."""
+    return _density(sys) + 1.0
+
+
+def test_empty_mask_warns_rather_than_silently_doing_nothing():
+    """The failure with no symptom: atoms already filling the cell give
+    F_mask ~ 0, no error, and a solvent term that contributes nothing. The
+    check exists so that arrives as a warning instead of as a conclusion."""
+    sys = _system()
+    model = SolventModel(cutoff=0.5, taper_width=0.25)
+    F_p = _sf(sys, solvent=None)
+
+    with pytest.warns(SolventMaskWarning, match="essentially empty"):
+        model.apply(_flooded(sys), F_p, sys["cell_volume"], sys["hkl"],
+                    sys["orth"])
+    assert model.last_occupancy == pytest.approx(0.0, abs=1e-6)
+
+
+def test_saturated_mask_warns_too():
+    """The other end: a cutoff above the peak calls the whole cell solvent."""
+    sys = _system()
+    rho = _density(sys)
+    huge = 10.0 * float(rho.max())
+    model = SolventModel(cutoff=huge, taper_width=0.5 * huge)
+
+    with pytest.warns(SolventMaskWarning, match="almost the whole cell"):
+        _run_with(sys, model)
+    assert model.last_occupancy > 0.99
+
+
+def test_a_sensible_mask_does_not_warn_and_records_its_diagnostics():
+    # 200 atoms rather than the 6-atom default: a nearly empty cell is 99.2%
+    # solvent, and warning about THAT is correct behaviour, not a bad
+    # threshold.
+    sys = _system(n_atoms=200)
+    rho = _density(sys)
+    cutoff = 0.1 * float(rho.max())
+    model = SolventModel(cutoff=cutoff, taper_width=0.5 * cutoff)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", SolventMaskWarning)
+        _run_with(sys, model)
+
+    assert 0.05 <= model.last_occupancy <= 0.99
+    assert model.last_shell_voxels > 0
+    assert "occupancy" in repr(model)
+
+
+def test_the_check_runs_once_not_per_configuration():
+    """It reads scalars back from the device, which synchronises. Once per
+    model, not once per frame -- and one warning, not N."""
+    sys = _system()
+    model = SolventModel(cutoff=0.5, taper_width=0.25)
+    F_p = _sf(sys, solvent=None)
+    args = (_flooded(sys), F_p, sys["cell_volume"], sys["hkl"], sys["orth"])
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", SolventMaskWarning)
+        for _ in range(4):
+            model.apply(*args)
+    assert sum(issubclass(w.category, SolventMaskWarning) for w in caught) == 1
+
+
+def test_the_check_can_be_turned_off():
+    sys = _system()
+    model = SolventModel(cutoff=0.5, taper_width=0.25, check_occupancy=False)
+    F_p = _sf(sys, solvent=None)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", SolventMaskWarning)
+        model.apply(_flooded(sys), F_p, sys["cell_volume"], sys["hkl"],
+                    sys["orth"])
+    assert model.last_occupancy is None

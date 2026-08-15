@@ -41,6 +41,7 @@ Three things in here are not obvious, all of them from that design note:
 """
 
 import math
+import warnings
 
 import torch
 
@@ -51,6 +52,24 @@ from .structure_factor_torch import compute_fcalc, reciprocal_inv_d2
 # normally REFINED per dataset; fixed values are a starting model, not a fit.
 K_SOL_DEFAULT = 0.35     # e/A^3
 B_SOL_DEFAULT = 46.0     # A^2
+
+# Occupancies outside this band are reported. The band is deliberately much
+# wider than the 0.3-0.7 a protein crystal actually shows: the point is to
+# catch a model that is doing NOTHING, not to second-guess an unusual but
+# deliberate one. A small molecule alone in a large cell legitimately sits
+# near 0.9.
+OCCUPANCY_MIN = 0.05
+OCCUPANCY_MAX = 0.99
+
+
+class SolventMaskWarning(UserWarning):
+    """The solvent mask is degenerate: empty, or covering the whole cell.
+
+    Raised once per SolventModel rather than per configuration. Escalate it
+    with warnings.simplefilter("error", SolventMaskWarning) to fail instead --
+    worth doing in a pipeline, since both degenerate cases produce numbers
+    rather than exceptions.
+    """
 
 
 def solvent_mask(density, cutoff, taper_width):
@@ -190,14 +209,23 @@ class SolventModel:
                     gradient of every parameter the density depends on --
                     in particular B, once B is differentiable. See the module
                     docstring.
+      check_occupancy
+                    measure the mask ONCE, on the first configuration, and
+                    warn if it is degenerate (default True). The check costs
+                    one reduction per run and catches the failure mode that
+                    otherwise has no symptom at all.
+
+    After the first apply(), last_occupancy and last_shell_voxels hold that
+    measurement, for callers that would rather report it than be warned.
     """
 
     __slots__ = ("cutoff", "taper_width", "k_sol", "b_sol", "k_overall",
-                 "u_aniso", "detach_mask")
+                 "u_aniso", "detach_mask", "check_occupancy",
+                 "last_occupancy", "last_shell_voxels")
 
     def __init__(self, cutoff, taper_width, k_sol=K_SOL_DEFAULT,
                  b_sol=B_SOL_DEFAULT, k_overall=1.0, u_aniso=None,
-                 detach_mask=True):
+                 detach_mask=True, check_occupancy=True):
         if taper_width <= 0:
             raise ValueError(
                 "taper_width must be > 0; a hard threshold has no usable "
@@ -209,6 +237,34 @@ class SolventModel:
         self.k_overall = k_overall
         self.u_aniso = u_aniso
         self.detach_mask = detach_mask
+        self.check_occupancy = check_occupancy
+        self.last_occupancy = None
+        self.last_shell_voxels = None
+
+    def _check(self, mask):
+        """Once per model. Reads back two scalars from the device, which is a
+        synchronisation, so it is not done per configuration."""
+        self.last_occupancy = float(mask_occupancy(mask))
+        self.last_shell_voxels = shell_voxels(mask)
+        occ = self.last_occupancy
+
+        if occ < OCCUPANCY_MIN:
+            warnings.warn(
+                "solvent mask is essentially empty (occupancy %.4f): the "
+                "atoms already fill the cell, so F_mask is ~0 and the solvent "
+                "term contributes NOTHING -- silently. This is what an "
+                "all-atom model with explicit bulk water does. Either exclude "
+                "the bulk solvent from the atom set, or lower cutoff (=%.4g, "
+                "in e/A^3)." % (occ, self.cutoff),
+                SolventMaskWarning, stacklevel=3)
+        elif occ > OCCUPANCY_MAX:
+            warnings.warn(
+                "solvent mask covers almost the whole cell (occupancy %.4f): "
+                "hardly anything is being called protein. Check cutoff "
+                "(=%.4g, in e/A^3): it is not transferable between B-factor "
+                "conventions, grids or systems, and must be calibrated for "
+                "this one." % (occ, self.cutoff),
+                SolventMaskWarning, stacklevel=3)
 
     def apply(self, density, F_protein, cell_volume, hkl, orth_matrix):
         """
@@ -219,6 +275,8 @@ class SolventModel:
         """
         rho = density.detach() if self.detach_mask else density
         mask = solvent_mask(rho, self.cutoff, self.taper_width)
+        if self.check_occupancy and self.last_occupancy is None:
+            self._check(mask)
         F_mask = f_solvent(mask, cell_volume, hkl, orth_matrix)
         inv_d2 = reciprocal_inv_d2(orth_matrix, hkl)
         F = f_total(
@@ -230,7 +288,9 @@ class SolventModel:
 
     def __repr__(self):
         return ("SolventModel(cutoff=%r, taper_width=%r, k_sol=%r, b_sol=%r, "
-                "k_overall=%r, u_aniso=%s, detach_mask=%r)"
+                "k_overall=%r, u_aniso=%s, detach_mask=%r, occupancy=%s)"
                 % (self.cutoff, self.taper_width, self.k_sol, self.b_sol,
                    self.k_overall,
-                   "None" if self.u_aniso is None else "set", self.detach_mask))
+                   "None" if self.u_aniso is None else "set", self.detach_mask,
+                   "unmeasured" if self.last_occupancy is None
+                   else "%.4f" % self.last_occupancy))

@@ -75,6 +75,7 @@ _EXPORTS = {
     "mean_and_diffuse": "structure_factor_torch",
     # bulk solvent
     "SolventModel": "solvent_torch",
+    "SolventMaskWarning": "solvent_torch",
     "solvent_mask": "solvent_torch",
     "mask_occupancy": "solvent_torch",
     "shell_voxels": "solvent_torch",
