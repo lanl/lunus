@@ -1,15 +1,23 @@
 # Design note: bulk solvent for lunus.sf
 
-Status: proposed, not implemented. Written 2026-08-15, revised the same day
-against the current code — the API assumptions below were checked, the cost
-estimate was replaced with a measurement, and three constraints were added
-(symmetry ordering, B-factor differentiation, and the explicit/bulk boundary).
+Status: **stage 1 implemented** — `solvent_torch.py`, `solvent=` on both entry
+points in `structure_factor_torch.py`, and `tests/test_solvent.py`. Still to do:
+gemmi `SolventMasker` parity, the scaling fit and shell-resolved R, the diffuse
+null and convergence studies, and per-configuration occupancies (see the API gap
+below).
+
+Written 2026-08-15, revised the same day against the current code — the API
+assumptions below were checked, the cost estimate was replaced with a
+measurement, and three constraints were added (symmetry ordering, B-factor
+differentiation, and the explicit/bulk boundary).
 
 Scope, decided: the model is **explicit ordered waters plus a mask for the
 disordered remainder**, and it is aimed at **ensemble models** — N
-configurations sharing one atom list — rather than at MD trajectories, where a
-frozen hydration shell stops meaning anything. Solvent **is** applied to the
-diffuse observable, `per_conformer`.
+configurations sharing one atom array, in which the hydration is free to differ
+between members and that difference is part of what is being modelled — rather
+than at MD trajectories, where a frozen explicit water dissociates into the bulk
+that the mask already represents. Solvent **is** applied to the diffuse
+observable, `per_conformer`.
 
 lunus.sf currently computes `F_protein` only. Fitting experimental amplitudes —
 and matching what SFcalculator, Phenix and REFMAC produce — needs a bulk-solvent
@@ -173,14 +181,15 @@ average, per-configuration numerical jitter in the mask averages out. In
 frame-to-frame jitter that is not physics becomes a systematic *positive bias*
 in the diffuse signal, not a random error.
 
-Two sources, both controllable:
+The source is **level-set discretization**: the mask is sampled on a grid, and
+as atoms move, voxels flip across the taper shell partly discretely. That argues
+for a **wider** taper for diffuse work than forward Bragg accuracy would
+suggest — the opposite of the usual pressure, and a decision to make
+deliberately rather than by inheriting a Bragg-tuned width.
 
-- **Level-set discretization.** The mask is a level set sampled on a grid; as
-  atoms move, voxels flip across the taper shell partly discretely. This argues
-  for a **wider** taper for diffuse work than forward Bragg accuracy would
-  suggest — the opposite of the usual pressure, and a decision to make
-  deliberately rather than by inheriting a Bragg-tuned width.
-- **Discrete changes in the atom set** — see the next section.
+Note this is about *numerical* noise. Genuine variation between configurations —
+including which waters are associated and at what occupancy — is signal, not
+bias; see "The array must correspond; the hydration may vary" below.
 
 And the existing precision floor gets worse exactly where solvent matters:
 `docs/performance.md` records diffuse reproducing to 2e-4 on CUDA against 4e-5
@@ -223,29 +232,54 @@ atoms), so the default path on a solvated trajectory produces an empty mask, no
 error, and the conclusion that bulk solvent does not matter. Print the occupancy
 and warn at the extremes.
 
-### The explicit waters must correspond across configurations
+### The array must correspond; the hydration may vary
 
-Whatever waters are explicit must sit at the **same positions in the coordinate
-array in every configuration**. Two reasons:
+Whatever waters are explicit sit at the **same positions in the coordinate array
+in every configuration**, with the same count. That is a **mechanical**
+requirement: kernels are built once from a fixed element and B list, and
+`xtraj.py`'s `xray.structure` bypass resolves the selection, occupancies and
+element indices once at setup. A per-configuration *selection* would not be
+slow, it would be **silently ignored**, with the setup-time set used for every
+configuration.
 
-1. **Physics.** A water that enters or leaves the explicit set between
-   configurations is a whole atom's worth of density appearing and
-   disappearing. In a variance observable that lands as spurious diffuse
-   *precisely in the surface region the model is trying to get right*. This is
-   the second source of bias from the previous section, and it is much larger
-   than the discretization one.
-2. **Mechanics.** The atom set is fixed at setup throughout: kernels are built
-   once from a fixed element and B list, and `xtraj.py`'s `xray.structure`
-   bypass resolves the selection, occupancies and element indices once. A
-   per-configuration selection would not be slow, it would be **silently
-   ignored**, with the setup-time set used for every configuration.
+**It is not a claim that the hydration must be identical across
+configurations.** The opposite: an ensemble model is exactly where which waters
+are associated with the protein, and how strongly, is *meant* to differ between
+members. That variation is part of the model being fitted, and its contribution
+to the diffuse term is signal — the surface disorder the ensemble exists to
+represent. Express it as **coordinates and occupancies differing between
+configurations within a fixed array layout**, rather than as atoms entering and
+leaving the array.
 
-This suits an **ensemble model** — N configurations sharing one atom list, each
-with the same explicit waters in the same slots — which is the case this feature
-is for. It does **not** suit an MD trajectory, where waters wander: a first-shell
-water at frame 0 is in the bulk a few hundred frames later, so a fixed subset
-stops meaning anything. For MD, use all atoms and no mask, or protein only and a
-mask, and do not try to freeze a hydration shell out of a diffusing solvent.
+The density-threshold mask handles that gracefully, which is a second point in
+its favour here: as an explicit water's occupancy falls, the density where it
+sits falls with it, and the threshold hands that region back to the bulk. The
+explicit and bulk contributions stay continuous across the transition instead of
+double-counting at one end and leaving a hole at the other. How completely the
+bulk takes over is then set by `k_sol` and the cutoff, which makes it a modelling
+knob rather than an accident.
+
+**Two things that genuinely are artifacts**, and should not be confused with the
+above:
+
+- **A per-configuration selection rule.** Re-picking "waters within X Å of the
+  protein" per configuration makes membership a property of the rule and the
+  grid rather than of the model, and it is silently ignored anyway for the
+  mechanical reason above.
+- **A frozen explicit subset of an MD trajectory.** Waters wander: a first-shell
+  water at frame 0 is in the bulk a few hundred frames later, and keeping it
+  explicit there both double-counts against the region the mask represents and
+  injects one molecule's diffusion into the surface diffuse. For MD, use all
+  atoms and no mask, or protein only and a mask. Do not try to freeze a
+  hydration shell out of a diffusing solvent.
+
+### API gap: occupancy is currently shared across configurations
+
+`structure_factors_batch` takes one `occ` tensor for the whole ensemble, so
+per-configuration occupancies — the natural way to express varying hydration
+above — cannot be passed today. Accepting `occ` of shape `(N, n_atoms)` as well
+as `(n_atoms,)` is a small change to the per-member call and is on the path for
+this feature, not an optional extra.
 
 ## Constraint 3: what a threshold mask does to ∂/∂B
 

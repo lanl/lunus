@@ -31,6 +31,8 @@ lunus/sf/examples/compare_gemmi/*.hkl
 lunus/sf/examples/compare_gemmi/*.npy
 lunus/sf/examples/compare_gemmi/*.ndx
 lunus/sf/examples/compare_gemmi/deleted_frames.txt
+lunus/sf/examples/compare_gemmi/*.log
+lunus/sf/examples/compare_gemmi/time_*.txt
 # torch.profiler traces (torch_profile_frames=N), written to the CWD of
 # whatever directory the run happens in. Several MB for a few frames.
 torch_trace_rank*.json

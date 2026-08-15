@@ -54,7 +54,7 @@ def structure_factors_one_config(
     atom_A, atom_lam, elem_offsets, atom_radius_ang,
     grid_shape, orth_matrix, cell_volume,
     hkl, taper_width, blur=0.0, max_atoms_per_batch=50_000,
-    grid_ops=None, compile_core=True,
+    grid_ops=None, compile_core=True, solvent=None,
 ):
     """One configuration, start to finish: splat -> symmetrize -> FFT ->
     extract F(hkl). Differentiable with respect to frac_coords. atom_A/atom_lam/
@@ -69,7 +69,15 @@ def structure_factors_one_config(
     grid is symmetry-expanded before the FFT, exactly as gemmi's
     put_model_density_on_grid() does via symmetrize_sum(). Pass None (or an
     empty list, which is what a P1 space group produces) to splat the atoms
-    as given with no symmetry expansion."""
+    as given with no symmetry expansion.
+
+    solvent: a solvent_torch.SolventModel, or None. None is the default and
+    runs no solvent code at all, so results are bit-identical to before this
+    argument existed. When given, F_total = k_overall * exp(-h.U.h) *
+    [F_protein + k_sol*exp(-b_sol*s^2/4)*F_mask] is returned instead, with the
+    mask thresholded from THIS configuration's density -- see
+    docs/solvent-design.md, and note that the mask is built after the symmetry
+    expansion below, which is the only correct order."""
     from .density_torch import splat_density
     from .symmetry_torch import symmetrize_sum
 
@@ -81,7 +89,16 @@ def structure_factors_one_config(
     )
     if grid_ops:
         density = symmetrize_sum(density, grid_ops)
-    return compute_fcalc(density, cell_volume, hkl, orth_matrix, blur=blur)
+    F_protein = compute_fcalc(density, cell_volume, hkl, orth_matrix, blur=blur)
+    if solvent is None:
+        return F_protein
+    # Built from the symmetry-expanded density, per the note above. The mask
+    # FFT happens here rather than outside so that it lands INSIDE the
+    # checkpointed region in structure_factors_batch -- otherwise the density
+    # grid is retained for every configuration at once and the peak memory
+    # checkpointing exists to control comes straight back.
+    F_total, _mask = solvent.apply(density, F_protein, cell_volume, hkl, orth_matrix)
+    return F_total
 
 
 def structure_factors_batch(
@@ -90,7 +107,7 @@ def structure_factors_batch(
     grid_shape, orth_matrix, cell_volume,
     hkl, taper_width, blur=0.0, max_atoms_per_batch=50_000,
     grid_ops=None, compile_core=True,
-    use_checkpoint=False,
+    use_checkpoint=False, solvent=None,
 ):
     """N configurations at once: (N, n_atoms, 3) -> (N, n_refl) complex.
 
@@ -124,6 +141,26 @@ def structure_factors_batch(
     device can hold and checkpointing only the remainder would give the same
     peak at a fraction of the penalty -- see "Not yet built" in README.md.
 
+    solvent: a solvent_torch.SolventModel, or None (default: no solvent code
+    runs, bit-identical to before the argument existed). Applied PER
+    CONFIGURATION -- each member gets its own mask from its own density.
+
+    That is the only choice that reaches the diffuse observable: one mask
+    shared across the ensemble has zero variance, so it changes <F> but
+    contributes exactly nothing to <|F|^2> - |<F>|^2. Per-configuration masks
+    fluctuate anti-correlated with the protein (where an atom moves out,
+    solvent moves in), which is the excluded-volume contrast correction.
+
+    Two things that follow, both in docs/solvent-design.md. The atom array must
+    CORRESPOND across configurations -- same slots, same count -- which is a
+    mechanical requirement, not a claim that the hydration cannot vary: an
+    ensemble is exactly where it SHOULD vary, and that variation is signal in
+    the diffuse term. Express it as coordinates and occupancies differing
+    between configurations, not as atoms entering and leaving the array. And
+    since diffuse is a variance, NUMERICAL noise in the mask (level-set
+    discretization) biases it upward rather than averaging out, so the taper
+    wants to be wider here than Bragg accuracy alone would suggest.
+
     Returns a (N, n_refl) complex tensor; pass it straight to
     mean_and_diffuse() for the ensemble observables.
     """
@@ -148,6 +185,7 @@ def structure_factors_batch(
             hkl, taper_width, blur=blur,
             max_atoms_per_batch=max_atoms_per_batch,
             grid_ops=grid_ops, compile_core=compile_core,
+            solvent=solvent,
         )
 
     if not use_checkpoint:

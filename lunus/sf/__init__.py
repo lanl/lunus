@@ -73,6 +73,13 @@ _EXPORTS = {
     "structure_factors_one_config": "structure_factor_torch",
     "structure_factors_batch": "structure_factor_torch",
     "mean_and_diffuse": "structure_factor_torch",
+    # bulk solvent
+    "SolventModel": "solvent_torch",
+    "solvent_mask": "solvent_torch",
+    "mask_occupancy": "solvent_torch",
+    "shell_voxels": "solvent_torch",
+    "f_solvent": "solvent_torch",
+    "f_total": "solvent_torch",
     # MPI training step
     "training_step": "training_mpi",
     "local_forward": "training_mpi",
