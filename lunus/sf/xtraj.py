@@ -1015,12 +1015,31 @@ if __name__=="__main__":
     # The call count matters for reading the table: most phases run once per
     # frame, but the trajectory read runs once per CHUNK, so its ms/frame
     # figure moves with chunk= and is not comparable to the others without it.
-    print("  {0:<22} {1:>10} {2:>12} {3:>8} {4:>7}".format(
-      "phase", "total s", "ms/frame", "share", "calls"))
+    # The median column excludes frame 0, and exists because the mean does not
+    # separate steady state from one-time cost. cuFFT builds its plan on the
+    # first transform and the splat carries its own warmup, so over few frames
+    # the mean is inflated by roughly (one-time cost)/n_frames -- an effect
+    # that shrinks as the run lengthens, which makes short and long runs of
+    # the same configuration look like different machines. Measured on 10
+    # frames: splat mean 79.9 against median 66.9.
+    have_series = bool(_phase_series)
+    header = "  {0:<22} {1:>10} {2:>12} {3:>8} {4:>7}"
+    if have_series:
+      header += " {5:>11}"
+    print(header.format("phase", "total s", "ms/frame", "share", "calls",
+                        "median ms"))
     for name, secs in _phase_totals.items():
-      print("  {0:<22} {1:>10.2f} {2:>12.1f} {3:>7.1f}% {4:>7d}".format(
+      row = "  {0:<22} {1:>10.2f} {2:>12.1f} {3:>7.1f}% {4:>7d}".format(
         name, secs, 1e3 * secs / max(n_frames, 1), 100.0 * secs / total,
-        _phase_calls[name]))
+        _phase_calls[name])
+      series = _phase_series.get(name)
+      if have_series:
+        if series and len(series) > 1:
+          rest = sorted(series[1:])
+          row += " {0:>11.1f}".format(1e3 * rest[len(rest) // 2])
+        else:
+          row += " {0:>11}".format("-")      # one call: nothing to take a median of
+      print(row)
     print("  {0:<22} {1:>10.2f} {2:>12.1f}".format(
       "TOTAL (timed)", total, 1e3 * total / max(n_frames, 1)))
     if loop_wall is not None:
