@@ -49,7 +49,9 @@ from lunus.sf.cell_utils import orth_matrix
 from lunus.sf.density_torch import splat_density
 from lunus.sf.elements import IT92_COEFFS
 from lunus.sf.kernel_torch import build_element_kernels_torch
-from lunus.sf.solvent_torch import SolventModel, mask_occupancy, shell_voxels, solvent_mask
+from lunus.sf.solvent_torch import (
+    MASK_BLUR_DEFAULT, SolventModel, mask_occupancy, shell_voxels, solvent_mask,
+)
 from lunus.sf.structure_factor_torch import (
     mean_and_diffuse, structure_factors_batch,
 )
@@ -138,7 +140,12 @@ def main():
                    help="displacement of each configuration, A")
     p.add_argument("--shift", type=float, default=0.37,
                    help="translation applied to every configuration, in VOXELS")
+    p.add_argument("--mask-blur", type=float, default=None, metavar="B",
+                   help="probe-radius blur, A^2 (default: SolventModel's own; "
+                        "pass 0 to reproduce this study as first published)")
     args = p.parse_args()
+    if args.mask_blur is None:
+        args.mask_blur = MASK_BLUR_DEFAULT
 
     cart = blob(args.atoms)
     batch = ensemble(cart, args.configs, sigma=args.sigma)
@@ -153,7 +160,21 @@ def main():
         s["taper_width"], compile_core=False,
     )
     peak = float(rho0.max())
-    cutoff = 0.01 * peak            # the parity study's recommendation
+    # THE OCCUPANCY IS THE ANCHOR, NOT THE CUTOFF. This study used to fix the
+    # cutoff at 1% of peak on every grid, which is the recommendation the
+    # design note has since superseded, and which cannot survive mask_blur at
+    # all: blurring changes the peak and the whole shape of the density
+    # distribution, so the same fraction of peak carves out a different
+    # fraction of the cell. Comparing blur against no blur that way would
+    # measure the occupancy difference, not the blur.
+    #
+    # So: take the occupancy the old rule produced, and hold THAT fixed across
+    # blur values and across both grids. The coarse/fine refinement comparison
+    # gets the same benefit -- it used 1% of each grid's own peak before, which
+    # was already slightly inconsistent between them.
+    anchor = 0.01 * peak
+    target_occupancy = float(mask_occupancy(
+        solvent_mask(rho0, anchor, 0.5 * anchor)))
 
     # Same sub-voxel translation applied to every configuration.
     shifted = batch + args.shift * voxel
@@ -165,14 +186,14 @@ def main():
         s_fine["atom_radius_ang"], (args.fine_grid,) * 3, s_fine["orth"],
         s_fine["taper_width"], compile_core=False,
     )
-    cutoff_fine = 0.01 * float(rho_fine.max())
 
     print(__doc__.split("\n\n")[0])
     print("\n%d atoms, %d configurations, sigma %.2f A, cell %.0f A"
           % (args.atoms, args.configs, args.sigma, CELL[0]))
     print("grid %d^3 (%.3f A voxels), refinement grid %d^3, translation %.2f voxels"
           % (args.grid, voxel, args.fine_grid, args.shift))
-    print("cutoff %.4g = 1%% of peak density %.3f" % (cutoff, peak))
+    print("occupancy held at %.4f (what cutoff = 1%% of peak %.3f gave), "
+          "mask_blur %.0f A^2" % (target_occupancy, peak, args.mask_blur))
 
     d_none = diffuse_of(s, hkl, None)
     d_none_shift = diffuse_of(s_shift, hkl, None)
@@ -184,9 +205,14 @@ def main():
         "width/cutoff", "shell vox", "solvent sig", "translation", "refinement",
         "sig/noise"))
     for w_frac in (0.05, 0.1, 0.25, 0.5, 0.9):
-        model = SolventModel(cutoff=cutoff, taper_width=w_frac * cutoff)
-        model_fine = SolventModel(cutoff=cutoff_fine,
-                                  taper_width=w_frac * cutoff_fine)
+        model = SolventModel(cutoff=1.0, taper_width=0.5,
+                             mask_blur=args.mask_blur)
+        model.calibrate(rho0, s["orth"], target_occupancy,
+                        taper_width_frac=w_frac)
+        model_fine = SolventModel(cutoff=1.0, taper_width=0.5,
+                                  mask_blur=args.mask_blur)
+        model_fine.calibrate(rho_fine, s_fine["orth"], target_occupancy,
+                             taper_width_frac=w_frac)
         d = diffuse_of(s, hkl, model)
         d_shift = diffuse_of(s_shift, hkl, model)
         d_fine = diffuse_of(s_fine, hkl, model_fine)
@@ -194,8 +220,7 @@ def main():
         signal = rel(d, d_none)                 # how much solvent changes diffuse
         noise = rel(d_shift, d)                 # how much grid alignment does
         refine = rel(d_fine, d)
-        nvox = shell_voxels(
-            solvent_mask(rho0, cutoff, w_frac * cutoff))
+        nvox = shell_voxels(model.build_mask(rho0, s["orth"]))
         print("%-12.2f %10d %12.3e %12.3e %12.3e %10.1f"
               % (w_frac, nvox, signal, noise, refine,
                  signal / noise if noise > 0 else float("inf")))

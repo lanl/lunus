@@ -12,8 +12,9 @@ shell-resolved R against experimental amplitudes are done —
 recommendation they produced, `mask_blur`, is now implemented and on by
 default. Still to do: per-configuration occupancies (see the API gap
 below), a numerical test of `u_aniso` inside the test suite rather than only in
-the validation tool, the diffuse convergence study re-run against a smoothed
-mask, and a CUDA measurement of what `mask_blur` costs.
+the validation tool, and a CUDA measurement of what `mask_blur` costs. The
+diffuse convergence study has been re-run against the smoothed mask and its
+recommendation changed; see "What the diffuse study found".
 
 Written 2026-08-15, revised the same day against the current code — the API
 assumptions below were checked, the cost estimate was replaced with a
@@ -205,9 +206,11 @@ as atoms move, voxels flip across the taper shell partly discretely.
 (the mask raises the pipeline's grid sensitivity about sevenfold) but the taper
 width barely controls it: a 16× wider shell buys ~25% less noise, because what
 dominates is where the sampled density crosses the cutoff rather than how
-smoothly it crosses. **Grid spacing is the lever**, with the noise falling as
-roughly its square. The "wider taper for diffuse" instinct is directionally
-right and quantitatively almost irrelevant.
+smoothly it crosses. Grid spacing is a lever, with the noise falling as roughly
+its square, and `mask_blur` turned out to be a better one -- it attacks the
+bandlimiting directly rather than sampling a step function more finely. The
+"wider taper for diffuse" instinct is directionally right and quantitatively
+almost irrelevant.
 
 Note this is about *numerical* noise. Genuine variation between configurations —
 including which waters are associated and at what occupancy — is signal, not
@@ -803,13 +806,51 @@ smoothly it crosses. That is worth stating plainly because the earlier reasoning
 in this note — "diffuse wants a wider taper than Bragg" — is directionally right
 and quantitatively almost irrelevant.
 
-**Recommendation: oversample the grid for solvent + diffuse work.** The default
-`rate=1.5` in `grid_shape_for_resolution` gives spacing `d_min/3`, so a diffuse
-study at `d_min` 2 Å lands at 0.67 Å — signal/noise ≈ 8. Raising `rate` to 2–3
-buys the h² improvement and costs one FFT on a larger grid. Choose it from the
-required signal/noise, and re-run this study when the system changes; the
-numbers above are one cluster in one cell, and the *scaling* is the
-transferable part, not the values.
+**Superseded: `mask_blur` is a cheaper lever than the grid.** The paragraph
+that stood here recommended oversampling — raising `rate` to 2–3 to buy the h²
+improvement at the cost of one FFT on a larger grid. That still works, but the
+probe-radius blur added for the R-factor work buys more of the same thing for
+less, which is unsurprising in hindsight: the mechanism the study identifies is
+that *the mask is nearly a step function and therefore badly bandlimited*, and
+the blur attacks that directly where a finer grid only samples it better.
+
+Re-measured, same study, occupancy held fixed, taper width 0.5 × cutoff:
+
+| voxel | translation noise, `mask_blur=0` | `mask_blur=100` | signal/noise |
+|---|---|---|---|
+| 0.833 Å | 4.31e-2 | **1.64e-2** | 3.8 → 6.5 |
+| 0.625 Å | 1.99e-2 | **7.34e-3** | 8.1 → 14.3 |
+| 0.417 Å | 8.94e-3 | **1.43e-3** | 18.6 → **74.4** |
+
+The `mask_blur=0` column reproduces the published table above exactly, so this
+is like-for-like and the anchoring change below did not move the baseline.
+
+**The blur on a 0.833 Å grid beats refining to 0.625 Å without it** (1.64e-2
+against 1.99e-2) — one FFT pair rather than a 2.4× larger grid, and the two
+compose: at 0.417 Å the blur is worth a further 6.3×.
+
+Two honest qualifications. The **solvent signal itself falls**, 0.166 → 0.105,
+because a smoother mask genuinely fluctuates less; the noise falls faster, so
+signal/noise improves everywhere, but this is not a free lunch and the blurred
+mask is a weaker diffuse contributor. And the blur delivers the **2–3 voxel
+shell** the taper-width argument wanted without widening the taper — 967 → 2,720
+shell voxels at 0.625 Å — so `taper_width` can stay where it is.
+
+**Recommendation: take the blur first, then oversample if the required
+signal/noise is still not met.** The default `rate=1.5` gives `d_min/3`, so a
+diffuse study at `d_min` 2 Å lands at 0.67 Å and, with the blur on, a
+signal/noise near 14 rather than 8. Re-run this study when the system changes;
+the numbers are one cluster in one cell and the *scaling* is the transferable
+part, not the values.
+
+**Note on the anchoring.** This study used to fix the cutoff at 1% of peak on
+every grid — the recommendation this note has since superseded, and one that
+cannot survive `mask_blur` at all, since blurring changes both the peak and the
+shape of the density distribution, so the same fraction of peak carves out a
+different fraction of the cell. It now holds the *occupancy* fixed instead, at
+whatever the old rule produced, across blur values and across both grids. The
+coarse/fine refinement comparison gains from that too: it previously used 1% of
+each grid's own peak, which was already slightly inconsistent between them.
 
 A cheap regression guard lives in `tests/test_solvent.py`
 (`test_solvent_diffuse_signal_dominates_grid_alignment_noise`), pinned at a
