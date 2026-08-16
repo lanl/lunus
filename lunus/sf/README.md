@@ -82,7 +82,7 @@ mpirun -n 4 python examples/example_mpi_training.py           # MPI training ste
 cd examples/compare_gemmi                      # end-to-end vs gemmi
 ./run_xtraj.sh gemmi && ./run_xtraj.sh torch
 python ../../tools/compare_icalc_mtz.py icalc_gemmi.mtz icalc_torch.mtz
-# expect correlation 0.999989, R-factor 0.0077
+# expect correlation 0.999919, R-factor 0.0050  (7FPV cell, d_min 0.9)
 ```
 
 ## Layout

@@ -179,7 +179,10 @@ docs/performance.md), `d_min` 0.9, grid
 Re-measured 2026-08-11 on the shipped configuration (which is the middle row,
 taper 0.1 Å): density sums 77647450 (gemmi) / 76357936 (torch) = ratio
 **1.016887**, Icalc correlation 0.999989, R-factor 0.0077 over all 227,566
-reflections.
+reflections. Those came from the superseded cell; on the corrected 7FPV
+configuration the same comparison gives **correlation 0.999919, R-factor
+0.004997** over 115,348 reflections, with the same resolution dependence —
+0.9999 beyond 1.55 Å falling to 0.9125 in the 0.900–0.933 Å shell.
 
 The residual disagreement is the taper and the cutoff-radius convention, not
 symmetry. It is monotonic in resolution — Icalc correlation 1.0000 at low

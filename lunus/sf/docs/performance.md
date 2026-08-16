@@ -8,12 +8,14 @@ assumed throughout:
 |---|---|
 | topology | `examples/compare_gemmi/top_bfac.pdb.gz`, 135,834 atoms |
 | B-factors | per-residue, uniform on [10, 100] |
-| cell / space group | **88.451, 88.451, 39.823 / P4₃ — WRONG, see below** |
-| resolution / grid | `d_min` 0.9 → 300 × 300 × 144 |
+| crystal | PDB **7FPV**, kept as `examples/compare_gemmi/7FPV.pdb` |
+| cell / space group | 34.196, 45.558, 99.044 / **P2₁2₁2₁**, Z = 4 |
+| simulation box | 68.392 × 91.116 × 198.088, P1 — exactly a **2×2×2 supercell** |
+| resolution / grid | `d_min` 0.9 → 120 × 160 × 360 |
 | cutoff | 0.01 |
-| machine | Apple M5 Pro (6 performance + 12 efficiency cores), macOS 26.5.1, **except** the CUDA section and anything about a 251-frame run, which are an NVIDIA container, driver CUDA 13.0 |
+| machine | Apple M5 Pro (6 performance + 12 efficiency cores), macOS 26.5.1, **except** the CUDA section, which is an NVIDIA container, driver CUDA 13.0, 3 CPUs |
 | torch | 2.13.0 |
-| atom-voxel pairs | 324,986,306 |
+| atom-voxel pairs | 348,765,878 ideal, 360,747,104 as batched in 95 chunks |
 
 Reproduce all of it with `tools/bench_splat.py`, which is the thing to trust
 rather than the tables below:
@@ -32,60 +34,58 @@ dispatch rather than execution. Set `OMP_NUM_THREADS` to control CPU threads —
 
 Figures re-measured 2026-08-11; the frame-loop optimization work is 2026-08-14.
 
-## The configuration above is wrong for this system (2026-08-15)
+## What changed on 2026-08-15, and what it means for older numbers
 
-Every absolute number on this page was measured with `unit_cell=88.451,88.451,
-39.823` and `space_group=P43`, which were carried over from a different example.
-The crystal this trajectory was simulated from is **PDB 7FPV: 34.196 × 45.558 ×
-99.044, P2₁2₁2₁, Z = 4** (now kept alongside the data as `7FPV.pdb`), and the
-simulation box is exactly a 2×2×2 supercell of it — 68.392/34.196,
-91.116/45.558 and 198.088/99.044 are all 2.000000, where the old cell had no
-integer relationship on any axis.
+Until this date the example ran with `unit_cell=88.451,88.451,39.823` and
+`space_group=P43`, carried over from a different example. The crystal is 7FPV
+and the simulation box is an exact 2×2×2 supercell of its cell; the old cell had
+no integer relationship to the box on any axis, so folding scattered the 32
+protein copies at unrelated positions instead of stacking them.
 
-**What this invalidates:**
+`expand_symmetry` changed at the same time and now defaults to False. Applying
+the space group to a model that already holds the full cell contents does not
+complete it — it symmetry-averages it, suppressing diffuse/Icalc 3.4×.
 
-- **Every ms/frame figure**, because the grid changes: `d_min` 0.9 gives
-  120 × 160 × 360 = 6.9M voxels on the correct cell against 300 × 300 × 144 =
-  12.96M on the old one, a factor of 1.9 in the splat and the FFTs alike. The
-  timings need re-measuring; nothing about them can be rescaled by hand,
-  because the atom-voxel pair count changes with the grid too.
-- **Any physical reading of the Icalc/diffuse output** from those runs, since
-  folding into an unrelated cell scattered the 32 protein copies at
-  incommensurate positions rather than stacking them.
+**Every table below has been re-measured** on the corrected configuration.
+Where an older number is quoted for comparison it says so. Two classes of
+result carried over untouched, because they are properties of the code or the
+machine rather than of the cell: the CPU-throttling diagnosis, and the float32
+study.
 
-**What survives unchanged:**
+## Where this stands (2026-08-16)
 
-- **Torch-vs-gemmi parity.** Both engines were given the same cell and fold
-  identically, so they agree with each other whatever cell they are given.
-- **The float32 study, the CPU-throttling diagnosis, and every ratio between
-  phases** — splat against FFT, host against device, and the conclusion that
-  the pipeline was quota-throttled. Those are properties of the code and the
-  machine, not of the cell.
-- **The optimization results**, since before and after were measured under
-  identical settings.
+On CUDA, 135,834 atoms, `d_min` 0.9, steady state per frame:
 
-The superseded configuration is kept commented in `run_xtraj.sh` so the numbers
-below can be reproduced until they are replaced.
+| phase | median ms/frame |
+|---|---|
+| **splat** | **65.9** |
+| into cctbx | 1.9 |
+| accumulate | 0.8 |
+| host→device | 0.6 |
+| frac coords | 0.3 |
+| fft+extract | 0.3 |
+| device→host | 0.3 |
+| symmetrize | 0.0 |
+| **per-frame total** | **≈ 70** |
 
-## Where this stands (2026-08-14)
+plus a per-*chunk* trajectory read of 1.95 s, which is 195 ms/frame spread over
+10 frames and 7.8 over 251 — read it against the `calls` column, not as a
+per-frame cost.
 
-The CUDA frame loop went **571.2 → 87.3 ms/frame, 6.5×** — 251 frames in 21.9 s
-against 143 s. Three changes, each measured, outputs bit-identical throughout:
+The splat is 94% of the per-frame work and nothing else is above 2 ms. It is
+also remarkably steady: over ten frames, median 65.9, min 65.8, max 65.9, with
+frame 0 at 195.0 — that first frame carries ~130 ms of one-time warmup, which
+is why the table reports a median as well as a mean.
 
-| | ms/frame removed | |
-|---|---|---|
-| `flex.vec3_double` built from a flat buffer instead of row by row | ~190 | every engine |
-| the torch path no longer round-trips through `xray.structure` | ~97 | torch only |
-| torch's thread pool sized to the cgroup CPU quota, not the host's cores | ~228 | any container |
-
-The splat is now 62.9 ms/frame against `bench_splat`'s 62.6 for identical work,
-so the frame loop runs it at benchmark speed and the long-standing "the splat
-is slow in situ" discrepancy is closed. It was CPU throttling.
-
-Read in order: "Where the time actually goes" for how the frame was
-instrumented and what it showed, then "Resolved: the container was
-CPU-throttled" for the largest single factor and the one most likely to bite
-again elsewhere.
+**On the speedup claim.** An earlier version of this page led with "571.2 →
+87.3 ms/frame, 6.5×". That figure is retired, for two reasons. It was measured
+on the wrong cell; and it was never a code speedup — the baseline ran throttled
+(104 threads on 3 CPUs) and the final run did not, so it was really 1.81× of
+code times 3.6× of correcting a container setting. The code-only figure in a
+healthy environment has never been measured. `824b800` is the last commit
+before any optimization and still exists, so the honest comparison is one run
+of it under the same conditions; until that happens this page states the
+current cost and no ratio.
 
 ## CPU
 
@@ -95,18 +95,22 @@ goes. Both are worth stating:
 
 | | 1 thread | 6 threads |
 |---|---|---|
-| gemmi `put_model_density_on_grid` | 1.37 s | n/a (single-threaded) |
-| torch, eager | 4.23 s | 1.84 s |
-| torch, `torch.compile` (default) | 3.34 s | **0.78 s** |
+| gemmi `put_model_density_on_grid` | 1.42 s | n/a (single-threaded) |
+| torch, eager | 4.65 s | 2.02 s |
 
-So torch beats gemmi in wall time when it can spread over cores (0.57x on 6
-threads), but **gemmi is ~2.4x faster per core**. That distinction decides
+So gemmi wins outright on one thread (3.27×) and stays ahead on six (1.40×) —
+**gemmi is ~3× faster per core**. That distinction decides
 multi-rank runs: under `mpirun -n N` on CPU, `xtraj.py` gives each rank one
 torch thread to avoid oversubscription, so the per-core figure is the one that
 applies.
 
+The `torch.compile` row is gone from this table: it fails on both platforms
+this has been run on (see below), and the numbers it used to carry were from
+the superseded configuration.
+
 Rebalancing ranks against threads does not rescue it. Measured over 10 frames
-with a warm compile cache:
+on the SUPERSEDED cell, and not re-measured — the ratios are the point and they
+do not depend on the grid:
 
 | | total |
 |---|---|
@@ -128,14 +132,14 @@ multi-threaded process — not as a faster CPU replacement for gemmi.
 
 | device | splat | vs gemmi | pairs/s |
 |---|---|---|---|
-| gemmi (C++, 1 core) | 1.33 s | 1.00x | — |
-| torch CPU, eager, 6 threads | 1.84 s | 1.34x | 177e6 |
-| torch CPU, compiled, 6 threads | 0.78 s | 0.57x | 419e6 |
-| **torch MPS, eager** | **0.72 s** | **0.54x** | **451e6** |
+| gemmi (C++, 1 core) | 1.42 s | 1.00x | — |
+| torch CPU, eager, 1 thread | 4.65 s | 3.27x | 75e6 |
+| torch CPU, eager, 6 threads | 2.02 s | 1.40x | 173e6 |
+| **torch MPS, eager** | **0.75 s** | **0.53x** | **463e6** |
 
 MPS agrees with CPU to float32 rounding (whole-grid correlation 1.0000000000,
-max difference 1.8e-7 relative). End to end through `xtraj.py`, 10 frames took
-15.5 s on MPS against 20.9 s for gemmi.
+max difference 1.8e-7 relative, measured on the superseded configuration and
+not a property of the cell).
 
 Two things to know:
 
@@ -156,18 +160,22 @@ Two things to know:
 
 Measured on a container with an NVIDIA card (driver CUDA 13.0), torch 2.13.0
 `cuda130_mkl` from conda-forge, on the same 135,834-atom system and
-300 × 300 × 144 grid. The splat *in isolation*:
+120 × 160 × 360 grid. The splat *in isolation*:
 
 | device | splat | vs gemmi | pairs/s |
 |---|---|---|---|
-| gemmi (C++, 1 core) | 1.37 s | 1.00x | — |
-| torch CPU, compiled, 6 threads | 0.78 s | 0.57x | 419e6 |
-| torch MPS, eager | 0.72 s | 0.53x | 451e6 |
-| **torch CUDA, eager** | **0.06 s** | **0.04x** | **5126e6** |
+| gemmi (C++, 1 core) | 1.42 s | 1.00x | — |
+| torch CPU, eager, 6 threads | 2.02 s | 1.42x | 173e6 |
+| torch MPS, eager | 0.75 s | 0.53x | 463e6 |
+| **torch CUDA, eager** | **0.07 s** | **0.05x** | **5330e6** |
 
-About 23x faster than gemmi and 11x faster than MPS. **But see the next
-section: the splat costs ~255 ms/frame inside `xtraj.py`, not 60 ms, and that
-discrepancy is unexplained.**
+About 21x faster than gemmi and 11x faster than MPS.
+
+In the frame loop the same splat takes **65.9 ms** — the isolated benchmark is
+0.07 s for one call on warm buffers, so the two now agree to within the
+difference between a benchmark and a loop. That gap used to be 4.6x and is the
+subject of the section after next; it closed when the container's thread count
+was fixed, not when the code changed.
 
 Environment notes, all of which cost a round to discover:
 
@@ -207,6 +215,14 @@ frames helps; this noise does not average away *within* a run.
 `torch.use_deterministic_algorithms(True)` would pin it at some cost.
 
 ## Where the time actually goes
+
+**The budgets in this section are from the superseded configuration** (88.451,
+88.451, 39.823 / P4₃, grid 300 × 300 × 144, and a throttled container). They are
+kept because what they establish does not depend on the cell: which phase
+dominates, what the two host-side fixes removed, and how the throttling was
+found. For the current cost see "Where this stands" at the top — 65.9 ms/frame
+of splat in ~70 ms of per-frame work.
+
 
 `torch_timing=True` reports per-phase timings for the whole frame loop, host
 and device. Device phases synchronize on both sides; host phases do not need

@@ -581,19 +581,31 @@ factor of three on a 0.62 Å grid where the measured ratio is ~5.
 `tools/bench_solvent.py`, float32, one configuration, CPU (a GPU run is still
 owed — see below).
 
-**The cost is per-grid, not per-atom**, which decides where it matters:
+**Measured on CUDA**, 7FPV in its own cell (P2₁2₁2₁, 120 × 160 × 360, waters
+excluded, cutoff 1% of peak), whole pipeline warmed before timing:
 
-| system | atoms | grid | frame | solvent adds |
-|---|---|---|---|---|
-| compare_gemmi | 135,834 | 300×300×144 | 2,399 ms | 95 ms, **3.9%** |
-| 4WOR | 2,094 | 160×160×208 | 121 ms | 37 ms, **31%** |
+| phase | ms |
+|---|---|
+| splat (3,165 atoms) | 5.3 |
+| symmetrize | 0.6 |
+| fft+extract (protein) | 0.3 |
+| mask | 0.1 |
+| **solvent (mask FFT + combine)** | **0.9** |
+| total | 7.2 |
 
-The mask evaluation and its FFT scale with the number of voxels, while the
-splat scales with atoms, so the solvent surcharge is small exactly where the
-calculation is expensive and large where it is cheap. The design note's ~2 ms
-estimate was for CUDA, where the protein FFT is 0.6 ms; the CPU numbers here
-are consistent with it once the FFT ratio is accounted for, but the GPU
-measurement has not been made.
+**Solvent costs ~1 ms per configuration** — 13.8% of this small structure's
+frame, and it would be ~1.4% of the 135,834-atom trajectory frame (70 ms),
+because the cost is **per-grid, not per-atom**: the mask and its FFT scale with
+voxels while the splat scales with atoms. Peak device memory goes 201 → 229 MB,
+one extra grid's worth.
+
+Two earlier figures for this were wrong and are worth recording as traps. A
+"3.9% on compare_gemmi" number came from forcing a mask onto an all-atom MD
+model by selecting the peptide — a configuration nobody should run, since that
+model carries its solvent explicitly. And an "85.9% of the frame" number was
+one-time CUDA library initialisation, `torch.linalg.inv` loading cuSOLVER on
+first use, landing in the timed row: the same block repeated measured 0.7 ms.
+Both benchmarks now warm the whole pipeline before timing.
 
 ### Fold last: the mask belongs in the model's own frame
 
@@ -714,10 +726,15 @@ degenerate-mask check earning its place on real data rather than on a
 constructed fixture.
 
 The right input is a **crystallographic model** — one asymmetric unit in its
-own cell, with solvent channels. On 4WOR (P4₁, 48.5 × 48.5 × 63.4, waters
-excluded, cutoff 1% of peak): occupancy **0.5097**, a 258,256-voxel shell, and
-`|F_total|/|F_protein| = 0.9176` — the low-resolution contrast cancellation
-this model exists to represent, on a real structure.
+own cell, with solvent channels. Two of them, independently:
+
+| structure | occupancy | shell voxels | `\|F_total\|/\|F_protein\|` |
+|---|---|---|---|
+| 4WOR, P4₁ | 0.5097 | 258,256 | 0.9176 |
+| 7FPV, P2₁2₁2₁ | 0.5516 | 672,888 | 0.9275 |
+
+— textbook solvent contents, and a 7–8% low-resolution contrast cancellation,
+which is what this model exists to represent.
 
 This also sharpens the scope statement at the top. Bulk solvent belongs with
 crystallographic models and ensembles built from them; an all-atom MD box in
