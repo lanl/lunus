@@ -716,57 +716,10 @@ distinguish the causes. Check that the box is a supercell of the cell before
 concluding anything about the solvent, which is what
 `symmetry_torch.supercell_factors()` is now for.
 
-### Fold last: the mask belongs in the model's own frame
+### The right input is a crystallographic model
 
-Folding a model into a smaller cell destroys the boundary the mask needs.
-Measured on the compare_gemmi topology, protein only, cutoff 1% of peak:
-
-| frame | median ρ | occupancy |
-|---|---|---|
-| the model's own P1 box | 0.076 | **0.344** |
-| folded into the crystallographic cell | 0.578 | 0.010 |
-
-So a mask thresholded from the folded density describes a cell with no empty
-space left in it. The order has to be: build the density in the model's frame,
-**build the mask there**, then fold.
-
-`supercell=(na, nb, nc)` on both entry points does that. The atoms are splatted
-onto the larger grid, the mask is built on it, and density and mask are folded
-into the target cell separately — which is exact, because folding is linear, and
-which keeps `exp(−B_sol·s²/4)` in reciprocal space where it belongs rather than
-forcing the mask to be blurred in real space before it is added.
-
-**Commensurate or refuse.** `symmetry_torch.supercell_factors()` derives the
-factors from the two cells and raises unless each axis ratio is an integer,
-because folding a density *grid* is only exact when the target tiles the source.
-(Folding *atoms* is always well defined — the modulo in the splat's scatter —
-which is why the constraint only appears once masks are folded.) A model
-spanning several cells already contains its symmetry copies, so `supercell=`
-refuses `grid_ops=` as well: expanding again would double-count, and summing a
-mask over the symmetry orbit does not give a mask.
-
-Without solvent, `supercell=` changes nothing observable, and there is a test
-asserting exactly that against the direct path — if the two foldings ever
-disagree, every supercell result is suspect.
-
-### The compare_gemmi system cannot exercise this model at all
-
-Worth stating plainly, because it is the repo's standard benchmark input and it
-looks like the obvious thing to test on. Its fractional coordinates span
-**−0.35 to 5.12**: the MD box is several crystallographic cells across, so
-folding it into the 88.451 × 88.451 × 39.823 cell stacks several protein copies
-on top of one another, and the P4₃ expansion multiplies that again. The
-resulting density has **minimum 0.163 and median 2.48 e/Å³** — there is no
-empty space anywhere to call solvent. Selecting `peptide` does not help: the
-protein copies alone still fill the cell.
-
-Run it anyway and the mask comes out empty, `F_mask ≈ 0`, and
-`|F_total|/|F_protein| = 1.0000` exactly. `SolventModel` warns, which is the
-degenerate-mask check earning its place on real data rather than on a
-constructed fixture.
-
-The right input is a **crystallographic model** — one asymmetric unit in its
-own cell, with solvent channels. Two of them, independently:
+One asymmetric unit in its own cell, with solvent channels. Two of them,
+independently:
 
 | structure | occupancy | shell voxels | `\|F_total\|/\|F_protein\|` |
 |---|---|---|---|
