@@ -588,3 +588,38 @@ def test_float32_matches_float64_below_the_pipelines_own_noise(cut_frac):
     # The level set itself, which is what a thin shell puts at risk.
     assert lo["shell"] == hi["shell"]
     assert lo["occ"] == pytest.approx(hi["occ"], abs=1e-5)
+
+
+# --------------------------------------------------------------------------
+# 11. calibrating the cutoff, which is the only way to set it
+
+def test_calibrate_cutoff_hits_the_requested_occupancy():
+    from lunus.sf.solvent_torch import calibrate_cutoff
+    sys = _system(n_atoms=200)
+    rho = _density(sys)
+    for target in (0.6, 0.75, 0.9):
+        cut = calibrate_cutoff(rho, target)
+        got = float(mask_occupancy(solvent_mask(rho, cut, 0.5 * cut)))
+        assert got == pytest.approx(target, abs=0.02), (target, got, cut)
+
+
+def test_calibrate_cutoff_rejects_impossible_targets():
+    from lunus.sf.solvent_torch import calibrate_cutoff
+    rho = _density(_system())
+    for bad in (0.0, 1.0, -0.1, 1.5):
+        with pytest.raises(ValueError, match="target_occupancy"):
+            calibrate_cutoff(rho, bad)
+
+
+def test_calibrate_cutoff_reports_an_unreachable_target():
+    """A model with genuine vacuum has an occupancy FLOOR -- no positive
+    cutoff can call a zero-density voxel protein. Asking for less than that
+    used to bisect to the smallest cutoff tried and return an occupancy
+    nothing like the one requested, silently."""
+    from lunus.sf.solvent_torch import calibrate_cutoff
+    sys = _system(n_atoms=200)
+    rho = _density(sys)
+    floor = float(mask_occupancy(solvent_mask(rho, 1e-12, 0.5e-12)))
+    assert floor > 0.3, floor          # this fixture does have vacuum
+    with pytest.raises(ValueError, match="out of reach"):
+        calibrate_cutoff(rho, 0.5 * floor)

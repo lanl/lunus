@@ -498,11 +498,11 @@ The curve, on the same fixture, with width = ½ cutoff throughout:
 (rows measured on the larger 400-atom fixture; the test's own numbers differ in
 magnitude and not in shape)
 
-**Recommendation: put the cutoff near 1% of peak density, not at whatever
-reproduces gemmi exactly.** That buys 15–20× more boundary to differentiate
-through at essentially no cost in agreement — still 0.994, still better than
-Refmac vs Cctbx. Past ~3% the agreement starts paying for the smoothness, and
-by 30% the mask is visibly tighter than any geometric one.
+**Recommendation, superseded — see "A real case" below.** The reasoning here
+("put the cutoff near 1% of peak") was drawn from this sparse fixture and does
+not transfer to a real structure, where the same calibration lands near 11% of
+peak. Calibrate on occupancy, with `calibrate_cutoff()`; do not use a fixed
+fraction of peak.
 
 Note what this means for the diffuse work: a 2–3 voxel shell, which is what the
 variance-bias argument asks for, is at the expensive end of this curve on a
@@ -653,6 +653,42 @@ this model exists to represent, on a real structure.
 This also sharpens the scope statement at the top. Bulk solvent belongs with
 crystallographic models and ensembles built from them; an all-atom MD box in
 its own P1 frame already contains its solvent explicitly and needs no mask.
+
+## A real case: 4WOR
+
+P4₁, 48.499 × 48.499 × 63.430, waters excluded, 160 × 160 × 208 grid, d_min 2.0,
+9,988 reflections. `F_total` built two ways — our threshold mask, and gemmi's
+geometric mask through the same FFT and the same `f_total` — so the comparison
+isolates the mask model in the quantity that would actually be fitted.
+
+| cutoff | occupancy | shell voxels | R vs gemmi-mask `F_total` |
+|---|---|---|---|
+| 1% of peak (the sparse-fixture recommendation) | 0.3817 | 57,076 | 0.0528 |
+| 0.3% of peak | 0.3752 | 5,932 | 0.0549 |
+| **occupancy-matched, = 11% of peak** | 0.5085 | 377,216 | **0.0246** |
+
+**The fixed-fraction recommendation was wrong for real structures.** Matching
+gemmi's solvent content on 4WOR needs a cutoff two orders of magnitude higher
+than the sparse fixture implied, and it is simultaneously twice as accurate
+(R 0.025 against 0.053) and an order of magnitude smoother (377k shell voxels
+against 57k). The earlier tension — "matching gemmi forces a nearly hard
+threshold" — was an artifact of a model with genuine vacuum between its atoms.
+A real structure has no vacuum, only overlapping tails, so carving out the same
+volume takes a much higher threshold, and that threshold sits where the density
+is varying quickly and the shell is thick.
+
+Hence `calibrate_cutoff(density, target_occupancy)`: bisection to a requested
+solvent content, run once at setup. It also refuses targets outside the
+reachable range, which is **not** (0, 1) — a model with vacuum has an occupancy
+floor at the vacuum fraction, and asking for less than that used to return a
+meaningless cutoff without complaint.
+
+**How large is the model difference, in context?** At the calibrated cutoff,
+`F_total` from the two masks agrees to R = 0.025 overall and 0.036 in the worst
+shell (> 6 Å). The solvent contribution itself — `F_protein` against `F_total` —
+is R = 0.066 overall and **0.267 beyond 10 Å**. So the choice of mask model is
+roughly a third of the size of the effect it models at low resolution: real, and
+subdominant.
 
 ## float32 is not the limiting precision
 

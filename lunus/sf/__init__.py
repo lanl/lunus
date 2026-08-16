@@ -79,6 +79,7 @@ _EXPORTS = {
     "SolventModel": "solvent_torch",
     "SolventMaskWarning": "solvent_torch",
     "solvent_mask": "solvent_torch",
+    "calibrate_cutoff": "solvent_torch",
     "mask_occupancy": "solvent_torch",
     "shell_voxels": "solvent_torch",
     "f_solvent": "solvent_torch",

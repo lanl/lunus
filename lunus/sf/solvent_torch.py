@@ -129,6 +129,68 @@ def shell_voxels(mask):
     return int(((mask > 1e-6) & (mask < 1.0 - 1e-6)).sum())
 
 
+def calibrate_cutoff(density, target_occupancy, taper_width_frac=0.5,
+                     iterations=60):
+    """
+    The cutoff at which the mask calls `target_occupancy` of the cell solvent.
+
+    THE CUTOFF IS A CALIBRATION, NOT A CONSTANT. It is not transferable between
+    systems, B-factor conventions or grids -- measured, it moves by 21x between
+    B = 20 and B = 60 on one structure -- and, more surprisingly, the fraction
+    of peak density it corresponds to depends on how tightly the model packs:
+
+        sparse model, true vacuum between atoms   ~1e-3 of peak
+        a real protein crystal (4WOR, P4_1)       ~0.11 of peak
+
+    because a real structure has no vacuum, only overlapping tails, so a much
+    higher threshold is needed to carve out the same volume. Picking a fixed
+    fraction of peak instead measured twice as far from gemmi's mask on 4WOR
+    (R 0.053 against 0.025) AND gave a shell an order of magnitude thinner.
+
+    target_occupancy is what a crystal's solvent content is expected to be --
+    0.3-0.7 for a protein, from the Matthews coefficient, or the occupancy of a
+    geometric mask if one is available to match.
+
+    Bisection on a monotone quantity, so it is deterministic and needs no
+    gradients; run once at setup, not per configuration.
+    """
+    if not 0.0 < target_occupancy < 1.0:
+        raise ValueError("target_occupancy must be in (0, 1), got %r"
+                         % (target_occupancy,))
+
+    # The reachable range first. It is NOT (0, 1): a model with real vacuum
+    # between its atoms has an occupancy FLOOR at the vacuum fraction, since
+    # no positive cutoff can call a zero-density voxel protein. Bisecting past
+    # that returns the smallest cutoff tried and an occupancy nothing like the
+    # one asked for -- silently, which is how this was found.
+    lo, hi = 1e-12, float(density.max())
+
+    def occ_at(c):
+        return float(mask_occupancy(
+            solvent_mask(density, c, taper_width_frac * c)))
+
+    floor, ceiling = occ_at(lo), occ_at(hi)
+    if not floor - 1e-6 <= target_occupancy <= ceiling + 1e-6:
+        raise ValueError(
+            "occupancy %.4f is out of reach for this density: it can only be "
+            "driven between %.4f (cutoff -> 0) and %.4f (cutoff = peak). A "
+            "floor well above zero means the model has genuine vacuum in it -- "
+            "%.1f%% of voxels have no density at all -- so no threshold can "
+            "call that region protein. Either the target is wrong for this "
+            "system, or the model is missing the atoms that should fill it."
+            % (target_occupancy, floor, ceiling, 100 * floor))
+
+    for _ in range(iterations):
+        mid = 0.5 * (lo + hi)
+        occ = float(mask_occupancy(
+            solvent_mask(density, mid, taper_width_frac * mid)))
+        if occ > target_occupancy:
+            hi = mid
+        else:
+            lo = mid
+    return 0.5 * (lo + hi)
+
+
 def f_solvent(mask, cell_volume, hkl, orth_matrix=None):
     """
     Solvent mask grid -> (n_refl,) complex F_mask(hkl).
