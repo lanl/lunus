@@ -871,7 +871,12 @@ excluded), whole pipeline warmed before timing:
 | fft+extract (protein) | 0.3 | 0.3 |
 | **solvent (whole `apply`)** | **0.9** | **1.1** |
 | solvent, repeated block (steady state) | 0.7 | 1.1 |
-| total | 7.2 | 8.9 |
+| **per configuration** | **7.1** | **7.4** |
+
+The last row is protein + solvent, not the tool's `total`. `total` sums the
+phase rows and two of those OVERLAP — the mask build is inside `apply()`, not
+additional to it — so it overstates the blurred configuration by the mask
+build. Harmless before `mask_blur` (0.1 ms) and worth 1.5 ms after.
 
 **Solvent costs ~1 ms per configuration either way.** The blur adds ~0.4 ms —
 **1.6× on the solvent path, against 2.7× on CPU** — because a GPU FFT on this

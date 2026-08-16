@@ -102,7 +102,11 @@ class Timer:
         print("  %-28s %10s %8s" % ("phase", "ms", "share"))
         for name, dt in self.rows:
             print("  %-28s %10.1f %7.1f%%" % (name, 1e3 * dt, 100 * dt / total))
-        print("  %-28s %10.1f" % ("total", 1e3 * total))
+        # NOT a per-configuration cost: the rows overlap, since the mask
+        # build is inside apply() rather than additional to it. main() prints
+        # the non-overlapping figure; this is here to show the phases sum.
+        print("  %-28s %10.1f  (rows overlap; see below)"
+              % ("sum of rows", 1e3 * total))
         return total
 
 
