@@ -692,6 +692,36 @@ if __name__=="__main__":
 #
 # The last two are probes, so both default to False: the point is to compare
 # runs with and without, not to change the pipeline before the measurement.
+# Whether to APPLY the space group's operations to the model density
+# (default False).
+#
+# space_group= does two jobs that are usually the same job and here are not:
+# it names the crystal's symmetry -- which the output reflection files should
+# carry -- and it decides whether the density gets expanded by that symmetry.
+# Those come apart for a model that ALREADY contains the full cell contents,
+# which is the normal case for this program: an MD box that is an integer
+# supercell of the crystal cell folds into a complete unit cell all by itself.
+#
+# Applying the operations to a complete model does not add the missing copies,
+# because none are missing. It symmetry-AVERAGES the ones that are there --
+# symmetrize_sum over the orbit is `order` times the mean over the orbit -- and
+# that averaging removes exactly the deviations from crystallographic symmetry
+# that the diffuse signal is made of. Measured on the 7FPV trajectory, 4
+# frames: applying P2(1)2(1)2(1) raises mean Icalc 15.1x (~ order^2, the Bragg
+# term adding coherently) while diffuse rises only 4.4x, so diffuse/Icalc falls
+# from 0.0387 to 0.0113 -- a 3.4x suppression of the observable this program
+# exists to compute.
+#
+# Hence the default: do not expand. Set expand_symmetry=True when the model is
+# ONE asymmetric unit and the other copies genuinely need generating, or when
+# symmetry averaging is what you want.
+  try:
+    idx = [a.find("expand_symmetry")==0 for a in args].index(True)
+  except ValueError:
+    expand_symmetry = False
+  else:
+    expand_symmetry = args.pop(idx).split("=")[1] == "True"
+
   try:
     idx = [a.find("torch_splat_stats")==0 for a in args].index(True)
   except ValueError:
@@ -1236,7 +1266,9 @@ if __name__=="__main__":
     torch_grid_shape = adjust_grid_for_symmetry(
       torch_grid_shape_raw, torch_sym_rots, torch_sym_trans
     )
-    torch_grid_ops = build_grid_ops_from_cctbx(xrs_sel.space_group(), torch_grid_shape)
+    torch_grid_ops = (
+      build_grid_ops_from_cctbx(xrs_sel.space_group(), torch_grid_shape)
+      if expand_symmetry else [])
 
     if mpi_rank == 0:
       if torch_grid_shape != torch_grid_shape_raw:
@@ -1244,7 +1276,11 @@ if __name__=="__main__":
               torch_grid_shape_raw, "->", torch_grid_shape)
       print("torch engine: space group =", xrs_sel.space_group().type().lookup_symbol(),
             ", order =", xrs_sel.space_group().order_z(),
-            ", density symmetry ops applied (excl. identity) =", len(torch_grid_ops))
+            ", density symmetry ops applied (excl. identity) =", len(torch_grid_ops),
+            "" if expand_symmetry else
+            "(expand_symmetry=False: the model is taken to hold the full cell "
+            "contents already; set True to expand an asymmetric unit, or to "
+            "symmetry-average)")
       if not torch_grid_ops:
         print("torch engine: P1 (or no non-identity ops) -- density used as splatted, "
               "no symmetry expansion, matching gemmi")
@@ -1736,7 +1772,13 @@ EOF
           _t_engine = time.time()
           st = gemmi.Structure()
           st.cell = gemmi.UnitCell(*xrs_sel.unit_cell().parameters())
-          st.spacegroup_hm = xrs_sel.space_group().type().lookup_symbol()
+          # gemmi expands the model by whatever symmetry the structure
+          # declares, so expand_symmetry=False is expressed by declaring P1.
+          # The reflection files still carry the true space group, which comes
+          # from the miller set rather than from here.
+          st.spacegroup_hm = (
+            xrs_sel.space_group().type().lookup_symbol()
+            if expand_symmetry else "P 1")
           
           model = gemmi.Model("1")
           chain = gemmi.Chain("A")
@@ -1969,9 +2011,43 @@ EOF
             fcalc = fcalc.resolution_filter(d_min=d_min,d_max=d_max)
         else:
           with host_phase("cctbx calc"):
-            xrs_sel.scattering_type_registry(table=scattering_table)
-
-            fcalc = xrs_sel.structure_factors(d_min=d_min,algorithm=cctbx_method).f_calc()
+            # Same distinction as the other two engines: cctbx generates the
+            # symmetry copies from the structure's own space group, so a model
+            # that already holds them is calculated in P1.
+            #
+            # The reflections must still be the CRYSTAL's, though. Left to
+            # itself, structure_factors() on a P1 structure returns P1's
+            # indices -- 11,965 rather than 3,388 here, labelled P1 -- so the
+            # Miller set is built at the true symmetry and the P1 structure is
+            # sampled at exactly those indices. That is what the torch and
+            # gemmi branches do, and it is NOT the same as merging equivalents
+            # afterwards, which would average the symmetry-related reflections
+            # and reintroduce the averaging expand_symmetry=False exists to
+            # avoid.
+            if expand_symmetry:
+              xrs_sel.scattering_type_registry(table=scattering_table)
+              fcalc = xrs_sel.structure_factors(d_min=d_min,algorithm=cctbx_method).f_calc()
+            else:
+              p1_symmetry = crystal.symmetry(
+                unit_cell=xrs_sel.unit_cell(),
+                space_group_info=cctbx.sgtbx.space_group_info(symbol="P 1"))
+              xrs_calc = xrs_sel.customized_copy(crystal_symmetry=p1_symmetry)
+              xrs_calc.scattering_type_registry(table=scattering_table)
+              # structure_factors_from_scatterers asserts that the structure
+              # and the Miller set share a space group, so the set is built at
+              # the crystal's symmetry -- which fixes WHICH reflections -- and
+              # then relabelled P1 to satisfy that assertion. The result is
+              # relabelled back. Only the labels move; no index is merged,
+              # mapped or averaged.
+              cctbx_ms = miller.build_set(
+                crystal_symmetry=xrs_sel.crystal_symmetry(),
+                anomalous_flag=False, d_min=d_min)
+              fcalc = cctbx_ms.customized_copy(
+                crystal_symmetry=p1_symmetry
+              ).structure_factors_from_scatterers(
+                xray_structure=xrs_calc, algorithm=cctbx_method).f_calc()
+              fcalc = fcalc.customized_copy(
+                crystal_symmetry=xrs_sel.crystal_symmetry())
             fcalc = fcalc.resolution_filter(d_min=d_min,d_max=d_max)
 
         if do_opt:

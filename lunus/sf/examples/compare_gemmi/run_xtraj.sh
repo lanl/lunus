@@ -28,17 +28,36 @@ var=${1:-torch}
 TOP="${HERE}/top_bfac.pdb.gz"
 TRAJ="${HERE}/traj.xtc"
 
-# P4(3), 88.451/88.451/39.823 is the crystal's real symmetry -- observed
-# experimentally, and approximately obeyed by the simulation. It is passed on
-# the command line only because the topology's CRYST1 records the P1 simulation
-# BOX; the information is absent from the file, not fictitious. The deviations
-# from it are what the diffuse signal is made of.
+# The crystal this trajectory was simulated from: PDB 7FPV, kept alongside as
+# 7FPV.pdb. It is passed on the command line because the topology's CRYST1
+# records the P1 simulation BOX rather than the crystal cell -- the information
+# is absent from the trajectory, not invented.
+#
+# The simulation box is EXACTLY a 2x2x2 supercell of it:
+#
+#     MD box   68.392 x  91.116 x 198.088   (topology CRYST1, P1)
+#     7FPV     34.196 x  45.558 x  99.044   P 21 21 21, Z = 4
+#     ratio     2.000000   2.000000   2.000000
+#
+# so folding the trajectory into the crystal cell stacks the 8 images
+# coherently, which is what makes the calculation meaningful. Measured: the
+# protein/solvent boundary survives that folding (mask occupancy 0.344 in the
+# box, 0.312 after folding). It does NOT survive folding into a cell the box
+# has no integer relationship with.
+#
+# HISTORY, since it cost a day: this script previously passed
+# 88.451/88.451/39.823 with P4(3), carried over from a different example. The
+# box is not a supercell of that cell (68.392/88.451 = 0.773), so folding
+# scattered the 32 protein copies at unrelated positions and filled the cell
+# solid -- no empty space, mask occupancy 0.010. Every absolute number in
+# lunus/sf/docs/performance.md was measured under it; see the note there for
+# what that does and does not invalidate.
 #
 # d_min=0.9 (xtraj.py's default, explicit here because the benchmark numbers
-# depend on it) gives the documented 300 x 300 x 144 grid. Use 1.8 for a quick
+# depend on it) gives a 120 x 160 x 360 grid on this cell. Use 1.8 for a quick
 # coarse check.
-UNIT_CELL=88.451,88.451,39.823,90.00,90.00,90.00
-SPACE_GROUP=P43
+UNIT_CELL=34.196,45.558,99.044,90.00,90.00,90.00
+SPACE_GROUP=P212121
 D_MIN=0.9
 
 for f in "${TOP}" "${TRAJ}"; do
@@ -130,8 +149,11 @@ exec python "${SF_DIR}/xtraj.py" ${ARGS}
 #python ../../tools/make_random_bfacs.py "${XTRAJ_DATA}/top_ref.pdb" top_ref_bfac.pdb --bmin 10 --bmax 100 --seed 0
 #exec python "${SF_DIR}/xtraj.py" top=top_ref_bfac.pdb use_top_bfacs=True traj=${XTRAJ_DATA}/traj_ref.xtc first=0 last=9 d_min=1.8 unit_cell=84.522,84.522,76.623,90.00,90.00,90.00 space_group=P41 fcalc=fcalc_${var}.mtz icalc=icalc_${var}.mtz diffuse=diffuse_${var}.hkl engine=${var} torch_device=mps
 #
-# P2(1)2(1)2(1), and runs against other systems:
-#exec python "${SF_DIR}/xtraj.py" ${ARGS} torch_device=mps unit_cell=34.196,45.558,99.044,90.00,90.00,90.00 space_group=P212121
+# The superseded P4(3) configuration, kept only so the numbers in
+# docs/performance.md can be reproduced; it does not describe this crystal:
+#exec python "${SF_DIR}/xtraj.py" ${ARGS} unit_cell=88.451,88.451,39.823,90.00,90.00,90.00 space_group=P43
+#
+# Runs against other systems:
 #mpirun -np 1 python ~/packages/lunus/lunus/command_line/xtraj_new.py top=top.pdb traj=traj.xtc first=0 last=1 unit_cell=88.451,88.451,39.823,90.00,90.00,90.00 space_group=P43 fcalc=fcalc_${var}.mtz icalc=icalc_${var}.mtz diffuse=diffuse_${var}.hkl engine=${var} selection="peptide"
 #mpirun -np 26 python ~/packages/lunus/lunus/command_line/xtraj.py top=md_restrained_amber.pdb traj=md_restrained_last_10ns.xtc first=0 last=250 fcalc=fcalc_md_restrained_p1.mtz icalc=icalc_md_restrained_p1.mtz diffuse=diffuse_md_restrained_p1.hkl
 #
