@@ -753,7 +753,9 @@ the opposite, matching the microbenchmark's prediction.
 Starting point was 12.2 s (6 threads). Every step below is numerically neutral:
 density correlation against gemmi is unchanged at 0.99977378 and the sum ratio
 at 1.016887, both to eight figures, and the autograd-vs-analytic gradient check
-in `tests/test_torch_pipeline.py` is unchanged at 2.00e-04.
+in `tests/test_torch_pipeline.py` is unchanged at 2.00e-04. (Those two values
+are from the superseded configuration. What matters here is that they did not
+move across the optimization steps, which is a statement about the steps.)
 
 **The governing fact is that this work is memory-bound.** Each elementary torch
 operation is its own kernel pass over an (atoms, voxels) array, so the cost is

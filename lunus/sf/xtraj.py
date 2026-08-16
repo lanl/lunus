@@ -775,9 +775,9 @@ if __name__=="__main__":
 
 # Dump the first frame's real-space density grid to density_gemmi.npy /
 # density_torch.npy for tools/compare_density.py (default False). Off by
-# default because it is a whole uncompressed float32 grid -- 221 MB for a
-# 300x300x144 run -- written on every invocation, which is how the scratch
-# directory grew to ~466 MB. Turn it on only for an actual density comparison.
+# default because it is a whole uncompressed float32 grid -- 28 MB for the
+# example's 120x160x360, 221 MB at 300x300x144 -- written on every invocation.
+# Turn it on only for an actual density comparison.
 
   try:
     idx = [a.find("save_density")==0 for a in args].index(True)

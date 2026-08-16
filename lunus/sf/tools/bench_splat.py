@@ -8,8 +8,8 @@ Reports atom-voxel PAIRS as well as wall time: pairs are the unit of work here
 implementations fairly when they choose slightly different cutoff radii.
 
 Usage:
-    python bench_splat.py compare_gemmi/top_bfac.pdb \\
-        --cell 88.451,88.451,39.823,90,90,90 --grid 300,300,144
+    python bench_splat.py examples/compare_gemmi/top_bfac.pdb.gz \\
+        --cell 34.196,45.558,99.044,90,90,90 --grid 120,160,360
 
 Omit --grid to size it from --d-min the way xtraj.py does. --no-gemmi skips
 the reference run (e.g. where gemmi is not installed).

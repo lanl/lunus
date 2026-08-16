@@ -808,13 +808,13 @@ the solvent path to float64.
 
 One extra FFT per configuration, plus the mask evaluation over the grid.
 
-**Measured, not assumed** — CUDA, 300 × 300 × 144, 251 frames
-(`docs/performance.md`): `fft+extract` is **0.6 ms/frame** of an 87.3 ms frame,
-and `symmetrize`, a comparable grid-wide pass, is 0.8 ms. So the solvent path is
-one more FFT plus a pointwise taper over 12.96M voxels: **roughly 2 ms, 2–3% of
-a frame.** The earlier note here — "at 300³ the FFT is not the cheap part" —
-was wrong; the splat is ~72% of the frame and everything else together is under
-10 ms.
+**Measured, not assumed** — CUDA, the corrected 120 × 160 × 360 grid
+(`docs/performance.md`): `fft+extract` is **0.3 ms/frame** median and
+`symmetrize`, a comparable grid-wide pass, is 0.6 ms, in a frame whose
+per-frame work is ~70 ms. Directly measured on 7FPV, the solvent path costs
+**~1 ms** — one more FFT plus a pointwise taper. The earlier note here — "at
+300³ the FFT is not the cheap part" — was wrong; the splat is ~94% of the
+per-frame work and everything else together is under 5 ms.
 
 Two caveats that survive the measurement. Under guidance the cost lands per
 configuration per guided step, so it multiplies with the ensemble. And it

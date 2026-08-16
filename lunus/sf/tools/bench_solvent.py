@@ -3,9 +3,9 @@
 What bulk solvent costs at production scale, on a real structure.
 
     PYTHONPATH=<repo root> python tools/bench_solvent.py \\
-        examples/compare_gemmi/top_bfac.pdb.gz \\
-        --cell 88.451,88.451,39.823,90,90,90 --space-group P43 \\
-        --grid 300,300,144 [--device cuda|mps] [--selection peptide]
+        examples/compare_gemmi/7FPV.pdb \\
+        --cell 34.196,45.558,99.044,90,90,90 --space-group P212121 \\
+        --grid 120,160,360 [--device cuda|mps] --selection "not water"
 
 Everything about the solvent path so far has been measured on toy systems --
 at most 400 atoms on a 72^3 grid, in float64. This runs the real thing: the

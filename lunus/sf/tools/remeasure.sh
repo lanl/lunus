@@ -191,11 +191,12 @@ Logs in ${LOGDIR}
 Into docs/performance.md:
   1-bench_splat.log     the CPU / Apple GPU / NVIDIA GPU tables, and the
                         atom-voxel pair count in the configuration block
-  2-frame_budget.log    'Where the time actually goes', and the before/after
-                        frame budgets -- note the "after" is now the only one
-                        that exists on this cell, so the 6.5x speedup claim
-                        needs restating against a NEW baseline rather than
-                        carried over
+  2-frame_budget.log    'Where the time actually goes'. Read the median
+                        column rather than the mean: one-time costs divide by
+                        the frame count, so a short run inflates the mean. For
+                        a speedup figure use tools/compare_baseline.sh, which
+                        runs both sides rather than comparing against numbers
+                        from another configuration
   3-parity.log          the gemmi-vs-torch correlation and R-factor
   4-bench_solvent.log   'At production scale'. Note this one runs on 7FPV
                         rather than on the trajectory: the MD model carries

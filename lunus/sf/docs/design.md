@@ -157,11 +157,13 @@ diffuse signal. Which case you are in is a property of the input model, not of
 this code.
 
 The example in `examples/compare_gemmi/` is the second kind: an MD box whose
-crystal is PDB 7FPV, P2₁2₁2₁ with cell 34.196, 45.558, 99.044 (the figures
-below predate that correction and were taken with P4₃ / 88.451, 88.451, 39.823
--- see docs/performance.md). The symmetry is
+crystal is PDB 7FPV, P2₁2₁2₁ with cell 34.196, 45.558, 99.044. The symmetry is
 real and approximately obeyed; it is passed on the command line only because
-the topology's CRYST1 records the P1 simulation box.
+the topology's CRYST1 records the P1 simulation box. The box is an exact 2×2×2
+supercell of that cell, so it already contains every symmetry copy — which is
+why `expand_symmetry` defaults to False. The figures in the next section
+predate this correction and were taken with P4₃ / 88.451, 88.451, 39.823; see
+docs/performance.md.
 
 ## Measured agreement with gemmi
 
@@ -170,9 +172,14 @@ on [10, 100], cell 88.451, 88.451, 39.823, space group P4₃ (superseded; see
 docs/performance.md), `d_min` 0.9, grid
 300 × 300 × 144, cutoff 0.01.
 
+**Read the first row carefully**: it is torch NOT expanding while gemmi does,
+i.e. a genuine mismatch, and not a description of `expand_symmetry=False`.
+With that default both engines skip the expansion and they agree — the
+corrected-cell parity run gives correlation 0.999919.
+
 | | density correlation | density sum ratio | Icalc R-factor |
 |---|---|---|---|
-| no symmetry expansion | 0.496 | 4.06 | — |
+| torch not expanding, gemmi expanding | 0.496 | 4.06 | — |
 | symmetrize the density | 0.99977 | 1.016887 | 0.0092 |
 | …and taper 0.1 → 0.001 Å | 0.99990 | 1.0073 | 0.0044 |
 
