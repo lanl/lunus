@@ -595,6 +595,39 @@ estimate was for CUDA, where the protein FFT is 0.6 ms; the CPU numbers here
 are consistent with it once the FFT ratio is accounted for, but the GPU
 measurement has not been made.
 
+### Fold last: the mask belongs in the model's own frame
+
+Folding a model into a smaller cell destroys the boundary the mask needs.
+Measured on the compare_gemmi topology, protein only, cutoff 1% of peak:
+
+| frame | median ρ | occupancy |
+|---|---|---|
+| the model's own P1 box | 0.076 | **0.344** |
+| folded into the crystallographic cell | 0.578 | 0.010 |
+
+So a mask thresholded from the folded density describes a cell with no empty
+space left in it. The order has to be: build the density in the model's frame,
+**build the mask there**, then fold.
+
+`supercell=(na, nb, nc)` on both entry points does that. The atoms are splatted
+onto the larger grid, the mask is built on it, and density and mask are folded
+into the target cell separately — which is exact, because folding is linear, and
+which keeps `exp(−B_sol·s²/4)` in reciprocal space where it belongs rather than
+forcing the mask to be blurred in real space before it is added.
+
+**Commensurate or refuse.** `symmetry_torch.supercell_factors()` derives the
+factors from the two cells and raises unless each axis ratio is an integer,
+because folding a density *grid* is only exact when the target tiles the source.
+(Folding *atoms* is always well defined — the modulo in the splat's scatter —
+which is why the constraint only appears once masks are folded.) A model
+spanning several cells already contains its symmetry copies, so `supercell=`
+refuses `grid_ops=` as well: expanding again would double-count, and summing a
+mask over the symmetry orbit does not give a mask.
+
+Without solvent, `supercell=` changes nothing observable, and there is a test
+asserting exactly that against the direct path — if the two foldings ever
+disagree, every supercell result is suspect.
+
 ### The compare_gemmi system cannot exercise this model at all
 
 Worth stating plainly, because it is the repo's standard benchmark input and it

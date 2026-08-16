@@ -54,7 +54,7 @@ def structure_factors_one_config(
     atom_A, atom_lam, elem_offsets, atom_radius_ang,
     grid_shape, orth_matrix, cell_volume,
     hkl, taper_width, blur=0.0, max_atoms_per_batch=50_000,
-    grid_ops=None, compile_core=True, solvent=None,
+    grid_ops=None, compile_core=True, solvent=None, supercell=None,
 ):
     """One configuration, start to finish: splat -> symmetrize -> FFT ->
     extract F(hkl). Differentiable with respect to frac_coords. atom_A/atom_lam/
@@ -77,21 +77,80 @@ def structure_factors_one_config(
     [F_protein + k_sol*exp(-b_sol*s^2/4)*F_mask] is returned instead, with the
     mask thresholded from THIS configuration's density -- see
     docs/solvent-design.md, and note that the mask is built after the symmetry
-    expansion below, which is the only correct order."""
+    expansion below, which is the only correct order.
+
+    supercell: (na, nb, nc), when the MODEL's own cell is an integer supercell
+    of the cell being calculated on -- an MD box holding several
+    crystallographic cells, say. The atoms are then splatted onto the larger
+    grid, ANY SOLVENT MASK IS BUILT THERE, and density and mask are folded into
+    the target cell afterwards.
+
+    That order matters for solvent and only for solvent. Folding destroys the
+    protein/solvent boundary -- measured on the compare_gemmi system, a
+    protein-only model has 34% solvent in its own P1 box and 1% after folding
+    into the crystallographic cell -- so a mask thresholded from the folded
+    density describes nothing. Folding is linear, so folding the two grids
+    separately and combining them in reciprocal space afterwards is exact and
+    keeps exp(-b_sol*s^2/4) where it belongs.
+
+    Without solvent, supercell= changes nothing observable: splatting atoms
+    into the small grid already folds them, via the modulo in the scatter.
+    symmetry_torch.supercell_factors() derives the factors and rejects a
+    non-integer ratio, for which no exact grid folding exists."""
     from .density_torch import splat_density
-    from .symmetry_torch import symmetrize_sum
+    from .symmetry_torch import fold_supercell, symmetrize_sum
+
+    if supercell is None:
+        splat_grid, splat_orth, splat_frac = grid_shape, orth_matrix, frac_coords
+    else:
+        if grid_ops:
+            raise ValueError(
+                "supercell= and grid_ops= cannot be combined: a model that "
+                "spans several cells already contains the symmetry copies "
+                "explicitly, so expanding again would double-count them -- and "
+                "summing a MASK over the symmetry orbit does not give a mask. "
+                "Pass grid_ops=None for a supercell model.")
+        n = tuple(int(x) for x in supercell)
+        splat_grid = tuple(g * f for g, f in zip(grid_shape, n))
+        # Same voxel size, so the precomputed offset lists stay valid: the
+        # supercell's axes are longer by exactly the repeat factors.
+        scale = torch.tensor(n, dtype=orth_matrix.dtype, device=orth_matrix.device)
+        splat_orth = orth_matrix * scale            # columns are the axis vectors
+        splat_frac = frac_coords / scale
 
     density = splat_density(
-        frac_coords, element_idx, occ,
+        splat_frac, element_idx, occ,
         atom_A, atom_lam, elem_offsets, atom_radius_ang,
-        grid_shape, orth_matrix, taper_width,
+        splat_grid, splat_orth, taper_width,
         max_atoms_per_batch=max_atoms_per_batch, compile_core=compile_core,
     )
+
+    # The mask is built BEFORE folding, where the boundary still exists.
+    mask = None
+    if solvent is not None and supercell is not None:
+        rho = density.detach() if solvent.detach_mask else density
+        from .solvent_torch import solvent_mask as _solvent_mask
+        mask = _solvent_mask(rho, solvent.cutoff, solvent.taper_width)
+        if solvent.check_occupancy and solvent.last_occupancy is None:
+            solvent._check(mask)
+
+    if supercell is not None:
+        density = fold_supercell(density, n)
+        if mask is not None:
+            mask = fold_supercell(mask, n)
+
     if grid_ops:
         density = symmetrize_sum(density, grid_ops)
     F_protein = compute_fcalc(density, cell_volume, hkl, orth_matrix, blur=blur)
     if solvent is None:
         return F_protein
+    if mask is not None:
+        from .solvent_torch import f_solvent, f_total
+        F_mask = f_solvent(mask, cell_volume, hkl, orth_matrix)
+        return f_total(
+            F_protein, F_mask, reciprocal_inv_d2(orth_matrix, hkl),
+            k_sol=solvent.k_sol, b_sol=solvent.b_sol,
+            k_overall=solvent.k_overall, u_aniso=solvent.u_aniso, hkl=hkl)
     # Built from the symmetry-expanded density, per the note above. The mask
     # FFT happens here rather than outside so that it lands INSIDE the
     # checkpointed region in structure_factors_batch -- otherwise the density
@@ -107,7 +166,7 @@ def structure_factors_batch(
     grid_shape, orth_matrix, cell_volume,
     hkl, taper_width, blur=0.0, max_atoms_per_batch=50_000,
     grid_ops=None, compile_core=True,
-    use_checkpoint=False, solvent=None,
+    use_checkpoint=False, solvent=None, supercell=None,
 ):
     """N configurations at once: (N, n_atoms, 3) -> (N, n_refl) complex.
 
@@ -185,7 +244,7 @@ def structure_factors_batch(
             hkl, taper_width, blur=blur,
             max_atoms_per_batch=max_atoms_per_batch,
             grid_ops=grid_ops, compile_core=compile_core,
-            solvent=solvent,
+            solvent=solvent, supercell=supercell,
         )
 
     if not use_checkpoint:

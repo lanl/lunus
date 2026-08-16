@@ -68,6 +68,8 @@ _EXPORTS = {
     "adjust_grid_for_symmetry": "symmetry_torch",
     "symmetry_grid_constraints": "symmetry_torch",
     "symmetrize_sum": "symmetry_torch",
+    "supercell_factors": "symmetry_torch",
+    "fold_supercell": "symmetry_torch",
     # structure factors and the ensemble reduction
     "compute_fcalc": "structure_factor_torch",
     "structure_factors_one_config": "structure_factor_torch",

@@ -297,3 +297,78 @@ def symmetrize_sum(grid: torch.Tensor, grid_ops) -> torch.Tensor:
     for op in grid_ops:
         out = out + op.apply(grid)
     return out
+
+
+def supercell_factors(model_cell, target_cell, tol=1e-3):
+    """
+    How many times the target cell repeats along each axis to fill the model's
+    own cell: (na, nb, nc), integers.
+
+    model_cell / target_cell are (a, b, c, alpha, beta, gamma), the first
+    typically a simulation box's CRYST1 and the second the crystallographic
+    cell being calculated on.
+
+    Raises ValueError unless the model cell IS an integer supercell, because a
+    non-integer ratio has no exact meaning for the operations that follow:
+    folding a density GRID from one cell into another is only exact when the
+    target tiles the source. (Folding ATOMS is always well defined -- that is
+    what the modulo in the splat's scatter does -- which is why this constraint
+    appears only once densities, and therefore solvent masks, are folded.)
+
+    tol is a relative tolerance on each axis ratio, and angles must match.
+    """
+    a_m, b_m, c_m = [float(x) for x in model_cell[:3]]
+    a_t, b_t, c_t = [float(x) for x in target_cell[:3]]
+    ang_m = [float(x) for x in model_cell[3:6]]
+    ang_t = [float(x) for x in target_cell[3:6]]
+
+    if any(abs(m - t) > 1e-3 for m, t in zip(ang_m, ang_t)):
+        raise ValueError(
+            "model and target cells must share their angles to be a supercell "
+            "relationship; got %s and %s" % (ang_m, ang_t))
+
+    factors, bad = [], []
+    for name, m, t in (("a", a_m, a_t), ("b", b_m, b_t), ("c", c_m, c_t)):
+        ratio = m / t
+        n = int(round(ratio))
+        if n < 1 or abs(ratio - n) > tol * max(n, 1):
+            bad.append("%s: %.4f / %.4f = %.4f, nearest integer %d "
+                       "(off by %.2f%%)"
+                       % (name, m, t, ratio, max(n, 1),
+                          100 * abs(ratio - max(n, 1)) / max(n, 1)))
+        factors.append(max(n, 1))
+
+    if bad:
+        raise ValueError(
+            "the model's cell is not an integer supercell of the target cell, "
+            "so a density computed in one cannot be folded exactly into the "
+            "other:\n  " + "\n  ".join(bad) +
+            "\nEither supply a unit_cell that tiles the model's box, or work "
+            "entirely in the model's own frame.")
+    return tuple(factors)
+
+
+def fold_supercell(grid: torch.Tensor, factors):
+    """
+    Sum a supercell density grid into one target cell: (na*Nu, nb*Nv, nc*Nw)
+    -> (Nu, Nv, Nw), adding the contents of every image.
+
+    This is the density-level equivalent of the modulo the splat's scatter
+    applies to atom positions, and it is exact for the same reason: with the
+    supercell sampled at na*Nu points along a, grid point i sits at the target
+    cell's point i % Nu, so folding is a reshape and a sum over the image axes
+    with no interpolation.
+
+    Differentiable, and linear -- fold(x + y) == fold(x) + fold(y) -- which is
+    what lets the protein density and the solvent mask be folded separately and
+    combined afterwards in reciprocal space, keeping the exp(-B_sol s^2/4)
+    factor where it belongs.
+    """
+    na, nb, nc = (int(f) for f in factors)
+    Na, Nb, Nc = grid.shape
+    if Na % na or Nb % nb or Nc % nc:
+        raise ValueError(
+            "supercell grid %s is not divisible by the repeat factors %s"
+            % ((Na, Nb, Nc), (na, nb, nc)))
+    Nu, Nv, Nw = Na // na, Nb // nb, Nc // nc
+    return grid.reshape(na, Nu, nb, Nv, nc, Nw).sum(dim=(0, 2, 4))
