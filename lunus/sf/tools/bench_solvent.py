@@ -175,7 +175,27 @@ def main():
     if dev.startswith("cuda"):
         torch.cuda.reset_peak_memory_stats()
 
+    def _one_pass():
+        d = splat_density(
+            frac, element_idx, occ, atom_A, atom_lam, offsets, atom_r,
+            grid, orth, taper_w, compile_core=False)
+        if grid_ops:
+            d = symmetrize_sum(d, grid_ops)
+        f = compute_fcalc(d, volume, hkl, orth)
+        c = args.cutoff_frac * float(d.max())
+        SolventModel(cutoff=c, taper_width=0.5 * c,
+                     check_occupancy=False).apply(d, f, volume, hkl, orth)
+
     with torch.no_grad():
+        # One complete pass before the clock starts. Every phase here has a
+        # one-time cost on first use -- cuFFT builds its plan, torch.linalg.inv
+        # inside reciprocal_inv_d2 loads cuSOLVER, the allocator grows its pool
+        # -- and timing a cold pipeline reports those as the cost of the model.
+        # Left uncorrected it read as a 3,165-atom splat taking 137.6 ms, which
+        # is twice what 135,834 atoms take warm.
+        _one_pass()
+        sync(dev)
+
         t = Timer(dev)
         density = t("splat", lambda: splat_density(
             frac, element_idx, occ, atom_A, atom_lam, offsets, atom_r,
@@ -190,16 +210,6 @@ def main():
         cutoff = args.cutoff_frac * float(density.max())
         model = SolventModel(cutoff=cutoff, taper_width=0.5 * cutoff,
                              check_occupancy=False)
-        # Warm up before timing. The first solvent call pays one-time CUDA
-        # library initialisation -- reciprocal_inv_d2 calls torch.linalg.inv,
-        # whose first use loads cuSOLVER -- and without this it lands in the
-        # solvent row and reads as the cost of the model. Measured on an
-        # NVIDIA card: 1139 ms cold against 0.7 ms warm, i.e. 86% of the
-        # "frame" was library loading.
-        SolventModel(cutoff=cutoff, taper_width=0.5 * cutoff,
-                     check_occupancy=False).apply(
-            density, F_protein, volume, hkl, orth)
-        sync(dev)
         mask = t("mask", lambda: solvent_mask(density, cutoff, 0.5 * cutoff))
         F_total = t("solvent (mask FFT + combine)", lambda: model.apply(
             density, F_protein, volume, hkl, orth)[0])
