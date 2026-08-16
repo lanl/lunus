@@ -509,3 +509,82 @@ def test_the_check_can_be_turned_off():
         model.apply(_flooded(sys), F_p, sys["cell_volume"], sys["hkl"],
                     sys["orth"])
     assert model.last_occupancy is None
+
+
+# --------------------------------------------------------------------------
+# 10. float32, which is what production actually runs
+
+def _system_dtype(dtype, n_atoms=200, seed=0):
+    """_system() is fixed to float64 for exact comparisons; this one is
+    parametrised, so the same structure can be pushed through both."""
+    rng = np.random.default_rng(seed)
+    M_np = orth_matrix(*CELL)
+    A, lam, offsets, radius, taper_w, _ = build_element_kernels_torch(
+        ["C"], IT92_COEFFS, 20.0, 0.0, GRID, M_np, cutoff=0.01,
+        device="cpu", dtype=dtype,
+    )
+    idx = torch.zeros(n_atoms, dtype=torch.long)
+    return dict(
+        frac=torch.tensor(rng.random((n_atoms, 3)), dtype=dtype),
+        element_idx=idx, occ=torch.ones(n_atoms, dtype=dtype),
+        atom_A=A[idx], atom_lam=lam[idx], elem_offsets=offsets,
+        atom_radius_ang=radius[idx], grid_shape=GRID,
+        orth=torch.tensor(M_np, dtype=dtype),
+        cell_volume=float(np.linalg.det(M_np)), taper_width=taper_w,
+        hkl=torch.tensor(
+            [[h, k, l] for h in range(-4, 5) for k in range(-4, 5)
+             for l in range(-4, 5) if (h, k, l) != (0, 0, 0)],
+            dtype=torch.long),
+    )
+
+
+@pytest.mark.parametrize("cut_frac", [1e-2, 1e-5])
+def test_float32_matches_float64_below_the_pipelines_own_noise(cut_frac):
+    """Everything else here runs float64 for exact comparisons; production
+    runs float32 on a GPU. The question is whether the mask survives it, and
+    especially at the SMALL cutoffs that matching a geometric mask forces,
+    where the taper shell is only tens of voxels wide and a float32 density
+    might move the level set.
+
+    It does survive. Measured mean relative error on F_total: 1.3e-6 at a
+    cutoff of 1% of peak density (1134 shell voxels), 1.2e-5 at 1e-5 of peak
+    (NINE shell voxels) -- so the thin-shell case costs about 9x, the expected
+    direction, and is still small. The shell voxel count is IDENTICAL in the
+    two precisions in both cases, so the level set itself does not move.
+
+    The threshold below is the pipeline's own reproducibility floor rather
+    than a round number: docs/performance.md records GPU non-determinism at
+    4e-5 on Icalc and 2e-4 on diffuse. float32 stays under that, so it is not
+    the limiting precision -- which is the claim worth defending, since
+    tightening it further would buy nothing real.
+    """
+    out = {}
+    for dtype in (torch.float32, torch.float64):
+        s = _system_dtype(dtype)
+        rho = splat_density(
+            s["frac"], s["element_idx"], s["occ"], s["atom_A"], s["atom_lam"],
+            s["elem_offsets"], s["atom_radius_ang"], s["grid_shape"],
+            s["orth"], s["taper_width"], compile_core=False)
+        cutoff = cut_frac * float(rho.max())
+        model = SolventModel(cutoff=cutoff, taper_width=0.5 * cutoff,
+                             check_occupancy=False)
+        F = structure_factors_one_config(
+            s["frac"], s["element_idx"], s["occ"], s["atom_A"], s["atom_lam"],
+            s["elem_offsets"], s["atom_radius_ang"], s["grid_shape"],
+            s["orth"], s["cell_volume"], s["hkl"], s["taper_width"],
+            compile_core=False, solvent=model)
+        mask = solvent_mask(rho, cutoff, 0.5 * cutoff)
+        out[dtype] = dict(F=F, occ=float(mask_occupancy(mask)),
+                          shell=shell_voxels(mask), cutoff=cutoff)
+
+    lo, hi = out[torch.float32], out[torch.float64]
+    assert lo["F"].dtype == torch.complex64
+    assert hi["F"].dtype == torch.complex128
+
+    rel = ((lo["F"].to(torch.complex128) - hi["F"]).abs() / hi["F"].abs())
+    assert float(rel.mean()) < 4e-5, float(rel.mean())     # the Icalc floor
+    assert float(rel.max()) < 1e-3, float(rel.max())
+
+    # The level set itself, which is what a thin shell puts at risk.
+    assert lo["shell"] == hi["shell"]
+    assert lo["occ"] == pytest.approx(hi["occ"], abs=1e-5)

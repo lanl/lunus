@@ -4,9 +4,12 @@ Status: **stages 1-3 implemented** — `solvent_torch.py`, `solvent=` on both en
 points in `structure_factor_torch.py`, `tests/test_solvent.py`, gemmi parity in
 `tests/test_solvent_gemmi.py`, and the diffuse discretization study in
 `tools/study_diffuse_solvent.py` (findings in the two sections named "What the
-... test found" below). Still to do: the scaling fit and shell-resolved R
-against experimental amplitudes, and per-configuration occupancies (see the API
-gap below).
+... test found" below). Symmetry coverage is in
+`tests/test_solvent_symmetry.py`, the degenerate-mask check is wired into
+`SolventModel`, and float32 is measured (below). Still to do: the scaling fit
+and shell-resolved R against experimental amplitudes, per-configuration
+occupancies (see the API gap below), a numerical test of `u_aniso`, and a run
+at production scale for cost.
 
 Written 2026-08-15, revised the same day against the current code — the API
 assumptions below were checked, the cost estimate was replaced with a
@@ -572,6 +575,34 @@ transferable part, not the values.
 A cheap regression guard lives in `tests/test_solvent.py`
 (`test_solvent_diffuse_signal_dominates_grid_alignment_noise`), pinned at a
 factor of three on a 0.62 Å grid where the measured ratio is ~5.
+
+## float32 is not the limiting precision
+
+Everything in the tests runs float64 for exact comparisons; production runs
+float32 on a GPU, and the mask is the part of the pipeline most likely to care,
+since its level set sits in the density tail and its taper shell can be a few
+tens of voxels wide.
+
+Measured, same structure through both precisions:
+
+| cutoff | shell voxels (f32 / f64) | mean rel. error on F_total | max |
+|---|---|---|---|
+| 1% of peak | 1134 / 1134 | 1.3e-6 | 3.1e-5 |
+| 1e-5 of peak | 9 / 9 | 1.2e-5 | 1.6e-4 |
+
+The thin-shell case — the one a geometric-mask match forces — costs about 9×,
+which is the expected direction and still small. **The shell voxel count is
+identical in the two precisions in both cases**, so the level set does not move;
+what differs is only the taper value within it.
+
+For the diffuse observable, the cancellation-sensitive one, float32 against
+float64 is **1.6e-6 with solvent and 3.0e-6 without** — the mask does not make
+it worse.
+
+Against `docs/performance.md`'s reproducibility floor for this pipeline — GPU
+non-determinism of 4e-5 on Icalc and 2e-4 on diffuse — float32 sits one to two
+orders of magnitude below the noise already present. It is not worth switching
+the solvent path to float64.
 
 ## Cost
 
