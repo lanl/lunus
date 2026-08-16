@@ -147,10 +147,15 @@ def structure_factors_one_config(
     if mask is not None:
         from .solvent_torch import f_solvent, f_total
         F_mask = f_solvent(mask, cell_volume, hkl, orth_matrix)
+        # Folding summed n[0]*n[1]*n[2] images into one cell, so the protein
+        # density is that many cells' worth while the mask is still in [0,1];
+        # k_sol has to be scaled to match. See f_total's density_scale.
+        n_cells = n[0] * n[1] * n[2]
         return f_total(
             F_protein, F_mask, reciprocal_inv_d2(orth_matrix, hkl),
             k_sol=solvent.k_sol, b_sol=solvent.b_sol,
-            k_overall=solvent.k_overall, u_aniso=solvent.u_aniso, hkl=hkl)
+            k_overall=solvent.k_overall, u_aniso=solvent.u_aniso, hkl=hkl,
+            density_scale=solvent.density_scale * n_cells)
     # Built from the symmetry-expanded density, per the note above. The mask
     # FFT happens here rather than outside so that it lands INSIDE the
     # checkpointed region in structure_factors_batch -- otherwise the density

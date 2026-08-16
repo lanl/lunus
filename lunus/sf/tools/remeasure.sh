@@ -169,10 +169,17 @@ done
     2>&1 | tee "${LOGDIR}/3-parity.log"
 
 # ---- 4. what bulk solvent costs ---------------------------------------------
-step "4/4  solvent cost  -> replaces 'At production scale'"
-"${PY[@]}" "${HERE}/bench_solvent.py" "${TOP}" \
+#
+# On 7FPV itself, NOT on the trajectory. The MD model is all-atom with explicit
+# water, so its production path is all atoms and no mask -- which is what runs
+# 1-3 above measure. Forcing a mask onto it by selecting the peptide (as an
+# earlier version of this script did) benchmarks a configuration nobody should
+# use: the mask is for a crystallographic model, where the disordered solvent
+# is absent from the coordinates rather than explicitly simulated.
+step "4/4  solvent cost, on the crystal structure  -> 'At production scale'"
+"${PY[@]}" "${HERE}/bench_solvent.py" "${DATA}/7FPV.pdb" \
     --cell "${CELL}" --space-group "${SPACE_GROUP}" --grid "${GRID}" \
-    --device "${DEVICE}" --selection peptide \
+    --device "${DEVICE}" --selection "not water" \
     2>&1 | tee "${LOGDIR}/4-bench_solvent.log"
 
 # ---- summary ----------------------------------------------------------------
@@ -190,9 +197,10 @@ Into docs/performance.md:
                         needs restating against a NEW baseline rather than
                         carried over
   3-parity.log          the gemmi-vs-torch correlation and R-factor
-  4-bench_solvent.log   'At production scale', and the mask occupancy, which
-                        should now be a real number rather than the 0.000 the
-                        wrong cell produced
+  4-bench_solvent.log   'At production scale'. Note this one runs on 7FPV
+                        rather than on the trajectory: the MD model carries
+                        its solvent explicitly, so a mask has nothing to add
+                        to it, and runs 1-3 are the all-atom production path
 
 Then delete the "configuration above is wrong for this system" note at the top
 of docs/performance.md, since it will no longer be true.

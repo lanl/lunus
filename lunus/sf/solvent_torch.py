@@ -208,7 +208,7 @@ def f_solvent(mask, cell_volume, hkl, orth_matrix=None):
 
 
 def f_total(F_protein, F_mask, inv_d2, k_sol=K_SOL_DEFAULT, b_sol=B_SOL_DEFAULT,
-            k_overall=1.0, u_aniso=None, hkl=None):
+            k_overall=1.0, u_aniso=None, hkl=None, density_scale=1.0):
     """
     Combine the protein and solvent contributions:
 
@@ -228,9 +228,24 @@ def f_total(F_protein, F_mask, inv_d2, k_sol=K_SOL_DEFAULT, b_sol=B_SOL_DEFAULT,
     tensors with requires_grad=True is what makes them refinable later. They
     are NOT refined here, and fixed values will not reproduce a published
     refined R -- see docs/solvent-design.md on validation.
+
+    density_scale is how many unit cells' worth of contents F_protein
+    represents, and it multiplies k_sol. It exists because the mask is
+    dimensionless -- 1 in solvent, whatever the density -- while F_protein is
+    not: fold an N-cell supercell into one cell and the protein density is N
+    times a single cell's, so a k_sol of 0.35 e/A^3 buys N times too little
+    solvent. Measured on the 7FPV trajectory folded from its 2x2x2 box, with
+    ~6 cells' worth of atoms in the cell: |F_total|/|F_protein| came out 0.9970
+    against 0.9176 for the same model as a single crystallographic cell.
+
+    The pipeline sets it from the supercell factors when it knows them. It
+    CANNOT know them when the folding happens implicitly, through the modulo in
+    the splat's scatter, which is what happens if coordinates outside [0,1) are
+    passed with no supercell= argument -- pass density_scale explicitly there.
     """
+    k_eff = _as_tensor(k_sol, inv_d2) * _as_tensor(density_scale, inv_d2)
     scale = torch.exp(-0.25 * _as_tensor(b_sol, inv_d2) * inv_d2)
-    F = F_protein + (_as_tensor(k_sol, inv_d2) * scale).to(F_protein.dtype) * F_mask
+    F = F_protein + (k_eff * scale).to(F_protein.dtype) * F_mask
 
     if u_aniso is not None:
         if hkl is None:
@@ -283,11 +298,11 @@ class SolventModel:
 
     __slots__ = ("cutoff", "taper_width", "k_sol", "b_sol", "k_overall",
                  "u_aniso", "detach_mask", "check_occupancy",
-                 "last_occupancy", "last_shell_voxels")
+                 "density_scale", "last_occupancy", "last_shell_voxels")
 
     def __init__(self, cutoff, taper_width, k_sol=K_SOL_DEFAULT,
                  b_sol=B_SOL_DEFAULT, k_overall=1.0, u_aniso=None,
-                 detach_mask=True, check_occupancy=True):
+                 detach_mask=True, check_occupancy=True, density_scale=1.0):
         if taper_width <= 0:
             raise ValueError(
                 "taper_width must be > 0; a hard threshold has no usable "
@@ -300,6 +315,7 @@ class SolventModel:
         self.u_aniso = u_aniso
         self.detach_mask = detach_mask
         self.check_occupancy = check_occupancy
+        self.density_scale = density_scale
         self.last_occupancy = None
         self.last_shell_voxels = None
 
@@ -328,7 +344,8 @@ class SolventModel:
                 "this one." % (occ, self.cutoff),
                 SolventMaskWarning, stacklevel=3)
 
-    def apply(self, density, F_protein, cell_volume, hkl, orth_matrix):
+    def apply(self, density, F_protein, cell_volume, hkl, orth_matrix,
+              density_scale=1.0):
         """
         density must ALREADY be symmetry-expanded -- see the module docstring.
 
@@ -345,6 +362,9 @@ class SolventModel:
             F_protein, F_mask, inv_d2,
             k_sol=self.k_sol, b_sol=self.b_sol, k_overall=self.k_overall,
             u_aniso=self.u_aniso, hkl=hkl,
+            # The caller's factor (the supercell fold, which it knows) times
+            # the model's own (anything the caller cannot know).
+            density_scale=self.density_scale * density_scale,
         )
         return F, mask
 

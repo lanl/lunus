@@ -179,10 +179,15 @@ def test_the_pipeline_masks_before_folding():
         solvent_mask(rho_super, cutoff, 0.5 * cutoff), n)
     F_protein = compute_fcalc(
         fold_supercell(rho_super, n), s["cell_volume"], s["hkl"], s["orth"])
+    # density_scale = the number of images folded in. The protein density is
+    # that many cells' worth while the mask is still in [0,1], so k_sol has to
+    # be scaled to match or the solvent is that factor too weak.
+    n_cells = n[0] * n[1] * n[2]
     expected = f_total(
         F_protein, f_solvent(mask_folded, s["cell_volume"], s["hkl"], s["orth"]),
         reciprocal_inv_d2(s["orth"], s["hkl"]),
-        k_sol=model.k_sol, b_sol=model.b_sol, hkl=s["hkl"])
+        k_sol=model.k_sol, b_sol=model.b_sol, hkl=s["hkl"],
+        density_scale=n_cells)
 
     got = _sf(s, solvent=model, supercell=n)
     assert torch.allclose(got, expected, rtol=1e-12, atol=1e-12)
@@ -190,3 +195,15 @@ def test_the_pipeline_masks_before_folding():
     # And it is genuinely a different answer from masking after folding.
     naive = _sf(s, solvent=model)
     assert not torch.allclose(got, naive, rtol=1e-3, atol=1e-6)
+
+    # The scaling is not cosmetic: without it the solvent term is n_cells too
+    # weak, which is how it went unnoticed on a real system -- an 0.3% effect
+    # where the same model as one crystallographic cell gives 8%.
+    unscaled = f_total(
+        F_protein, f_solvent(mask_folded, s["cell_volume"], s["hkl"], s["orth"]),
+        reciprocal_inv_d2(s["orth"], s["hkl"]),
+        k_sol=model.k_sol, b_sol=model.b_sol, hkl=s["hkl"])
+    solvent_part_scaled = (got - F_protein).abs().mean()
+    solvent_part_plain = (unscaled - F_protein).abs().mean()
+    assert float(solvent_part_scaled / solvent_part_plain) == pytest.approx(
+        n_cells, rel=1e-9)
