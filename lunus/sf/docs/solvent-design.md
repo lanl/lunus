@@ -576,6 +576,51 @@ A cheap regression guard lives in `tests/test_solvent.py`
 (`test_solvent_diffuse_signal_dominates_grid_alignment_noise`), pinned at a
 factor of three on a 0.62 Å grid where the measured ratio is ~5.
 
+## At production scale
+
+`tools/bench_solvent.py`, float32, one configuration, CPU (a GPU run is still
+owed — see below).
+
+**The cost is per-grid, not per-atom**, which decides where it matters:
+
+| system | atoms | grid | frame | solvent adds |
+|---|---|---|---|---|
+| compare_gemmi | 135,834 | 300×300×144 | 2,399 ms | 95 ms, **3.9%** |
+| 4WOR | 2,094 | 160×160×208 | 121 ms | 37 ms, **31%** |
+
+The mask evaluation and its FFT scale with the number of voxels, while the
+splat scales with atoms, so the solvent surcharge is small exactly where the
+calculation is expensive and large where it is cheap. The design note's ~2 ms
+estimate was for CUDA, where the protein FFT is 0.6 ms; the CPU numbers here
+are consistent with it once the FFT ratio is accounted for, but the GPU
+measurement has not been made.
+
+### The compare_gemmi system cannot exercise this model at all
+
+Worth stating plainly, because it is the repo's standard benchmark input and it
+looks like the obvious thing to test on. Its fractional coordinates span
+**−0.35 to 5.12**: the MD box is several crystallographic cells across, so
+folding it into the 88.451 × 88.451 × 39.823 cell stacks several protein copies
+on top of one another, and the P4₃ expansion multiplies that again. The
+resulting density has **minimum 0.163 and median 2.48 e/Å³** — there is no
+empty space anywhere to call solvent. Selecting `peptide` does not help: the
+protein copies alone still fill the cell.
+
+Run it anyway and the mask comes out empty, `F_mask ≈ 0`, and
+`|F_total|/|F_protein| = 1.0000` exactly. `SolventModel` warns, which is the
+degenerate-mask check earning its place on real data rather than on a
+constructed fixture.
+
+The right input is a **crystallographic model** — one asymmetric unit in its
+own cell, with solvent channels. On 4WOR (P4₁, 48.5 × 48.5 × 63.4, waters
+excluded, cutoff 1% of peak): occupancy **0.5097**, a 258,256-voxel shell, and
+`|F_total|/|F_protein| = 0.9176` — the low-resolution contrast cancellation
+this model exists to represent, on a real structure.
+
+This also sharpens the scope statement at the top. Bulk solvent belongs with
+crystallographic models and ensembles built from them; an all-atom MD box in
+its own P1 frame already contains its solvent explicitly and needs no mask.
+
 ## float32 is not the limiting precision
 
 Everything in the tests runs float64 for exact comparisons; production runs
