@@ -156,13 +156,27 @@ for k in names:
     b, a = before.get(k, 0.0), after.get(k, 0.0)
     print("  %-22s %10.1f %10.1f %10.1f" % (k, b, a, b - a))
 print("  %-22s %10.1f %10.1f %10.1f" % ("FRAME LOOP", wall_b, wall_a, wall_b - wall_a))
-print("\n  speedup %.2fx  (code only: same threads, same cell, both sides)"
-      % (wall_b / wall_a))
+
+# Two ratios, because one of them depends on how the run was chunked. Phases
+# that fire once per CHUNK -- the trajectory read above all -- are divided by
+# the frame count, so the same code reads 185 ms/frame over 10 frames and 7
+# over 251. The per-frame ratio is the property of the code; the frame-loop
+# ratio is the property of this run.
+per_chunk = {"traj read", "coords->numpy"}
+work_b = sum(v for k, v in before.items() if k not in per_chunk)
+work_a = sum(v for k, v in after.items() if k not in per_chunk)
+print("\n  per-frame work   %8.1f -> %8.1f ms   %.2fx   <- the code's own ratio"
+      % (work_b, work_a, work_b / work_a))
+print("  whole frame loop %8.1f -> %8.1f ms   %.2fx   (%d frames per chunk; the"
+      % (wall_b, wall_a, wall_b / wall_a, n))
+print("                                                  per-chunk read is %.0f%%"
+      " of it here)" % (100.0 * before.get("traj read", 0.0) / wall_b))
 print("""
 Read it against the retired claim: 6.5x was 1.81x of code measured under
-throttling times 3.60x of setting OMP_NUM_THREADS. The number above is the
-code's contribution with the container already healthy, which is the only
-version of it worth publishing.""")
+throttling times 3.60x of setting OMP_NUM_THREADS. The per-frame ratio above
+is the code's contribution with the container already healthy, which is the
+only version of it worth publishing -- and the absolute saving in ms/frame
+transfers better than either ratio.""")
 EOF
 
 echo

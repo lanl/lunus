@@ -77,15 +77,39 @@ also remarkably steady: over ten frames, median 65.9, min 65.8, max 65.9, with
 frame 0 at 195.0 — that first frame carries ~130 ms of one-time warmup, which
 is why the table reports a median as well as a mean.
 
-**On the speedup claim.** An earlier version of this page led with "571.2 →
-87.3 ms/frame, 6.5×". That figure is retired, for two reasons. It was measured
-on the wrong cell; and it was never a code speedup — the baseline ran throttled
-(104 threads on 3 CPUs) and the final run did not, so it was really 1.81× of
-code times 3.6× of correcting a container setting. The code-only figure in a
-healthy environment has never been measured. `824b800` is the last commit
-before any optimization and still exists, so the honest comparison is one run
-of it under the same conditions; until that happens this page states the
-current cost and no ratio.
+### What the optimizations are worth
+
+Measured directly — `tools/compare_baseline.sh` runs `824b800`, the last commit
+before any of them, and the current tip under the same cell, resolution,
+device, trajectory and thread count, in one session:
+
+| phase | before | after | saved |
+|---|---|---|---|
+| `set_sites_cart` | 187.6 | 0.0 | **187.6** |
+| `element idx` | 45.8 | 0.0 | 45.8 |
+| `xrs.select` | 26.0 | 0.0 | 26.0 |
+| `sites_frac+occ` | 22.7 | 0.0 | 22.7 |
+| splat | 78.8 | 79.7 | −0.9 |
+| everything else | ~7 | ~7 | ~0 |
+| **per-frame work** | **368.3** | **87.2** | **281.1 → 4.2×** |
+| whole frame loop, 10 frames/chunk | 555.4 | 280.3 | 1.98× |
+
+**The transferable number is 281 ms/frame of host work removed**, all of it in
+the four rows that disappear. The splat does not move, which is the point: none
+of this touched it.
+
+Two ratios, because one of them is not a property of the code. The trajectory
+read fires once per *chunk*, so it is 185 ms/frame over 10 frames and ~7 over
+251; include it and the same code reads 1.98× here and would read ~3.9× at 251
+frames per chunk. The per-frame ratio, 4.2×, is the one that means something.
+
+**The retired claim.** This page used to lead with "571.2 → 87.3 ms/frame,
+6.5×". That figure was wrong twice: measured on the superseded cell, and never
+a code speedup at all — its baseline ran throttled (104 torch threads on 3
+CPUs) and its final run did not, making it 1.81× of code times 3.6× of
+correcting a container setting. Fixing the environment was the larger factor
+and remains the first thing to check on a new machine; the code, measured
+honestly against a healthy container, is worth 4.2× on per-frame work.
 
 ## CPU
 
