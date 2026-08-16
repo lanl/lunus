@@ -198,10 +198,17 @@ repo so those numbers stay reproducible. Both `iotbx.pdb` and `mdtraj` read
   occupancy — refining occupancies wants the mask in the graph, which today
   also re-enables the coordinate path. Measured cost of getting this wrong is
   in docs/solvent-design.md.
-- **A CUDA measurement of what `mask_blur` costs.** It is an FFT pair per
-  configuration, worth 2.7x on the solvent path on CPU; the GPU figure should be
-  much smaller but has not been taken. The one available optimization — reusing
-  `compute_fcalc`'s existing transform, halving it — is described in
-  docs/solvent-design.md and not implemented.
+- **Halve `mask_blur`'s cost by reusing the transform `compute_fcalc` already
+  computes.** For real input `fftn(d) = N·conj(ifftn(d))`, so the blur's forward
+  FFT is recoverable from work already done — one FFT rather than two. Measured
+  motivation: on CUDA the blur costs only ~0.4 ms but **+113 MB of peak device
+  memory**, and memory is the binding constraint for ensembles. It needs
+  `compute_fcalc` to hand back its grid, which complicates the checkpointing
+  contract, so it is described in docs/solvent-design.md and not done.
+- **Re-check `recommended_blur`'s `57 h²` target on a second structure and
+  spacing.** It is calibrated against exact direct summation on one structure
+  at one grid. The functional form is a sampling argument and should transfer;
+  the constant is a fit to one curve, and single-fixture calibration has been
+  wrong four times in this model already.
 - **A grid-refinement convergence check** in `test_per_atom_b.py`; see
   docs/design.md.
