@@ -1169,7 +1169,13 @@ if __name__=="__main__":
       if torch_num_threads is not None:
         _target, _why = torch_num_threads, "torch_num_threads"
       elif _quota is not None:
+        # NEVER RAISE. The quota is a ceiling, not a target: OMP_NUM_THREADS=3
+        # under a 12-CPU quota is someone deliberately asking for 3, and this
+        # code was overriding them up to 12 -- the exact opposite of what a
+        # guard against oversubscription is for. Observed on the pod:
+        # "torch.set_num_threads(12), was 3".
         _target = _quota if _affinity is None else min(_quota, _affinity)
+        _target = min(_target, torch.get_num_threads())
         _why = "cgroup CPU quota"
       elif torch_device != "cpu":
         # No discoverable quota, and the host only dispatches on a device run

@@ -188,7 +188,18 @@ def main():
         mem_protein = peak_memory(dev)
 
         cutoff = args.cutoff_frac * float(density.max())
-        model = SolventModel(cutoff=cutoff, taper_width=0.5 * cutoff)
+        model = SolventModel(cutoff=cutoff, taper_width=0.5 * cutoff,
+                             check_occupancy=False)
+        # Warm up before timing. The first solvent call pays one-time CUDA
+        # library initialisation -- reciprocal_inv_d2 calls torch.linalg.inv,
+        # whose first use loads cuSOLVER -- and without this it lands in the
+        # solvent row and reads as the cost of the model. Measured on an
+        # NVIDIA card: 1139 ms cold against 0.7 ms warm, i.e. 86% of the
+        # "frame" was library loading.
+        SolventModel(cutoff=cutoff, taper_width=0.5 * cutoff,
+                     check_occupancy=False).apply(
+            density, F_protein, volume, hkl, orth)
+        sync(dev)
         mask = t("mask", lambda: solvent_mask(density, cutoff, 0.5 * cutoff))
         F_total = t("solvent (mask FFT + combine)", lambda: model.apply(
             density, F_protein, volume, hkl, orth)[0])
