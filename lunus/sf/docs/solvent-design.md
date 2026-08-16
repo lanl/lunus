@@ -628,6 +628,75 @@ Without solvent, `supercell=` changes nothing observable, and there is a test
 asserting exactly that against the direct path — if the two foldings ever
 disagree, every supercell result is suspect.
 
+### Retracted: "the compare_gemmi system cannot exercise this model"
+
+An earlier version of this section said that, on the strength of a mask that
+came out empty with any selection or cutoff. The measurement was real; the
+explanation was wrong, and so was the conclusion.
+
+The example was being run with `unit_cell=88.451,88.451,39.823` and
+`space_group=P43`, carried over from a different example. The crystal is **PDB
+7FPV, 34.196 × 45.558 × 99.044, P2₁2₁2₁**, and the simulation box is exactly a
+2×2×2 supercell of it. Folding into the correct cell stacks the eight images
+coherently and the boundary survives; folding into a cell with no integer
+relationship to the box scatters 32 protein copies at unrelated positions and
+fills it solid.
+
+| configuration | atoms | occupancy in the box | occupancy after folding |
+|---|---|---|---|
+| wrong cell, 88.451 / P4₃, protein only | 77,056 | — | **0.0100** |
+| **7FPV cell, P2₁2₁2₁, 2×2×2, protein only** | 77,056 | 0.3443 | **0.3122** |
+| 7FPV cell, all atoms (explicit water) | 135,834 | 0.0022 | 0.0000 |
+
+So the system exercises the model perfectly well, and the all-atom row is still
+the degenerate case this note warns about — explicit bulk water leaves nothing
+for a mask to find, which is a property of the model, not of the cell.
+
+`calibrate_cutoff(density, 0.50)` on the folded protein-only density lands at
+**1.1e-01 of peak**, the same ~11% found independently on 4WOR. Two unrelated
+real crystals agreeing on the calibration is worth more than either alone.
+
+**The lesson worth keeping** is about the diagnosis, not the cell: an empty
+mask says the density has no empty space in it, and that has at least two
+causes — a model that genuinely fills the cell (explicit solvent), and a model
+folded into the wrong cell. `mask_occupancy()` detects the symptom; it cannot
+distinguish the causes. Check that the box is a supercell of the cell before
+concluding anything about the solvent, which is what
+`symmetry_torch.supercell_factors()` is now for.
+
+### Fold last: the mask belongs in the model's own frame
+
+Folding a model into a smaller cell destroys the boundary the mask needs.
+Measured on the compare_gemmi topology, protein only, cutoff 1% of peak:
+
+| frame | median ρ | occupancy |
+|---|---|---|
+| the model's own P1 box | 0.076 | **0.344** |
+| folded into the crystallographic cell | 0.578 | 0.010 |
+
+So a mask thresholded from the folded density describes a cell with no empty
+space left in it. The order has to be: build the density in the model's frame,
+**build the mask there**, then fold.
+
+`supercell=(na, nb, nc)` on both entry points does that. The atoms are splatted
+onto the larger grid, the mask is built on it, and density and mask are folded
+into the target cell separately — which is exact, because folding is linear, and
+which keeps `exp(−B_sol·s²/4)` in reciprocal space where it belongs rather than
+forcing the mask to be blurred in real space before it is added.
+
+**Commensurate or refuse.** `symmetry_torch.supercell_factors()` derives the
+factors from the two cells and raises unless each axis ratio is an integer,
+because folding a density *grid* is only exact when the target tiles the source.
+(Folding *atoms* is always well defined — the modulo in the splat's scatter —
+which is why the constraint only appears once masks are folded.) A model
+spanning several cells already contains its symmetry copies, so `supercell=`
+refuses `grid_ops=` as well: expanding again would double-count, and summing a
+mask over the symmetry orbit does not give a mask.
+
+Without solvent, `supercell=` changes nothing observable, and there is a test
+asserting exactly that against the direct path — if the two foldings ever
+disagree, every supercell result is suspect.
+
 ### The compare_gemmi system cannot exercise this model at all
 
 Worth stating plainly, because it is the repo's standard benchmark input and it

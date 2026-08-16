@@ -8,7 +8,7 @@ assumed throughout:
 |---|---|
 | topology | `examples/compare_gemmi/top_bfac.pdb.gz`, 135,834 atoms |
 | B-factors | per-residue, uniform on [10, 100] |
-| cell / space group | 88.451, 88.451, 39.823 / P4₃ |
+| cell / space group | **88.451, 88.451, 39.823 / P4₃ — WRONG, see below** |
 | resolution / grid | `d_min` 0.9 → 300 × 300 × 144 |
 | cutoff | 0.01 |
 | machine | Apple M5 Pro (6 performance + 12 efficiency cores), macOS 26.5.1, **except** the CUDA section and anything about a 251-frame run, which are an NVIDIA container, driver CUDA 13.0 |
@@ -21,7 +21,9 @@ rather than the tables below:
 ```bash
 PYTHONPATH=<repo root> python tools/bench_splat.py \
     examples/compare_gemmi/top_bfac.pdb.gz \
-    --cell 88.451,88.451,39.823,90,90,90 --grid 300,300,144 [--device mps|cuda]
+    --cell 34.196,45.558,99.044,90,90,90 --grid 120,160,360 [--device mps|cuda]
+    # the tables below were taken with --cell 88.451,88.451,39.823,90,90,90
+    # --grid 300,300,144; see the note directly above
 ```
 
 It synchronizes around each timed region, without which GPU timings measure
@@ -29,6 +31,41 @@ dispatch rather than execution. Set `OMP_NUM_THREADS` to control CPU threads —
 **on a CPU-limited container this is not optional**, see below.
 
 Figures re-measured 2026-08-11; the frame-loop optimization work is 2026-08-14.
+
+## The configuration above is wrong for this system (2026-08-15)
+
+Every absolute number on this page was measured with `unit_cell=88.451,88.451,
+39.823` and `space_group=P43`, which were carried over from a different example.
+The crystal this trajectory was simulated from is **PDB 7FPV: 34.196 × 45.558 ×
+99.044, P2₁2₁2₁, Z = 4** (now kept alongside the data as `7FPV.pdb`), and the
+simulation box is exactly a 2×2×2 supercell of it — 68.392/34.196,
+91.116/45.558 and 198.088/99.044 are all 2.000000, where the old cell had no
+integer relationship on any axis.
+
+**What this invalidates:**
+
+- **Every ms/frame figure**, because the grid changes: `d_min` 0.9 gives
+  120 × 160 × 360 = 6.9M voxels on the correct cell against 300 × 300 × 144 =
+  12.96M on the old one, a factor of 1.9 in the splat and the FFTs alike. The
+  timings need re-measuring; nothing about them can be rescaled by hand,
+  because the atom-voxel pair count changes with the grid too.
+- **Any physical reading of the Icalc/diffuse output** from those runs, since
+  folding into an unrelated cell scattered the 32 protein copies at
+  incommensurate positions rather than stacking them.
+
+**What survives unchanged:**
+
+- **Torch-vs-gemmi parity.** Both engines were given the same cell and fold
+  identically, so they agree with each other whatever cell they are given.
+- **The float32 study, the CPU-throttling diagnosis, and every ratio between
+  phases** — splat against FFT, host against device, and the conclusion that
+  the pipeline was quota-throttled. Those are properties of the code and the
+  machine, not of the cell.
+- **The optimization results**, since before and after were measured under
+  identical settings.
+
+The superseded configuration is kept commented in `run_xtraj.sh` so the numbers
+below can be reproduced until they are replaced.
 
 ## Where this stands (2026-08-14)
 

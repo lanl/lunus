@@ -157,14 +157,17 @@ diffuse signal. Which case you are in is a property of the input model, not of
 this code.
 
 The example in `examples/compare_gemmi/` is the second kind: an MD box whose
-crystal is experimentally P4₃ with cell 88.451, 88.451, 39.823. The symmetry is
+crystal is PDB 7FPV, P2₁2₁2₁ with cell 34.196, 45.558, 99.044 (the figures
+below predate that correction and were taken with P4₃ / 88.451, 88.451, 39.823
+-- see docs/performance.md). The symmetry is
 real and approximately obeyed; it is passed on the command line only because
 the topology's CRYST1 records the P1 simulation box.
 
 ## Measured agreement with gemmi
 
 System: `examples/compare_gemmi/top_bfac.pdb.gz`, 135,834 atoms, per-residue B
-on [10, 100], cell 88.451, 88.451, 39.823, space group P4₃, `d_min` 0.9, grid
+on [10, 100], cell 88.451, 88.451, 39.823, space group P4₃ (superseded; see
+docs/performance.md), `d_min` 0.9, grid
 300 × 300 × 144, cutoff 0.01.
 
 | | density correlation | density sum ratio | Icalc R-factor |
