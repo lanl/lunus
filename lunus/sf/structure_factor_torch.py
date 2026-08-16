@@ -173,13 +173,25 @@ def structure_factors_batch(
 ):
     """N configurations at once: (N, n_atoms, 3) -> (N, n_refl) complex.
 
-    Every configuration shares one atom set -- same elements, occupancies,
-    kernels and offsets -- and differs only in coordinates, which is the
-    ensemble case this exists for (N members of a guided step, N frames of a
-    trajectory). The shared setup is therefore done once rather than N times.
+    Every configuration shares one atom set -- same elements, kernels and
+    offsets -- and differs in coordinates and, optionally, OCCUPANCIES, which
+    is the ensemble case this exists for (N members of a guided step, N frames
+    of a trajectory). The shared setup is done once rather than N times.
 
-    Gradients flow to ALL N coordinate sets, so a single backward() on a loss
-    built from the ensemble observables reaches every member.
+    occ is either (n_atoms,), shared across the ensemble, or (N, n_atoms), one
+    row per configuration. What the second expresses is varying hydration: the
+    array layout is fixed by construction, so a water associated in one member
+    and dissolved in another is one slot at two occupancies rather than an atom
+    entering and leaving the array.
+
+    Gradients flow to ALL N coordinate sets AND to occ, so a single backward()
+    on a loss built from the ensemble observables reaches every member. Note
+    what the occupancy gradient does and does not include: the solvent mask is
+    built from a detached density by default (SolventModel.detach_mask), so
+    d(F_total)/d(occ) carries the protein term but not the bulk term that
+    replaces it as an occupancy falls. Forward, the two stay continuous;
+    in the gradient they do not, unless detach_mask=False. See
+    docs/solvent-design.md, "What the occupancy gradient leaves out".
 
     use_checkpoint (default False) recomputes each configuration's splat
     during backward instead of retaining its intermediates. This is usually
@@ -231,7 +243,7 @@ def structure_factors_batch(
             "frac_coords_batch must be (n_configs, n_atoms, 3), got %s"
             % (tuple(frac_coords_batch.shape),)
         )
-    n_atoms = frac_coords_batch.shape[1]
+    n_configs, n_atoms = frac_coords_batch.shape[0], frac_coords_batch.shape[1]
     if element_idx.shape[0] != n_atoms:
         raise ValueError(
             "element_idx has %d entries but each configuration has %d atoms; "
@@ -239,9 +251,32 @@ def structure_factors_batch(
             % (element_idx.shape[0], n_atoms)
         )
 
-    def one(frac_coords):
+    # occ is (n_atoms,) -- one occupancy per slot, shared -- or (N, n_atoms),
+    # one per slot per configuration. The second is how VARYING HYDRATION is
+    # expressed: the array layout is fixed, so a water that is associated in
+    # one member and dissolved in another is the same slot at two occupancies
+    # rather than an atom entering and leaving. See docs/solvent-design.md,
+    # "The array must correspond; the hydration may vary".
+    if occ.dim() == 1:
+        if occ.shape[0] != n_atoms:
+            raise ValueError(
+                "occ has %d entries but each configuration has %d atoms"
+                % (occ.shape[0], n_atoms))
+        occ_rows = [occ] * n_configs
+    elif occ.dim() == 2:
+        if tuple(occ.shape) != (n_configs, n_atoms):
+            raise ValueError(
+                "per-configuration occ must be (n_configs, n_atoms) = %s, "
+                "got %s" % ((n_configs, n_atoms), tuple(occ.shape)))
+        occ_rows = list(occ)
+    else:
+        raise ValueError(
+            "occ must be (n_atoms,) or (n_configs, n_atoms), got %s"
+            % (tuple(occ.shape),))
+
+    def one(frac_coords, occ_row):
         return structure_factors_one_config(
-            frac_coords, element_idx, occ,
+            frac_coords, element_idx, occ_row,
             atom_A, atom_lam, elem_offsets, atom_radius_ang,
             grid_shape, orth_matrix, cell_volume,
             hkl, taper_width, blur=blur,
@@ -251,15 +286,22 @@ def structure_factors_batch(
         )
 
     if not use_checkpoint:
-        return torch.stack([one(fc) for fc in frac_coords_batch], dim=0)
+        return torch.stack(
+            [one(fc, oc) for fc, oc in zip(frac_coords_batch, occ_rows)], dim=0)
 
     from torch.utils.checkpoint import checkpoint
 
+    # occ goes through checkpoint as an ARGUMENT rather than a closure. A
+    # non-reentrant checkpoint does handle closed-over tensors, so this is not
+    # a correctness fix today -- it is that a differentiable input hidden in a
+    # closure is exactly the thing that breaks when someone later switches
+    # use_reentrant, and the coordinates are already passed this way.
+    #
     # preserve_rng_state=False: the splat draws no random numbers, so there is
     # no RNG state worth saving and restoring per configuration.
     return torch.stack(
-        [checkpoint(one, fc, use_reentrant=False, preserve_rng_state=False)
-         for fc in frac_coords_batch],
+        [checkpoint(one, fc, oc, use_reentrant=False, preserve_rng_state=False)
+         for fc, oc in zip(frac_coords_batch, occ_rows)],
         dim=0,
     )
 

@@ -10,9 +10,11 @@ points in `structure_factor_torch.py`, `tests/test_solvent.py`, gemmi parity in
 shell-resolved R against experimental amplitudes are done —
 `tools/fit_solvent_rfactor.py`, findings under "What the R-factor found". The
 recommendation they produced, `mask_blur`, is now implemented and on by
-default. Still to do: per-configuration occupancies (see the API gap
-below), a numerical test of `u_aniso` inside the test suite rather than only in
-the validation tool. The diffuse convergence study has been re-run against the
+default, and per-configuration occupancies are implemented and differentiable
+(see "Per-configuration occupancies" below, including what their gradient
+leaves out). Still to do: a numerical test of `u_aniso` inside the test suite
+rather than only in the validation tool, and splitting `detach_mask` so the
+mask can see occupancy without seeing B. The diffuse convergence study has been re-run against the
 smoothed mask and its recommendation changed ("What the diffuse study found"),
 and `mask_blur`'s cost is now measured on CUDA ("At production scale") — it is
 cheap in time and costs ~1.5x peak device memory.
@@ -309,13 +311,66 @@ above:
   atoms and no mask, or protein only and a mask. Do not try to freeze a
   hydration shell out of a diffusing solvent.
 
-### API gap: occupancy is currently shared across configurations
+### Per-configuration occupancies, and what their gradient leaves out
 
-`structure_factors_batch` takes one `occ` tensor for the whole ensemble, so
-per-configuration occupancies — the natural way to express varying hydration
-above — cannot be passed today. Accepting `occ` of shape `(N, n_atoms)` as well
-as `(n_atoms,)` is a small change to the per-member call and is on the path for
-this feature, not an optional extra.
+**Implemented.** `structure_factors_batch` takes `occ` as `(n_atoms,)` — shared,
+exactly as before — or `(N, n_atoms)`, one row per configuration. That is how
+varying hydration is expressed: the array layout is fixed, so a water
+associated in one member and dissolved in another is one slot at two
+occupancies rather than an atom entering and leaving.
+
+Occupancies were **already differentiable** and nobody had noticed, because the
+batch entry point could not express per-member values. `_density_core` ends in
+`dens * occ_e[:, None]` and the per-element gather is plain indexing, so the
+gradient existed the whole time; only the shape stood in the way. Verified
+against a finite difference to 7e-11, identical with and without
+checkpointing, and with no leakage between members.
+
+**But the occupancy gradient is incomplete by default, and not slightly.**
+
+The forward model is continuous across a water dissolving — its density falls,
+the threshold hands that region back to the bulk, and `F_mask` grows to replace
+what `F_protein` lost. That continuity is one of the reasons a density
+threshold was chosen over a geometric mask. The *gradient* is not continuous in
+the same way, because `detach_mask=True` builds the mask from a detached
+density: `d(F_total)/d(occ)` carries the protein term and not the bulk term
+that cancels part of it.
+
+Measured, 300 atoms, mask calibrated to 0.5 occupancy with a live taper shell:
+
+| | Σ\|d\|F\|²/d occ\| |
+|---|---|
+| `detach_mask=True` (default), `mask_blur=0` | 3.80e5 |
+| `detach_mask=False` | **2.18e5** |
+| `detach_mask=True`, `mask_blur=100` | 7.78e5 |
+| `detach_mask=False` | **6.81e5** |
+
+The live gradient is ~40% smaller, which is the right direction — the bulk
+filling in cancels part of what the protein loses. With the blur on, the
+per-atom differences *exceed* the gradient itself, so some components change
+**sign**. Refining occupancies against the detached gradient is not a slightly
+noisy version of the right thing.
+
+**The default is not obviously wrong, and it is not obviously right either.**
+`detach_mask` was argued in Constraint 3, and that argument is entirely about
+B-factors: raising B should not grow the solvent region, because the envelope
+is a property of the molecular boundary and not of thermal motion. **That
+reasoning does not transfer to occupancy.** Lowering an occupancy genuinely
+removes matter and bulk solvent genuinely fills the space — that is physics the
+model is supposed to have, not a shortcut for an optimizer to exploit.
+
+The flag cannot distinguish them: it is one switch over the whole mask, so it
+governs coordinates, occupancies and (one day) B together. Refining occupancies
+therefore wants `detach_mask=False`, which simultaneously re-enables the
+coordinate path through the mask, and there is no way to ask for one and not
+the other today. Splitting it — per-quantity control, or a mask built from a
+density in which B is detached and occupancy is not — is the real fix and has
+not been done.
+
+**Until then: pass `detach_mask=False` when occupancies are being refined**, and
+read Constraint 3 before doing it if B is differentiable by that point.
+`tests/test_solvent.py` pins the size of the effect so it cannot change
+silently.
 
 ## Constraint 3: what a threshold mask does to ∂/∂B
 

@@ -826,3 +826,68 @@ def test_mask_blur_undershoot_is_bounded_and_vanishes_with_the_grid():
     hard = torch.fft.ifftn(
         torch.fft.fftn(rho) * (s2 <= (1 / 3.0) ** 2).to(rho.dtype)).real
     assert float(hard.min()) / float(hard.max()) < -0.05
+
+
+def test_detach_mask_hides_most_of_the_occupancy_gradient():
+    """What detach_mask costs once occupancies are refinable, measured.
+
+    The forward model is continuous across a water dissolving: its density
+    falls, the threshold hands that region back to the bulk, and F_mask grows
+    to replace what F_protein lost. The GRADIENT is not, with detach_mask=True
+    -- it carries the protein term and not the bulk term that cancels part of
+    it, so it overstates how much |F| moves per unit occupancy.
+
+    Measured here, and the size is the reason this is a test and not a remark:
+    the live gradient is ~40% smaller than the detached one, and with the blur
+    on, the per-atom differences exceed the gradient itself, meaning some
+    components change SIGN. An optimizer refining occupancies against the
+    detached gradient is not doing a slightly noisy version of the right
+    thing.
+
+    THE MASK MUST HAVE A LIVE TAPER SHELL for any of this to be visible. An
+    earlier version of this check used a cutoff at 30% of peak on a sparse
+    fixture, which saturates the mask: d(mask)/d(rho) is then zero almost
+    everywhere, detached and live agreed to every digit, and the check silently
+    measured nothing. Hence the calibrated occupancy and the shell assertion.
+    """
+    rng = np.random.default_rng(0)
+    n_atoms, n_configs, grid = 300, 3, (32, 32, 32)
+    M_np = orth_matrix(*CELL)
+    orth = torch.tensor(M_np, dtype=DTYPE)
+    A, lam, offsets, radius, taper_w, _ = build_element_kernels_torch(
+        ["C"], IT92_COEFFS, 20.0, 0.0, grid, M_np, cutoff=0.01,
+        device="cpu", dtype=DTYPE)
+    idx = torch.zeros(n_atoms, dtype=torch.long)
+    frac = torch.tensor(rng.random((n_configs, n_atoms, 3)), dtype=DTYPE)
+    occ0 = torch.tensor(rng.uniform(0.2, 1.0, (n_configs, n_atoms)),
+                        dtype=DTYPE)
+    hkl = torch.tensor([[1, 0, 0], [0, 1, 0], [0, 0, 1], [2, 1, 0]],
+                       dtype=torch.long)
+    kw = dict(atom_A=A[idx], atom_lam=lam[idx], elem_offsets=offsets,
+              atom_radius_ang=radius[idx], grid_shape=grid, orth_matrix=orth,
+              cell_volume=float(np.linalg.det(M_np)), hkl=hkl,
+              taper_width=taper_w, compile_core=False)
+
+    rho = splat_density(frac[0], idx, occ0[0], A[idx], lam[idx], offsets,
+                        radius[idx], grid, orth, taper_w, compile_core=False)
+    reference = SolventModel(cutoff=1.0, taper_width=0.5, mask_blur=0.0,
+                             check_occupancy=False)
+    reference.calibrate(rho, orth, 0.5)
+    assert shell_voxels(reference.build_mask(rho, orth)) > 1000
+
+    grads = {}
+    for detach in (True, False):
+        o = occ0.clone().requires_grad_(True)
+        model = SolventModel(cutoff=reference.cutoff,
+                             taper_width=reference.taper_width, mask_blur=0.0,
+                             detach_mask=detach, check_occupancy=False)
+        structure_factors_batch(frac, idx, o, solvent=model,
+                                **kw).abs().pow(2).sum().backward()
+        grads[detach] = o.grad.clone()
+
+    detached = float(grads[True].abs().sum())
+    live = float(grads[False].abs().sum())
+    assert live < 0.75 * detached
+    # And the difference is not a rounding detail: it is the same order as the
+    # quantity itself.
+    assert float((grads[False] - grads[True]).abs().sum()) > 0.25 * detached

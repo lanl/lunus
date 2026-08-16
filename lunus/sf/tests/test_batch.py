@@ -190,3 +190,128 @@ def test_rejects_unbatched_input(system):
     s = system
     with pytest.raises(ValueError, match=r"must be \(n_configs, n_atoms, 3\)"):
         _batch(s, s["coords"][0].clone(), False)
+
+
+# --------------------------------------------------------------------------
+# per-configuration occupancies
+
+def _occ_system(n_atoms=40, n_configs=3, grid=(24, 24, 24), seed=0):
+    """Shared setup for the occupancy tests: kernels, coordinates, hkl."""
+    import numpy as np
+    from lunus.sf.cell_utils import orth_matrix
+    from lunus.sf.elements import IT92_COEFFS
+    from lunus.sf.kernel_torch import build_element_kernels_torch
+
+    cell = (20.0, 22.0, 24.0, 90.0, 90.0, 90.0)
+    dtype = torch.float64
+    M_np = orth_matrix(*cell)
+    rng = np.random.default_rng(seed)
+    A, lam, offsets, radius, taper_w, _ = build_element_kernels_torch(
+        ["C"], IT92_COEFFS, 20.0, 0.0, grid, M_np, cutoff=0.01,
+        device="cpu", dtype=dtype)
+    idx = torch.zeros(n_atoms, dtype=torch.long)
+    return dict(
+        frac=torch.tensor(rng.random((n_configs, n_atoms, 3)), dtype=dtype),
+        element_idx=idx,
+        occ2=torch.tensor(rng.uniform(0.2, 1.0, (n_configs, n_atoms)),
+                          dtype=dtype),
+        kw=dict(atom_A=A[idx], atom_lam=lam[idx], elem_offsets=offsets,
+                atom_radius_ang=radius[idx], grid_shape=grid,
+                orth_matrix=torch.tensor(M_np, dtype=dtype),
+                cell_volume=float(np.linalg.det(M_np)),
+                hkl=torch.tensor([[1, 0, 0], [0, 1, 0], [0, 0, 1],
+                                  [2, 1, 0], [3, 2, 1], [1, 1, 1]],
+                                 dtype=torch.long),
+                taper_width=taper_w, compile_core=False))
+
+
+def test_per_configuration_occupancy_matches_calling_one_config():
+    """(N, n_atoms) occ must be exactly the per-member call, not an average or
+    a broadcast of row 0 -- both of which would still produce plausible
+    numbers."""
+    from lunus.sf.structure_factor_torch import (
+        structure_factors_batch, structure_factors_one_config)
+
+    s = _occ_system()
+    got = structure_factors_batch(s["frac"], s["element_idx"], s["occ2"],
+                                  **s["kw"])
+    expected = torch.stack([
+        structure_factors_one_config(s["frac"][i], s["element_idx"],
+                                     s["occ2"][i], **s["kw"])
+        for i in range(s["frac"].shape[0])])
+    assert torch.equal(got, expected)
+
+
+def test_shared_occupancy_is_unchanged_by_the_per_configuration_path():
+    """(n_atoms,) must keep meaning what it meant before (N, n_atoms) existed."""
+    from lunus.sf.structure_factor_torch import (
+        structure_factors_batch, structure_factors_one_config)
+
+    s = _occ_system()
+    occ = torch.full((s["occ2"].shape[1],), 0.7, dtype=torch.float64)
+    got = structure_factors_batch(s["frac"], s["element_idx"], occ, **s["kw"])
+    expected = torch.stack([
+        structure_factors_one_config(s["frac"][i], s["element_idx"], occ,
+                                     **s["kw"])
+        for i in range(s["frac"].shape[0])])
+    assert torch.equal(got, expected)
+
+
+def test_occupancy_gradient_matches_a_finite_difference():
+    from lunus.sf.structure_factor_torch import (
+        mean_and_diffuse, structure_factors_batch)
+
+    s = _occ_system()
+
+    def loss(o):
+        F = structure_factors_batch(s["frac"], s["element_idx"], o, **s["kw"])
+        return mean_and_diffuse(F)[1].sum()
+
+    o = s["occ2"].clone().requires_grad_(True)
+    loss(o).backward()
+
+    eps, i, j = 1e-6, 2, 7
+    up, down = s["occ2"].clone(), s["occ2"].clone()
+    up[i, j] += eps
+    down[i, j] -= eps
+    fd = float((loss(up) - loss(down)) / (2 * eps))
+    assert float(o.grad[i, j]) == pytest.approx(fd, rel=1e-6)
+
+
+def test_occupancy_gradients_do_not_leak_between_configurations():
+    """Member i's occupancies must not move member j's structure factors."""
+    from lunus.sf.structure_factor_torch import structure_factors_batch
+
+    s = _occ_system()
+    o = s["occ2"].clone().requires_grad_(True)
+    F = structure_factors_batch(s["frac"], s["element_idx"], o, **s["kw"])
+    F[0].abs().pow(2).sum().backward()
+
+    assert float(o.grad[0].abs().sum()) > 0.0
+    assert float(o.grad[1:].abs().sum()) == 0.0
+
+
+def test_checkpointing_gives_the_same_occupancy_gradient():
+    from lunus.sf.structure_factor_torch import structure_factors_batch
+
+    s = _occ_system()
+    grads = []
+    for use_checkpoint in (False, True):
+        o = s["occ2"].clone().requires_grad_(True)
+        F = structure_factors_batch(s["frac"], s["element_idx"], o,
+                                    use_checkpoint=use_checkpoint, **s["kw"])
+        F.abs().pow(2).sum().backward()
+        grads.append(o.grad.clone())
+    assert torch.allclose(grads[0], grads[1], rtol=0, atol=1e-12)
+
+
+def test_occupancy_shape_is_checked():
+    from lunus.sf.structure_factor_torch import structure_factors_batch
+
+    s = _occ_system()
+    n_configs, n_atoms = s["occ2"].shape
+    for bad in (torch.ones(n_atoms + 1, dtype=torch.float64),
+                torch.ones((n_configs + 1, n_atoms), dtype=torch.float64),
+                torch.ones((n_configs, n_atoms, 1), dtype=torch.float64)):
+        with pytest.raises(ValueError, match="occ"):
+            structure_factors_batch(s["frac"], s["element_idx"], bad, **s["kw"])
