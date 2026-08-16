@@ -205,10 +205,5 @@ repo so those numbers stay reproducible. Both `iotbx.pdb` and `mdtraj` read
   memory**, and memory is the binding constraint for ensembles. It needs
   `compute_fcalc` to hand back its grid, which complicates the checkpointing
   contract, so it is described in docs/solvent-design.md and not done.
-- **Re-check `recommended_blur`'s `57 h²` target on a second structure and
-  spacing.** It is calibrated against exact direct summation on one structure
-  at one grid. The functional form is a sampling argument and should transfer;
-  the constant is a fit to one curve, and single-fixture calibration has been
-  wrong four times in this model already.
 - **A grid-refinement convergence check** in `test_per_atom_b.py`; see
   docs/design.md.

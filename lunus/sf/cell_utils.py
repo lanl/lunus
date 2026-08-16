@@ -56,7 +56,8 @@ def grid_shape_for_resolution(a, b, c, d_min, rate=1.5):
     return Nu, Nv, Nw
 
 
-def recommended_blur(b_min, grid_shape, orth_matrix_np, safety=1.0):
+def recommended_blur(b_min, grid_shape, orth_matrix_np, safety=1.0,
+                     d_min=None):
     """
     How much extra B to splat with so the grid samples the atoms adequately.
 
@@ -81,17 +82,44 @@ def recommended_blur(b_min, grid_shape, orth_matrix_np, safety=1.0):
     costing 5x. So this returns a blur that reaches a target and no more.
 
     The target is set by sampling: the real-space Gaussian has
-    sigma = sqrt(B / 8 pi^2), and it needs to be resolved by the voxel. The
-    measured floor above is reached by B_eff ~ 20-25 at 0.633 A spacing, i.e.
-    sigma ~ 0.85 voxels, which gives
+    sigma = sqrt(B / 8 pi^2), and it needs to be resolved by the voxel, giving
+    B_target = C h^2 with h the LARGEST voxel dimension, since the coarsest
+    direction is what limits. safety scales it for anyone wanting more margin.
 
-        B_target = 8 pi^2 (0.85 h)^2 ~ 57 h^2
+    VALIDATED, and with a stated range. C was originally fitted to one curve on
+    one structure at one spacing. It has since been measured against exact
+    direct summation on TWO unrelated crystals -- 7FPV (P2_1 2_1 2_1) and 4WOR
+    (P4_1) -- across four grid spacings at fixed d_min, so that sampling is
+    isolated from resolution, and three B values. Fitting B_eff = C h^2 through
+    the origin over the rows where blur was actually needed:
 
-    with h the LARGEST voxel dimension, since the coarsest direction is what
-    limits. safety scales the target for anyone who wants more margin.
+        7FPV alone   C = 66.3
+        4WOR alone   C = 64.7
 
-    Returns 0.0 when the model's own B already clears the target -- which is
-    the B = 30 row, where any blur is a net loss.
+    Two unrelated structures agreeing to ~1% is the transferability question
+    answered: the h^2 FORM is sound and is not a property of one crystal.
+
+    The constant that matters is the one covering the worst row, not the fit,
+    and it depends on how finely the grid samples the resolution:
+
+        rate >= 1.5  (h <= d_min/3, what grid_shape_for_resolution gives)
+                     C = 55 covers every row -> 57 is adequate, 4% margin
+        rate <  1.5  C = 78 needed -> 57 under-blurs by up to 38%
+
+    So 57 is right for the regime this pipeline actually runs in and wrong
+    below it. Raising it to 78 is NOT the fix: it would over-blur by 1.4x
+    everywhere normal, and over-blurring is what costs 5x at high B. Below
+    rate 1.5 the achievable floor degrades anyway (R 0.00025-0.00029 against
+    0.00022-0.00024), so no blur recovers it -- the grid is too coarse and
+    that is the thing to fix. Pass d_min to be warned when you are there.
+
+    One judgement call is baked in: "adequate" means R within 30% of the floor
+    that structure reaches at any blur. A stricter tolerance would ask for a
+    larger C.
+
+    Returns 0.0 when the model's own B already clears the target, which is the
+    common case for deposited structures and is why turning this on moved no
+    previously published number.
     """
     import numpy as np
 
@@ -100,5 +128,13 @@ def recommended_blur(b_min, grid_shape, orth_matrix_np, safety=1.0):
     spacing = (np.linalg.norm(np.asarray(orth_matrix_np), axis=0)
                / np.asarray(grid_shape, dtype=float))
     h = float(spacing.max())
+    if d_min is not None and h > d_min / 3.0:
+        import warnings
+        warnings.warn(
+            "grid spacing %.3f A is coarser than d_min/3 (%.3f A), i.e. rate "
+            "< 1.5. The blur target is calibrated for rate >= 1.5 and "
+            "under-blurs by up to 38%% below it -- and the accuracy floor is "
+            "worse there whatever the blur, so more blur will not rescue it. "
+            "Use a finer grid." % (h, d_min / 3.0), RuntimeWarning, stacklevel=2)
     b_target = safety * 57.0 * h * h
     return max(0.0, b_target - float(b_min))

@@ -1341,7 +1341,7 @@ if __name__=="__main__":
       # clears the bar, so well-sampled configurations are untouched.
       torch_blur_value = (
         recommended_blur(float(torch_b_per_atom_setup.min()), torch_grid_shape,
-                         torch_M_np)
+                         torch_M_np, d_min=d_min)
         if torch_blur == "auto" else float(torch_blur))
       torch_atom_A, torch_atom_lam, torch_elem_offsets, torch_atom_radius_ang, torch_taper_width, torch_element_to_idx = build_atom_kernels_torch(
         torch_elements_per_atom_setup, torch_elements_present, IT92_COEFFS, torch_b_per_atom_setup, blur=torch_blur_value,
@@ -1357,7 +1357,8 @@ if __name__=="__main__":
               ", blur =", torch_blur_value)
     else:
       torch_blur_value = (
-        recommended_blur(float(torch_b_iso), torch_grid_shape, torch_M_np)
+        recommended_blur(float(torch_b_iso), torch_grid_shape, torch_M_np,
+                         d_min=d_min)
         if torch_blur == "auto" else float(torch_blur))
       torch_elem_A, torch_elem_lam, torch_elem_offsets, torch_elem_radius_ang, torch_taper_width, torch_element_to_idx = build_element_kernels_torch(
         torch_elements_present, IT92_COEFFS, torch_b_iso, blur=torch_blur_value,

@@ -956,3 +956,12 @@ def test_recommended_blur_engages_only_where_sampling_is_marginal():
     assert recommended_blur(0.5, (36, 48, 100), M) > \
         recommended_blur(0.5, (54, 72, 150), M) > 0.0
     assert recommended_blur(500.0, (36, 48, 100), M) == 0.0
+
+    # Validated for rate >= 1.5 and NOT below it, so it says so. 36x48x100 on
+    # this cell is 0.99 A voxels, which is rate 1.01 at d_min 2.0.
+    with pytest.warns(RuntimeWarning, match="coarser than d_min/3"):
+        recommended_blur(0.5, (36, 48, 100), M, d_min=2.0)
+    import warnings as _w
+    with _w.catch_warnings():
+        _w.simplefilter("error")
+        recommended_blur(2.0, (100, 144, 288), M, d_min=2.0)   # rate 2.9, fine
