@@ -543,6 +543,13 @@ if __name__=="__main__":
 # Use topology file B factoris in structure calculations
 
   try:
+    idx = [a.find("torch_blur")==0 for a in args].index(True)
+  except ValueError:
+    torch_blur = "auto"
+  else:
+    torch_blur = args.pop(idx).split("=")[1]
+
+  try:
     idx = [a.find("use_top_bfacs")==0 for a in args].index(True)
   except ValueError:
     use_top_bfacs = False
@@ -1125,7 +1132,7 @@ if __name__=="__main__":
         _record_phase(name, time.time() - t0)
 
     from lunus.sf.elements import it92_coefficients
-    from lunus.sf.cell_utils import orth_matrix, grid_shape_for_resolution
+    from lunus.sf.cell_utils import orth_matrix, grid_shape_for_resolution, recommended_blur
     from lunus.sf.kernel_torch import build_element_kernels_torch, build_atom_kernels_torch
     from lunus.sf.structure_factor_torch import structure_factors_one_config, compute_fcalc
     from lunus.sf.density_torch import splat_density
@@ -1319,8 +1326,25 @@ if __name__=="__main__":
       torch_b_per_atom_setup = torch_u_isos_setup * (8.0 * np.pi ** 2)  # U -> B, same as the gemmi branch
       torch_elements_per_atom_setup = [s.scattering_type for s in xrs_sel.scatterers()]
 
+      # THE FFT-ARTIFACT BLUR. Splatting a sharp atom onto a finite grid
+      # samples it badly; splatting a spread one and removing the spread in
+      # reciprocal space does not. Measured against exact direct summation at
+      # 0.633 A spacing, B_iso = 2 with no blur gives R = 0.186 -- 37x this
+      # pipeline's entire disagreement with gemmi -- and blur = 20 gives
+      # 0.0004. Per-atom B from a topology file routinely goes that low, which
+      # is exactly the case this branch handles.
+      #
+      # "auto" asks for the smallest blur that reaches adequate sampling and
+      # no more, because the un-blur multiplies by exp(+blur*s^2/4) and
+      # amplifies whatever error is present: at B_iso = 30 an 80 A^2 blur is 5x
+      # WORSE than none. It returns 0 whenever the model's own B already
+      # clears the bar, so well-sampled configurations are untouched.
+      torch_blur_value = (
+        recommended_blur(float(torch_b_per_atom_setup.min()), torch_grid_shape,
+                         torch_M_np)
+        if torch_blur == "auto" else float(torch_blur))
       torch_atom_A, torch_atom_lam, torch_elem_offsets, torch_atom_radius_ang, torch_taper_width, torch_element_to_idx = build_atom_kernels_torch(
-        torch_elements_per_atom_setup, torch_elements_present, IT92_COEFFS, torch_b_per_atom_setup, blur=0.0,
+        torch_elements_per_atom_setup, torch_elements_present, IT92_COEFFS, torch_b_per_atom_setup, blur=torch_blur_value,
         grid_shape=torch_grid_shape, orth_matrix_np=torch_M_np,
         cutoff=gemmi_cutoff, taper_width=torch_taper_width_override,
         device=torch_device, dtype=torch_dtype,
@@ -1329,10 +1353,14 @@ if __name__=="__main__":
         print("torch engine: use_top_bfacs=True, per-atom B range =",
               torch_b_per_atom_setup.min(), "-", torch_b_per_atom_setup.max(),
               ", n_atoms (as splatted, before density symmetry expansion) =",
-              len(torch_elements_per_atom_setup))
+              len(torch_elements_per_atom_setup),
+              ", blur =", torch_blur_value)
     else:
+      torch_blur_value = (
+        recommended_blur(float(torch_b_iso), torch_grid_shape, torch_M_np)
+        if torch_blur == "auto" else float(torch_blur))
       torch_elem_A, torch_elem_lam, torch_elem_offsets, torch_elem_radius_ang, torch_taper_width, torch_element_to_idx = build_element_kernels_torch(
-        torch_elements_present, IT92_COEFFS, torch_b_iso, blur=0.0,
+        torch_elements_present, IT92_COEFFS, torch_b_iso, blur=torch_blur_value,
         grid_shape=torch_grid_shape, orth_matrix_np=torch_M_np,
         cutoff=gemmi_cutoff, taper_width=torch_taper_width_override,
         device=torch_device, dtype=torch_dtype,
@@ -2024,7 +2052,8 @@ EOF
                 print("DIAGNOSTIC saved density_torch.npy")
             with torch_phase("fft+extract", torch_device):
               F_t = compute_fcalc(
-                torch_density, torch_cell_volume, torch_hkl, torch_orth_matrix, blur=0.0,
+                torch_density, torch_cell_volume, torch_hkl, torch_orth_matrix,
+                blur=torch_blur_value,
               )
 
           with torch_phase("device->host", torch_device):

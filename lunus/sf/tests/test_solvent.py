@@ -37,8 +37,8 @@ from lunus.sf.kernel_torch import build_element_kernels_torch
 from lunus.sf.elements import IT92_COEFFS
 from lunus.sf.cell_utils import orth_matrix
 from lunus.sf.solvent_torch import (
-    SolventMaskWarning, SolventModel, f_solvent, f_total, mask_occupancy,
-    shell_voxels, solvent_mask,
+    SolventMaskWarning, SolventModel, blur_density, f_solvent, f_total,
+    mask_occupancy, shell_voxels, solvent_mask,
 )
 from lunus.sf.structure_factor_torch import (
     compute_fcalc, mean_and_diffuse, reciprocal_inv_d2,
@@ -891,3 +891,68 @@ def test_detach_mask_hides_most_of_the_occupancy_gradient():
     # And the difference is not a rounding detail: it is the same order as the
     # quantity itself.
     assert float((grads[False] - grads[True]).abs().sum()) > 0.25 * detached
+
+
+def test_mask_blur_is_a_total_and_absorbs_the_pipeline_blur():
+    """The FFT-artifact blur and mask_blur are the SAME operation, so they must
+    not both apply.
+
+    Adding B to an atomic form factor convolves that atom with a Gaussian;
+    density is a linear sum of atoms and convolution is linear; so splatting
+    with blur=B is exactly convolving the grid by B. A pipeline running
+    blur=40 with the default mask_blur=100 would therefore hand the mask 140
+    A^2 of smoothing -- 1.4x the probe radius calibrated against two crystals,
+    silently, and varying with a knob that is supposed to cancel out of the
+    answer entirely.
+
+    mask_blur is a TOTAL: only the remainder is applied, so the mask a given
+    structure gets is invariant to the blur trick.
+    """
+    sys = _system(n_atoms=40, seed=2)
+    rho_unblurred = _density(sys)
+    model = SolventModel(cutoff=0.05, taper_width=0.025, mask_blur=100.0,
+                         check_occupancy=False)
+
+    full = model.mask_source(rho_unblurred, sys["orth"], pipeline_blur=0.0)
+    # A density that already carries 40 A^2, as the blur trick would produce.
+    pre_blurred = blur_density(rho_unblurred, sys["orth"], 40.0)
+    topped_up = model.mask_source(pre_blurred, sys["orth"], pipeline_blur=40.0)
+
+    assert torch.allclose(full, topped_up, rtol=1e-9, atol=1e-9)
+
+    # Without the bookkeeping it would be over-smoothed, which is the bug.
+    naive = model.mask_source(pre_blurred, sys["orth"], pipeline_blur=0.0)
+    assert not torch.allclose(naive, full, rtol=1e-3, atol=1e-6)
+
+
+def test_a_pipeline_blur_beyond_mask_blur_warns_rather_than_sharpening():
+    """Nothing here can undo smoothing that is baked into the density, so the
+    only honest response is to say so."""
+    sys = _system(n_atoms=40, seed=2)
+    rho = _density(sys)
+    model = SolventModel(cutoff=0.05, taper_width=0.025, mask_blur=20.0,
+                         check_occupancy=False)
+    with pytest.warns(SolventMaskWarning, match="already exceeds mask_blur"):
+        model.mask_source(rho, sys["orth"], pipeline_blur=200.0)
+
+
+def test_recommended_blur_engages_only_where_sampling_is_marginal():
+    """The adaptive rule has to be a no-op on well-sampled configurations, or
+    it silently changes every existing result.
+
+    Measured targets: the published compare_gemmi setup (B >= 10, 0.285 A
+    voxels) and 7FPV at d_min 1.04 both get exactly zero, while a low-B
+    topology on a coarse grid gets a real blur. That asymmetry is the whole
+    design -- blur is not free, since the un-blur amplifies error by
+    exp(+blur*s^2/4).
+    """
+    from lunus.sf.cell_utils import recommended_blur
+
+    M = orth_matrix(34.196, 45.558, 99.044, 90.0, 90.0, 90.0)
+    assert recommended_blur(10.0, (120, 160, 360), M) == 0.0
+    assert recommended_blur(9.7, (100, 144, 288), M) == 0.0
+    assert recommended_blur(2.0, (54, 72, 150), M) == pytest.approx(22.9, abs=0.5)
+    # Monotone in both arguments, and never negative.
+    assert recommended_blur(0.5, (36, 48, 100), M) > \
+        recommended_blur(0.5, (54, 72, 150), M) > 0.0
+    assert recommended_blur(500.0, (36, 48, 100), M) == 0.0

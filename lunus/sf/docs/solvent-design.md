@@ -743,6 +743,67 @@ from work already done — one FFT instead of two. It needs `compute_fcalc` to
 hand back its grid, which complicates the checkpointing contract, so it is
 recorded rather than done.
 
+## The FFT-artifact blur is the same operation as `mask_blur`
+
+Atoms can be splatted with an extra B and the spread removed afterwards with
+`exp(+blur·s²/4)` — `compute_fcalc`'s `blur=`, which gemmi does by default.
+In exact arithmetic it cancels; what it buys is that a sharp Gaussian sampled
+on a finite grid is badly represented and a spread one is not.
+
+**It is literally the same operation as `mask_blur`.** Adding B to an atomic
+form factor convolves that atom with a Gaussian, density is a linear sum of
+atoms, and convolution is linear — so splatting with `blur=B` is exactly
+convolving the grid by B. Verified to 1e-4 of peak, the residual being the
+real-space taper truncation.
+
+Two consequences, and they point in opposite directions.
+
+**Do not un-blur `F_mask`.** `f_solvent` passes `blur=0.0` and that is correct:
+the mask is a 0/1 function, not a blurred density, so multiplying it by
+`exp(+blur·s²/4)` would amplify its high-resolution content for no reason. It
+has no B to undo.
+
+**But do subtract the pipeline blur from `mask_blur`,** because the density the
+mask is thresholded from *does* carry it, and the two smoothings add. A run
+with `blur=40` and the default `mask_blur=100` would hand the mask 140 Å² —
+1.4× the probe radius calibrated against two crystals, varying with a knob
+that is supposed to cancel out of the answer entirely. `mask_blur` is therefore
+a **total**: `SolventModel.build_mask(..., pipeline_blur=B)` applies only the
+remainder, `structure_factors_one_config` passes its own `blur` through
+automatically, and the mask a structure gets is invariant to the trick. A
+pipeline blur exceeding `mask_blur` warns, since nothing downstream can sharpen
+a density back.
+
+### How much blur, and why not "always the same amount"
+
+Measured against **exact direct summation** (cctbx, no grid), 7FPV, 0.633 Å
+voxels, `d_min` 2.0, R over all reflections:
+
+| B_iso | blur 0 | 10 | 20 | 40 | 80 |
+|---|---|---|---|---|---|
+| **2** | **0.186** | 0.0045 | 0.0004 | 0.0002 | 0.0006 |
+| 10 | 0.0078 | 0.0005 | 0.0002 | 0.0002 | 0.0007 |
+| 30 | 0.0002 | 0.0002 | 0.0002 | 0.0003 | **0.0012** |
+
+The top-left number is the case that matters: **R = 0.186 at B = 2 with no
+blur**, which is 37× this pipeline's entire disagreement with gemmi, and
+per-atom B from a topology file routinely goes that low. Without the trick,
+`use_top_bfacs=True` on a low-B model is not slightly degraded, it is wrong.
+
+The bottom-right number is why "always blur generously" is also wrong. The
+un-blur multiplies by `exp(+blur·s²/4)` — at `d_min` 2 Å and blur 80 that is a
+factor of 148 — applied to whatever error is present, so at B = 30 an 80 Å²
+blur is **5× worse than none**.
+
+`cell_utils.recommended_blur(b_min, grid_shape, orth_matrix)` returns the
+smallest blur that reaches the floor and no more. The target comes from
+sampling: σ = √(B/8π²) must be resolved by the voxel, the floor above is
+reached at σ ≈ 0.85 voxels, so `B_target ≈ 57 h²` with `h` the largest voxel
+dimension. It returns **0** whenever the model's own B already clears it —
+which is the case for the published compare_gemmi configuration and for 7FPV at
+`d_min` 1.04, so nothing already measured moves. `xtraj.py`'s torch engine
+takes `torch_blur=auto` (default), a number, or 0.
+
 ## What the parity test found
 
 `tests/test_solvent_gemmi.py`, on 200 carbons clustered in a 30 Å cell at 0.625 Å

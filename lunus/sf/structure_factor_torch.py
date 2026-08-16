@@ -130,7 +130,7 @@ def structure_factors_one_config(
     if solvent is not None and supercell is not None:
         # splat_orth, not orth_matrix: the mask is built in the SUPERCELL's
         # frame, so the blur's frequency grid has to be the supercell's too.
-        mask = solvent.build_mask(density, splat_orth)
+        mask = solvent.build_mask(density, splat_orth, pipeline_blur=blur)
 
     if supercell is not None:
         density = fold_supercell(density, n)
@@ -159,7 +159,8 @@ def structure_factors_one_config(
     # checkpointed region in structure_factors_batch -- otherwise the density
     # grid is retained for every configuration at once and the peak memory
     # checkpointing exists to control comes straight back.
-    F_total, _mask = solvent.apply(density, F_protein, cell_volume, hkl, orth_matrix)
+    F_total, _mask = solvent.apply(density, F_protein, cell_volume, hkl,
+                                   orth_matrix, pipeline_blur=blur)
     return F_total
 
 

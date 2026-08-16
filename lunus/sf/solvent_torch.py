@@ -399,7 +399,8 @@ class SolventModel:
     __slots__ = ("cutoff", "taper_width", "k_sol", "b_sol", "k_overall",
                  "u_aniso", "detach_mask", "check_occupancy",
                  "density_scale", "mask_blur", "last_occupancy",
-                 "last_shell_voxels", "_inv_d2_grid", "_inv_d2_key")
+                 "last_shell_voxels", "_inv_d2_grid", "_inv_d2_key",
+                 "_warned_blur")
 
     def __init__(self, cutoff, taper_width, k_sol=K_SOL_DEFAULT,
                  b_sol=B_SOL_DEFAULT, k_overall=1.0, u_aniso=None,
@@ -427,6 +428,7 @@ class SolventModel:
         self.last_shell_voxels = None
         self._inv_d2_grid = None
         self._inv_d2_key = None
+        self._warned_blur = False
 
     def _cached_inv_d2(self, density, orth_matrix):
         """The frequency grid for the blur, built once per (shape, device,
@@ -438,9 +440,25 @@ class SolventModel:
             self._inv_d2_key = key
         return self._inv_d2_grid
 
-    def mask_source(self, density, orth_matrix):
+    def mask_source(self, density, orth_matrix, pipeline_blur=0.0):
         """The grid the mask is thresholded from: detached if detach_mask, and
-        smoothed by mask_blur.
+        smoothed to a TOTAL of mask_blur.
+
+        pipeline_blur is the blur already folded into the density by the
+        caller -- the FFT-artifact trick, where atoms are splatted with an
+        extra B and compute_fcalc removes it again in reciprocal space. THAT
+        IS THE SAME OPERATION AS mask_blur. Adding B to an atomic form factor
+        convolves that atom with a Gaussian, density is a linear sum of atoms,
+        and convolution is linear, so splatting with blur=B is exactly
+        convolving the grid by B -- verified to 1e-4 of peak, the residual
+        being the real-space taper truncation.
+
+        So the two ADD, silently, and a pipeline running blur=50 with the
+        default mask_blur=100 would give the mask 150 A^2 of smoothing: 1.5x
+        the probe radius that was calibrated against two crystals. mask_blur is
+        therefore a TOTAL, and only the remainder is applied here. The mask is
+        then invariant to the blur trick, which is what you want from a
+        numerical device that is supposed to cancel out of the answer.
 
         Public because CALIBRATION MUST SEE THE SAME GRID. Calibrating a cutoff
         on the raw density and then thresholding the blurred one asks for an
@@ -449,26 +467,38 @@ class SolventModel:
         calibrate() below does this correctly; anything hand-rolled must too.
         """
         rho = density.detach() if self.detach_mask else density
-        if self.mask_blur == 0.0:
+        remaining = self.mask_blur - pipeline_blur
+        if remaining <= 0.0:
+            if pipeline_blur > self.mask_blur and not self._warned_blur:
+                self._warned_blur = True
+                warnings.warn(
+                    "the pipeline blur (%.4g A^2) already exceeds mask_blur "
+                    "(%.4g), so the mask is smoother than asked for and "
+                    "nothing here can sharpen it back -- the blur is baked "
+                    "into the density. Either lower the pipeline blur or "
+                    "accept the wider effective probe."
+                    % (pipeline_blur, self.mask_blur),
+                    SolventMaskWarning, stacklevel=3)
             return rho
-        return blur_density(rho, orth_matrix, self.mask_blur,
+        return blur_density(rho, orth_matrix, remaining,
                             self._cached_inv_d2(rho, orth_matrix))
 
-    def build_mask(self, density, orth_matrix):
+    def build_mask(self, density, orth_matrix, pipeline_blur=0.0):
         """density -> the solvent mask, including the one-time occupancy check.
 
         The single place a mask is built. structure_factor_torch's supercell
         path used to inline its own copy of this, which is how a mask_blur
         added in one place would have silently not applied in the other.
         """
-        mask = solvent_mask(self.mask_source(density, orth_matrix),
-                            self.cutoff, self.taper_width)
+        mask = solvent_mask(
+            self.mask_source(density, orth_matrix, pipeline_blur),
+            self.cutoff, self.taper_width)
         if self.check_occupancy and self.last_occupancy is None:
             self._check(mask)
         return mask
 
     def calibrate(self, density, orth_matrix, target_occupancy,
-                  taper_width_frac=0.5):
+                  taper_width_frac=0.5, pipeline_blur=0.0):
         """Set cutoff and taper_width so the mask calls target_occupancy of the
         cell solvent, measured on the grid the mask will actually see.
 
@@ -476,7 +506,7 @@ class SolventModel:
         configuration -- the cutoff is a calibration and not a constant, but it
         is not so unstable that it needs redoing per frame.
         """
-        source = self.mask_source(density, orth_matrix)
+        source = self.mask_source(density, orth_matrix, pipeline_blur)
         self.cutoff = calibrate_cutoff(source, target_occupancy,
                                        taper_width_frac=taper_width_frac)
         self.taper_width = taper_width_frac * self.cutoff
@@ -508,14 +538,14 @@ class SolventModel:
                 SolventMaskWarning, stacklevel=3)
 
     def apply(self, density, F_protein, cell_volume, hkl, orth_matrix,
-              density_scale=1.0):
+              density_scale=1.0, pipeline_blur=0.0):
         """
         density must ALREADY be symmetry-expanded -- see the module docstring.
 
         Returns (F_total, mask), the mask being handed back so callers can
         report mask_occupancy() without recomputing it.
         """
-        mask = self.build_mask(density, orth_matrix)
+        mask = self.build_mask(density, orth_matrix, pipeline_blur)
         F_mask = f_solvent(mask, cell_volume, hkl, orth_matrix)
         inv_d2 = reciprocal_inv_d2(orth_matrix, hkl)
         F = f_total(
