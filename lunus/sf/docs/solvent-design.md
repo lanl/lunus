@@ -12,9 +12,10 @@ shell-resolved R against experimental amplitudes are done —
 recommendation they produced, `mask_blur`, is now implemented and on by
 default. Still to do: per-configuration occupancies (see the API gap
 below), a numerical test of `u_aniso` inside the test suite rather than only in
-the validation tool, and a CUDA measurement of what `mask_blur` costs. The
-diffuse convergence study has been re-run against the smoothed mask and its
-recommendation changed; see "What the diffuse study found".
+the validation tool. The diffuse convergence study has been re-run against the
+smoothed mask and its recommendation changed ("What the diffuse study found"),
+and `mask_blur`'s cost is now measured on CUDA ("At production scale") — it is
+cheap in time and costs ~1.5x peak device memory.
 
 Written 2026-08-15, revised the same day against the current code — the API
 assumptions below were checked, the cost estimate was replaced with a
@@ -675,10 +676,10 @@ on the full grid. Measured on 7FPV, 100 × 144 × 288, float32, CPU:
 | whole `apply()` | 22.5 ms | 61.6 ms |
 | whole configuration | 84.8 ms | 124.2 ms |
 
-So the solvent path costs about 2.7× what it did. On CUDA it should be far
-less alarming — `fft+extract` there is 0.3 ms against 20 ms here — but **that
-has not been measured** and the CUDA figure in "At production scale" below
-predates the blur.
+So the solvent path costs about 2.7× what it did on CPU. On CUDA it is 1.6×
+and ~0.4 ms per configuration, measured — see "At production scale" below,
+where the finding is that the blur's real cost on GPU is peak memory (+113 MB,
+~1.5×) rather than time.
 
 **One optimization is available and not taken.** `compute_fcalc` already
 computes `ifftn(density)` for `F_protein`, and for real input
@@ -858,26 +859,49 @@ factor of three on a 0.62 Å grid where the measured ratio is ~5.
 
 ## At production scale
 
-`tools/bench_solvent.py`, float32, one configuration, CPU (a GPU run is still
-owed — see below).
+`tools/bench_solvent.py`, float32, one configuration.
 
 **Measured on CUDA**, 7FPV in its own cell (P2₁2₁2₁, 120 × 160 × 360, waters
-excluded, cutoff 1% of peak), whole pipeline warmed before timing:
+excluded), whole pipeline warmed before timing:
 
-| phase | ms |
-|---|---|
-| splat (3,165 atoms) | 5.3 |
-| symmetrize | 0.6 |
-| fft+extract (protein) | 0.3 |
-| mask | 0.1 |
-| **solvent (mask FFT + combine)** | **0.9** |
-| total | 7.2 |
+| phase | ms, `mask_blur=0` | ms, `mask_blur=100` |
+|---|---|---|
+| splat (3,165 atoms) | 5.3 | 5.4 |
+| symmetrize | 0.6 | 0.6 |
+| fft+extract (protein) | 0.3 | 0.3 |
+| **solvent (whole `apply`)** | **0.9** | **1.1** |
+| solvent, repeated block (steady state) | 0.7 | 1.1 |
+| total | 7.2 | 8.9 |
 
-**Solvent costs ~1 ms per configuration** — 13.8% of this small structure's
-frame, and it would be ~1.4% of the 135,834-atom trajectory frame (70 ms),
-because the cost is **per-grid, not per-atom**: the mask and its FFT scale with
-voxels while the splat scales with atoms. Peak device memory goes 201 → 229 MB,
-one extra grid's worth.
+**Solvent costs ~1 ms per configuration either way.** The blur adds ~0.4 ms —
+**1.6× on the solvent path, against 2.7× on CPU** — because a GPU FFT on this
+grid is 0.3 ms where the CPU's is 20. On the 135,834-atom trajectory frame
+(≈70 ms) that is ~1.6% of a frame. The cost is **per-grid, not per-atom**: the
+mask, the blur and their FFTs scale with voxels while the splat scales with
+atoms.
+
+**On GPU the blur's real cost is memory, not time.** Peak device memory goes
+229 MB without it to **342 MB** with — about +113 MB, which is the cached
+frequency grid (27 MB), the `complex64` forward transform (55 MB) and its
+inverse. That is a ~1.5× increase in the quantity `docs/performance.md` names
+as the binding constraint for ensembles, so it is the number to check before
+raising N, not the milliseconds. The cached grid is per `SolventModel` and
+therefore shared across configurations, so it amortizes; the transform
+intermediates do not.
+
+Two measurement traps found in taking these, both worth keeping:
+
+- **Warm the model, not just the pipeline.** `mask_blur` caches a grid-sized
+  frequency array on first use *per `SolventModel` instance*. Timing a freshly
+  constructed one charges that construction to the mask, which on CUDA read as
+  a 1.5 ms mask build inside a 1.1 ms `apply()` — impossible, and how it was
+  caught. `bench_solvent.py` now warms the instance too.
+- **A fixed fraction of peak is not comparable across `mask_blur` values.**
+  Blurring moves the peak and reshapes the distribution, so `--cutoff-frac
+  0.01` gave occupancy 0.5516 unblurred and 0.2772 blurred — different masks,
+  and `|F_total|/|F_protein|` of 0.9275 against 0.9758 comparing nothing. At a
+  matched occupancy of 0.5516 the blurred mask gives 0.9394. Use
+  `--occupancy`, which the tool now takes and warns about.
 
 Two earlier figures for this were wrong and are worth recording as traps. A
 "3.9% on compare_gemmi" number came from forcing a mask onto an all-atom MD
@@ -968,6 +992,12 @@ independently:
 
 — textbook solvent contents, and a 7–8% low-resolution contrast cancellation,
 which is what this model exists to represent.
+
+Both rows predate `mask_blur` and were taken at `mask_blur=0`, cutoff 1% of
+peak. At the same occupancy with the blur on, 7FPV gives 0.9394 rather than
+0.9275; the shell voxel counts roughly double, which is the blur delivering the
+2–3 voxel shell without widening the taper. The conclusion — a real
+crystallographic model exercises this and an MD box does not — is unaffected.
 
 This also sharpens the scope statement at the top. Bulk solvent belongs with
 crystallographic models and ensembles built from them; an all-atom MD box in

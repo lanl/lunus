@@ -125,6 +125,12 @@ def main():
                    help="cctbx atom selection; 'peptide' excludes water")
     p.add_argument("--cutoff-frac", type=float, default=0.01,
                    help="mask cutoff as a fraction of peak density")
+    p.add_argument("--occupancy", type=float, default=None, metavar="F",
+                   help="calibrate the cutoff to this solvent fraction "
+                        "instead of --cutoff-frac. USE THIS to compare across "
+                        "--mask-blur values: a fixed fraction of peak carves "
+                        "out a different fraction of the cell once the density "
+                        "is blurred, so the masks would not correspond")
     p.add_argument("--mask-blur", type=float, default=None,
                    help="B in A^2 smoothing the density before thresholding "
                         "(default: SolventModel's own default)")
@@ -216,6 +222,16 @@ def main():
         cutoff = args.cutoff_frac * float(density.max())
         model = SolventModel(cutoff=cutoff, taper_width=0.5 * cutoff,
                              check_occupancy=False, mask_blur=args.mask_blur)
+        if args.occupancy is not None:
+            cutoff = model.calibrate(density, orth, args.occupancy)
+        # WARM THE MODEL, not just the pipeline. mask_blur caches a full
+        # grid-sized frequency array on first use, per SolventModel instance,
+        # and _one_pass() above builds its own throwaway model -- so timing a
+        # fresh one here charges that construction to the mask. Left
+        # uncorrected on CUDA it read as a 1.5 ms mask build inside a 1.1 ms
+        # apply(), which is impossible and is what exposed it.
+        model.build_mask(density, orth)
+        sync(dev)
         # Through the model, not solvent_mask directly, so the row includes
         # mask_blur's FFT pair -- which is most of what building a mask costs.
         mask = t("  of which: build mask", lambda: model.build_mask(density, orth))
@@ -225,9 +241,17 @@ def main():
         mem_total = peak_memory(dev)
 
     occupancy = float(mask_occupancy(mask))
+    if args.occupancy is None and args.mask_blur:
+        print("\n  NOTE: cutoff is %.3g of peak, not a calibrated occupancy, so"
+              "\n  the occupancy and |F_total|/|F_protein| below are NOT"
+              "\n  comparable against a run with a different --mask-blur."
+              " Pass --occupancy." % args.cutoff_frac)
+    # The ACTUAL fraction of peak, not the requested one: with --occupancy the
+    # cutoff is calibrated and with --mask-blur the peak itself moves, so
+    # echoing args.cutoff_frac here would misreport both.
+    peak = float(model.mask_source(density, orth).max())
     print("\ncutoff %.5g (%.1e of peak %.3f), occupancy %.4f, shell %d voxels"
-          % (cutoff, args.cutoff_frac, float(density.max()), occupancy,
-             shell_voxels(mask)))
+          % (cutoff, cutoff / peak, peak, occupancy, shell_voxels(mask)))
     if occupancy < 0.05:
         print("  ^ EMPTY MASK: with this selection the atoms fill the cell, so")
         print("    F_mask is ~0 and the solvent term contributes nothing.")
