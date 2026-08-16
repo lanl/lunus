@@ -125,6 +125,9 @@ def main():
                    help="cctbx atom selection; 'peptide' excludes water")
     p.add_argument("--cutoff-frac", type=float, default=0.01,
                    help="mask cutoff as a fraction of peak density")
+    p.add_argument("--mask-blur", type=float, default=None,
+                   help="B in A^2 smoothing the density before thresholding "
+                        "(default: SolventModel's own default)")
     p.add_argument("--reps", type=int, default=3)
     args = p.parse_args()
 
@@ -133,8 +136,11 @@ def main():
     from lunus.sf.elements import IT92_COEFFS
     from lunus.sf.kernel_torch import build_atom_kernels_torch
     from lunus.sf.solvent_torch import (
-        SolventModel, mask_occupancy, shell_voxels, solvent_mask,
+        MASK_BLUR_DEFAULT, SolventModel, mask_occupancy, shell_voxels,
+        solvent_mask,
     )
+    if args.mask_blur is None:
+        args.mask_blur = MASK_BLUR_DEFAULT
     from lunus.sf.structure_factor_torch import compute_fcalc
     from lunus.sf.symmetry_torch import (
         build_grid_ops_from_cctbx, symmetrize_sum,
@@ -183,8 +189,8 @@ def main():
             d = symmetrize_sum(d, grid_ops)
         f = compute_fcalc(d, volume, hkl, orth)
         c = args.cutoff_frac * float(d.max())
-        SolventModel(cutoff=c, taper_width=0.5 * c,
-                     check_occupancy=False).apply(d, f, volume, hkl, orth)
+        SolventModel(cutoff=c, taper_width=0.5 * c, check_occupancy=False,
+                     mask_blur=args.mask_blur).apply(d, f, volume, hkl, orth)
 
     with torch.no_grad():
         # One complete pass before the clock starts. Every phase here has a
@@ -209,9 +215,11 @@ def main():
 
         cutoff = args.cutoff_frac * float(density.max())
         model = SolventModel(cutoff=cutoff, taper_width=0.5 * cutoff,
-                             check_occupancy=False)
-        mask = t("mask", lambda: solvent_mask(density, cutoff, 0.5 * cutoff))
-        F_total = t("solvent (mask FFT + combine)", lambda: model.apply(
+                             check_occupancy=False, mask_blur=args.mask_blur)
+        # Through the model, not solvent_mask directly, so the row includes
+        # mask_blur's FFT pair -- which is most of what building a mask costs.
+        mask = t("  of which: build mask", lambda: model.build_mask(density, orth))
+        F_total = t("solvent (whole apply)", lambda: model.apply(
             density, F_protein, volume, hkl, orth)[0])
         total = t.report()
         mem_total = peak_memory(dev)
@@ -223,9 +231,18 @@ def main():
     if occupancy < 0.05:
         print("  ^ EMPTY MASK: with this selection the atoms fill the cell, so")
         print("    F_mask is ~0 and the solvent term contributes nothing.")
-    solvent_ms = 1e3 * sum(dt for n, dt in t.rows if n in ("mask", "solvent (mask FFT + combine)"))
+    # apply() rebuilds the mask, so the two solvent rows OVERLAP -- the build
+    # is a component of apply, not an addition to it. Summing them (which this
+    # did before mask_blur made the build expensive) double counts the mask
+    # and, with the blur on, overstates the solvent cost by about half.
+    rows = dict(t.rows)
+    solvent_ms = 1e3 * rows["solvent (whole apply)"]
+    protein_ms = 1e3 * total - solvent_ms - 1e3 * rows["  of which: build mask"]
     print("solvent adds %.1f ms to a %.1f ms configuration: %.1f%%"
-          % (solvent_ms, 1e3 * total, 100 * solvent_ms / (1e3 * total)))
+          % (solvent_ms, protein_ms + solvent_ms,
+             100 * solvent_ms / (protein_ms + solvent_ms)))
+    print("  (the mask build is inside that, not additional: %.1f ms of it)"
+          % (1e3 * rows["  of which: build mask"]))
     if dev.startswith("cuda"):
         print("peak device memory: %.0f MB protein-only, %.0f MB with solvent"
               % (mem_protein, mem_total))

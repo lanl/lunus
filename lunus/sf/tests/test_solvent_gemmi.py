@@ -24,6 +24,8 @@ resolution reflections where bulk solvent actually contributes.
 Requires gemmi; skipped without it.
 """
 
+import os
+
 import numpy as np
 import pytest
 
@@ -230,3 +232,97 @@ def test_matching_gemmi_forces_a_nearly_hard_threshold(fixture):
     assert shell_voxels(wider) > 10 * max(at_matched, 1)
     agree = float(((wider.numpy() > 0.5) == (fixture["gemmi"] > 0.5)).mean())
     assert agree > 0.98, agree
+
+
+# --------------------------------------------------------------------------
+# mask_blur, measured where it can actually be measured
+
+SEVENFPV = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "..", "examples", "compare_gemmi", "7FPV.pdb")
+
+
+@pytest.mark.skipif(not os.path.exists(SEVENFPV), reason="7FPV.pdb not present")
+def test_mask_blur_moves_the_mask_toward_the_geometric_one():
+    """mask_blur's reason for existing, on a real crystal.
+
+    IT HAS TO BE A REAL CRYSTAL, and that is why this test carries the cost of
+    reading a PDB rather than using the fixture at the top of this file. On
+    every synthetic model tried, the blur does nothing or slightly hurts:
+
+        200-carbon blob (the fixture above)   0.9951 -> 0.9935
+        900-carbon dense blob                 0.9962 -> 0.9933
+        7FPV, P2_1 2_1 2_1                    0.8636 -> 0.9391
+
+    A blob has one smooth, convex outer boundary that is already about as
+    close to a geometric mask as a threshold can get. A crystal has solvent
+    CHANNELS -- a convoluted surface threading between symmetry copies, with
+    crevices between neighbouring atoms at every scale -- and that is the
+    structure the probe radius exists to smooth away. This is the fourth
+    conclusion in this model that a sparse fixture got wrong; see
+    docs/solvent-design.md.
+
+    Run at d_min 2.0 rather than the structure's 1.04 A because the effect is
+    grid-independent (gain +0.064 here against +0.075 at 1.04 A) and the
+    coarser grid costs 0.2 s instead of 1.5 s.
+    """
+    cctbx_pdb = pytest.importorskip("iotbx.pdb", reason="cctbx not installed")
+    from lunus.sf.cell_utils import grid_shape_for_resolution
+    from lunus.sf.kernel_torch import build_atom_kernels_torch
+    from lunus.sf.solvent_torch import SolventModel
+    from lunus.sf.symmetry_torch import (
+        adjust_grid_for_symmetry, build_grid_ops_from_cctbx, symmetrize_sum,
+    )
+
+    xrs = cctbx_pdb.hierarchy.input(
+        file_name=SEVENFPV, sort_atoms=False).input.xray_structure_simple()
+    xrs.convert_to_isotropic()
+    cell = xrs.unit_cell().parameters()
+    sg = xrs.space_group()
+    grid = adjust_grid_for_symmetry(
+        grid_shape_for_resolution(cell[0], cell[1], cell[2], 2.0, rate=1.5),
+        [np.array(o.r().as_double()).reshape(3, 3) for o in sg],
+        [np.array(o.t().as_double()) for o in sg])
+
+    elements = [s.scattering_type for s in xrs.scatterers()]
+    b = np.array(xrs.extract_u_iso_or_u_equiv()) * (8.0 * np.pi ** 2)
+    occ = np.array(xrs.scatterers().extract_occupancies())
+    frac = np.array(xrs.sites_frac()).reshape(-1, 3)
+    M = orth_matrix(*cell)
+    orth = torch.tensor(M, dtype=torch.float64)
+
+    # build_atom_kernels_torch returns PER-ATOM arrays already. Indexing them
+    # by element the way build_element_kernels_torch's output must be indexed
+    # silently gives every atom the kernel of whichever atom happens to sit at
+    # its element's index, and still produces a plausible-looking density.
+    atom_A, atom_lam, offsets, atom_r, taper_w, e2i = build_atom_kernels_torch(
+        elements, sorted(set(elements)), IT92_COEFFS, b, 0.0, grid, M,
+        cutoff=0.01, device="cpu", dtype=torch.float64)
+    density = splat_density(
+        torch.tensor(frac), torch.tensor([e2i[e] for e in elements]),
+        torch.tensor(occ), atom_A, atom_lam, offsets, atom_r, grid, orth,
+        taper_w, compile_core=False)
+    density = symmetrize_sum(density, build_grid_ops_from_cctbx(sg, grid))
+
+    st = gemmi.read_structure(SEVENFPV)
+    st.setup_entities()
+    g = gemmi.FloatGrid()
+    g.set_size(*grid)
+    g.set_unit_cell(st.cell)
+    g.spacegroup = gemmi.find_spacegroup_by_name(st.spacegroup_hm)
+    gemmi.SolventMasker(gemmi.AtomicRadiiSet.Refmac).put_mask_on_float_grid(
+        g, st[0])
+    geometric = np.array(g, copy=False)
+
+    def agreement(blur):
+        model = SolventModel(cutoff=1.0, taper_width=0.5, mask_blur=blur,
+                             check_occupancy=False)
+        # Calibrated to gemmi's OWN occupancy, so this compares shape and not
+        # how much of the cell each model calls solvent.
+        model.calibrate(density, orth, float(geometric.mean()))
+        mask = model.build_mask(density, orth).numpy()
+        return float(((mask > 0.5) == (geometric > 0.5)).mean())
+
+    bare, blurred = agreement(0.0), agreement(100.0)
+    assert bare == pytest.approx(0.888, abs=0.02)
+    assert blurred == pytest.approx(0.951, abs=0.02)
+    assert blurred > bare + 0.04

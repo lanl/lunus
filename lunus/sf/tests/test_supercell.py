@@ -175,8 +175,11 @@ def test_the_pipeline_masks_before_folding():
     from lunus.sf.solvent_torch import f_solvent, f_total
     from lunus.sf.structure_factor_torch import compute_fcalc, reciprocal_inv_d2
 
+    # Built in the SUPERCELL's frame -- orth * scale -- because that is the
+    # frame the pipeline builds it in, and anything the model does to the
+    # density first (mask_blur) needs the matching reciprocal grid.
     mask_folded = fold_supercell(
-        solvent_mask(rho_super, cutoff, 0.5 * cutoff), n)
+        model.build_mask(rho_super, s["orth"] * scale), n)
     F_protein = compute_fcalc(
         fold_supercell(rho_super, n), s["cell_volume"], s["hkl"], s["orth"])
     # density_scale = the number of images folded in. The protein density is

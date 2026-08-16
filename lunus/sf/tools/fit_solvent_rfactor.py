@@ -46,9 +46,9 @@ Comparing the two R-factors separates "the mask model is wrong" from
 
 --mask-blur B smooths the density with exp(-B s^2/4) BEFORE thresholding, which
 is the threshold mask's analogue of the probe radius a geometric mask is built
-with. It is not cosmetic: see the "What the R-factor found" section of
-docs/solvent-design.md, where it is what moves the fitted scales from
-unphysical to conventional.
+with. It defaults to SolventModel's own value, so a plain run reports the
+SHIPPED configuration; --mask-blur 0 disables it and reproduces what the model
+did before this existed, which is where the unphysical scales come from.
 
 --reference prints what this dataset can actually support, computed with cctbx
 and mmtbx and no lunus code at all: the R that mmtbx's own bulk solvent reaches
@@ -555,9 +555,11 @@ def main():
                    help="override the gemmi-measured calibration target")
     p.add_argument("--taper-frac", type=float, default=0.5,
                    help="taper width as a fraction of the cutoff")
-    p.add_argument("--mask-blur", type=float, default=0.0, metavar="B",
+    p.add_argument("--mask-blur", type=float, default=None, metavar="B",
                    help="smooth the density by exp(-B s^2/4) before "
-                        "thresholding; the threshold mask's probe radius")
+                        "thresholding; the threshold mask's probe radius "
+                        "(default: SolventModel's own, so the tool reports "
+                        "the shipped configuration; 0 disables it)")
     p.add_argument("--reference", action="store_true",
                    help="also report what mmtbx reaches on the same model")
     p.add_argument("--aniso", action="store_true",
@@ -569,8 +571,11 @@ def main():
 
     from lunus.sf.cell_utils import grid_shape_for_resolution
     from lunus.sf.solvent_torch import (
-        calibrate_cutoff, f_solvent, mask_occupancy, shell_voxels, solvent_mask,
+        MASK_BLUR_DEFAULT, calibrate_cutoff, f_solvent, mask_occupancy,
+        shell_voxels, solvent_mask,
     )
+    if args.mask_blur is None:
+        args.mask_blur = MASK_BLUR_DEFAULT
     from lunus.sf.structure_factor_torch import compute_fcalc, reciprocal_inv_d2
     from lunus.sf.symmetry_torch import adjust_grid_for_symmetry
 

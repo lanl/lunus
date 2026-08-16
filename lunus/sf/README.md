@@ -98,7 +98,7 @@ python ../../tools/compare_icalc_mtz.py icalc_gemmi.mtz icalc_torch.mtz
 | `kernel_torch.py` | Builds per-element or per-atom (A, lam, radius) as torch tensors. Not differentiated — B and blur are fixed hyperparameters. |
 | `symmetry_torch.py` | Space group → validated integer **grid** operations, applied differentiably. Also `adjust_grid_for_symmetry()` for the grid-size constraints those operations impose. |
 | `structure_factor_torch.py` | FFT + Miller-index extraction, matching xtraj.py's `ifftn(...) * volume` then `conjugate(...)` convention including the optional blur-undo. `structure_factors_batch()` runs N configurations in one call with gradients to all N (optionally gradient-checkpointed, so memory stays flat in N), and `mean_and_diffuse()` does the `<F>` / `<\|F\|²> − \|<F>\|²` ensemble reduction. |
-| `solvent_torch.py` | Flat/mask bulk solvent: a smooth density-threshold mask, its transform, and `F_total = k_overall·exp(−h·U·h)·[F_protein + k_sol·exp(−b_sol·s²/4)·F_mask]`. Opt in with `solvent=SolventModel(...)` on either entry point above; `solvent=None`, the default, runs none of it. `mask_occupancy()` is the check that the model is doing anything at all. See `docs/solvent-design.md`. |
+| `solvent_torch.py` | Flat/mask bulk solvent: a smooth density-threshold mask smoothed by a probe-radius blur (`mask_blur`, on by default), its transform, and `F_total = k_overall·exp(−h·U·h)·[F_protein + k_sol·exp(−b_sol·s²/4)·F_mask]`. Opt in with `solvent=SolventModel(...)` on either entry point above; `solvent=None`, the default, runs none of it. `mask_occupancy()` is the check that the model is doing anything at all. See `docs/solvent-design.md`. |
 | `training_mpi.py` | MPI-distributed training step. Configurations split across ranks with no `torch.distributed`: one small `Allreduce` on the aggregate sums, a tiny shared graph to produce the upstream gradient, then each rank finishes its own backward locally. No per-atom gradient communication, since each configuration's atoms belong to one rank alone. |
 | `xtraj.py` | MD trajectory → `<F>` and diffuse intensity. **This is the live xtraj variant** (engines: `gemmi`, `sfall`, `torch`). `lunus/command_line/xtraj.py` is the separate shipped dispatcher and has no torch engine; merging them is deliberately out of scope for now. |
 
@@ -192,11 +192,10 @@ repo so those numbers stay reproducible. Both `iotbx.pdb` and `mdtraj` read
   tensor-valued kernel, derived the same way as the isotropic one. Measured
   cost: on 7FPV at 1.04 Å it is worth 0.049 in R (0.130 → 0.179), and it is the
   single largest error in the pipeline's agreement with experimental data.
-- **`mask_blur` on `SolventModel`** — smoothing the density before thresholding,
-  the threshold mask's stand-in for a geometric mask's probe radius. Without it
-  the fitted solvent scales come out unphysical on real data; with it they land
-  on the conventional values. Currently only `--mask-blur` in
-  `tools/fit_solvent_rfactor.py`. See docs/solvent-design.md, "What the
-  R-factor found".
+- **A CUDA measurement of what `mask_blur` costs.** It is an FFT pair per
+  configuration, worth 2.7x on the solvent path on CPU; the GPU figure should be
+  much smaller but has not been taken. The one available optimization — reusing
+  `compute_fcalc`'s existing transform, halving it — is described in
+  docs/solvent-design.md and not implemented.
 - **A grid-refinement convergence check** in `test_per_atom_b.py`; see
   docs/design.md.

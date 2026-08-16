@@ -113,7 +113,11 @@ def test_pipeline_masks_after_symmetrizing(system):
     s = system
     rho = s["density_sym"]
     F_protein = compute_fcalc(rho, s["cell_volume"], s["hkl"], s["orth"])
-    mask = solvent_mask(rho, s["cutoff"], 0.5 * s["cutoff"])
+    # Through the model's own mask construction rather than solvent_mask
+    # directly, so this keeps testing the ORDER under whatever the model does
+    # to the density first -- the mask_blur added later would otherwise have
+    # made this a comparison against a mask the pipeline no longer builds.
+    mask = s["model"].build_mask(rho, s["orth"])
     F_mask = f_solvent(mask, s["cell_volume"], s["hkl"], s["orth"])
     expected = f_total(
         F_protein, F_mask, reciprocal_inv_d2(s["orth"], s["hkl"]),

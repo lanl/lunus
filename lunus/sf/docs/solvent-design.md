@@ -8,12 +8,12 @@ points in `structure_factor_torch.py`, `tests/test_solvent.py`, gemmi parity in
 `tests/test_solvent_symmetry.py`, the degenerate-mask check is wired into
 `SolventModel`, and float32 is measured (below). The scaling fit and
 shell-resolved R against experimental amplitudes are done —
-`tools/fit_solvent_rfactor.py`, findings under "What the R-factor found", and
-they carry an unimplemented recommendation (`mask_blur`) that the shipped model
-does not yet have. Still to do: per-configuration occupancies (see the API gap
+`tools/fit_solvent_rfactor.py`, findings under "What the R-factor found". The
+recommendation they produced, `mask_blur`, is now implemented and on by
+default. Still to do: per-configuration occupancies (see the API gap
 below), a numerical test of `u_aniso` inside the test suite rather than only in
-the validation tool, and the diffuse convergence study re-run against a
-smoothed mask.
+the validation tool, the diffuse convergence study re-run against a smoothed
+mask, and a CUDA measurement of what `mask_blur` costs.
 
 Written 2026-08-15, revised the same day against the current code — the API
 assumptions below were checked, the cost estimate was replaced with a
@@ -518,8 +518,8 @@ is the substantive finding.**
 
 | mask | k_sol | b_sol | R-work | R-free |
 |---|---|---|---|---|
-| threshold, as shipped | 0.554 | 199 | 0.1983 | 0.2085 |
-| threshold, density blurred first (B = 100 Å²) | 0.388 | 48.9 | 0.1894 | 0.2056 |
+| threshold, `mask_blur=0` (as shipped *before* this work) | 0.554 | 199 | 0.1983 | 0.2085 |
+| threshold, `mask_blur=100` — **the shipped default now** | 0.388 | 48.9 | 0.1894 | 0.2056 |
 | …and anisotropic overall scale | 0.388 | 49.1 | **0.1810** | **0.1947** |
 | gemmi's geometric mask, through the identical fit | 0.386 | 40.0 | 0.1874 | 0.1996 |
 | *mmtbx on the same isotropic model (the target)* | *0.340* | *13.3* | *0.1789* | *0.1936* |
@@ -628,14 +628,61 @@ cutoff recommendation. Two conclusions from that fixture have now been reversed
 by a real structure, which is worth treating as a pattern rather than as two
 accidents.
 
-**Recommended, not yet implemented:** a `mask_blur` on `SolventModel`, defaulting
-to something in the 50–100 Å² range, applied to the density before
-`solvent_mask`. Today it exists only as `--mask-blur` in the validation tool,
-so the shipped model is still the first row of the table above. Doing it
-properly means deciding whether the blur is a fixed hyperparameter or scales
-with the grid, and re-running the diffuse study — a smoother mask is exactly
-what that study wanted for a different reason, so the two should be settled
-together rather than separately.
+### `mask_blur`, and why it is a constant when the cutoff is not
+
+**Implemented**: `SolventModel(mask_blur=...)`, defaulting to
+`MASK_BLUR_DEFAULT = 100 Å²`, applied to the density before `solvent_mask`.
+`mask_blur=0.0` restores the unsmoothed threshold and every number measured
+before it existed. The shipped model is now the second row of the table above,
+not the first.
+
+The cutoff is a calibration and this is not, which is worth being precise
+about because the two look alike. The cutoff is a **density**, so it moves with
+the B convention, the grid and how tightly the model packs — hence
+`calibrate_cutoff`. `mask_blur` is a **length** expressed as a B factor, so the
+same value means the same physical smoothing on any grid, of any structure, at
+any resolution. That is what makes it shippable.
+
+Three independent lines say 100 Å² (σ = 1.13 Å) is the right value, and none of
+them was told the answer:
+
+| | |
+|---|---|
+| R-work on 7FPV against deposited amplitudes | turns over at B = 100 |
+| voxel agreement with gemmi's mask, 7FPV | 0.864 → **0.939**, peak at B = 100 |
+| voxel agreement with gemmi's mask, 4WOR (P4₁, unrelated crystal) | 0.912 → **0.952**, peak at B = 100 |
+
+Both crystals peak at the same value and fall away by σ = 1.4 Å, and σ = 1.13 Å
+is essentially Phenix's `solvent_radius` of 1.11 Å. A probe radius is a
+property of the solvent rather than of the crystal, so agreement between two
+unrelated structures is what should be expected if the interpretation is right
+— and it is the check that stops this from being a default calibrated on one
+dataset, which is the mistake this note has already recorded twice.
+
+R-free on 7FPV bottoms out slightly earlier (B ≈ 50), so 50–100 is the
+defensible band and the default sits at the end of it that two structures and
+the R-work curve agree on.
+
+**Cost: it is not free, and on CPU it is not cheap.** The blur is an FFT pair
+on the full grid. Measured on 7FPV, 100 × 144 × 288, float32, CPU:
+
+| | mask_blur = 0 | mask_blur = 100 |
+|---|---|---|
+| build the mask | 2.0 ms | 53.8 ms |
+| whole `apply()` | 22.5 ms | 61.6 ms |
+| whole configuration | 84.8 ms | 124.2 ms |
+
+So the solvent path costs about 2.7× what it did. On CUDA it should be far
+less alarming — `fft+extract` there is 0.3 ms against 20 ms here — but **that
+has not been measured** and the CUDA figure in "At production scale" below
+predates the blur.
+
+**One optimization is available and not taken.** `compute_fcalc` already
+computes `ifftn(density)` for `F_protein`, and for real input
+`fftn(d) = N·conj(ifftn(d))`, so the blur's forward transform is recoverable
+from work already done — one FFT instead of two. It needs `compute_fcalc` to
+hand back its grid, which complicates the checkpointing contract, so it is
+recorded rather than done.
 
 ## What the parity test found
 

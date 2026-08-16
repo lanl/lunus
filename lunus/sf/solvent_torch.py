@@ -18,7 +18,18 @@ explicit waters raise the density where they sit and so exclude themselves from
 the solvent region, with no special handling of the boundary between the two
 models.
 
-Three things in here are not obvious, all of them from that design note:
+Four things in here are not obvious, all of them from that design note:
+
+  * THE DENSITY IS SMOOTHED BEFORE IT IS THRESHOLDED, and that is not a
+    cosmetic filter -- it is this model's stand-in for the PROBE RADIUS a
+    geometric mask is built with. Phenix and REFMAC roll a solvent-sized probe
+    over the vdW surface and then shrink the result, which smooths the boundary
+    and closes the crevices between neighbouring atoms. A bare density
+    threshold has no equivalent and follows every one of them, which measured
+    on real data is not a small effect: it puts ~1.5x too much amplitude into
+    F_mask beyond 2 A, uncorrelated with a geometric mask's, and drives a fit
+    of k_sol/b_sol to 0.554/199 against the conventional 0.35/46. See
+    mask_blur, and "What the R-factor found" in docs/solvent-design.md.
 
   * THE MASK MUST BE BUILT FROM THE POST-SYMMETRIZATION DENSITY.
     symmetrize_sum() SUMS over the symmetry orbit, so a mask built first and
@@ -53,6 +64,18 @@ from .structure_factor_torch import compute_fcalc, reciprocal_inv_d2
 K_SOL_DEFAULT = 0.35     # e/A^3
 B_SOL_DEFAULT = 46.0     # A^2
 
+# The mask's probe radius, as a B factor in A^2 (sigma = sqrt(B / 8 pi^2), so
+# this is sigma = 1.13 A). Unlike the cutoff, this is NOT a per-structure
+# calibration: it is a property of the solvent being modelled, the same way
+# Phenix's solvent_radius is, and it is expressed as a physical length so it
+# transfers across grids unchanged.
+#
+# 1.13 A is where R-work turns over on 7FPV against deposited amplitudes, and
+# it is arrived at without being told what it should be -- which makes its
+# agreement with Phenix's 1.11 A solvent radius a corroboration rather than a
+# fit. mask_blur=0.0 restores the unsmoothed threshold, and changes results.
+MASK_BLUR_DEFAULT = 100.0    # A^2
+
 # Occupancies outside this band are reported. The band is deliberately much
 # wider than the 0.3-0.7 a protein crystal actually shows: the point is to
 # catch a model that is doing NOTHING, not to second-guess an unusual but
@@ -70,6 +93,49 @@ class SolventMaskWarning(UserWarning):
     worth doing in a pipeline, since both degenerate cases produce numbers
     rather than exceptions.
     """
+
+
+def grid_inv_d2(grid_shape, orth_matrix):
+    """s^2 for every voxel of the reciprocal grid, shape `grid_shape`.
+
+    Through the FULL reciprocal metric rather than 1/a^2 + 1/b^2 + 1/c^2 --
+    those agree only for an orthogonal cell and silently do not for a
+    monoclinic or triclinic one.
+    """
+    Nu, Nv, Nw = grid_shape
+    dev, dt = orth_matrix.device, orth_matrix.dtype
+    inv_orth = torch.linalg.inv(orth_matrix)
+    fu = torch.fft.fftfreq(Nu, d=1.0 / Nu, device=dev, dtype=dt)
+    fv = torch.fft.fftfreq(Nv, d=1.0 / Nv, device=dev, dtype=dt)
+    fw = torch.fft.fftfreq(Nw, d=1.0 / Nw, device=dev, dtype=dt)
+    H = torch.stack(torch.meshgrid(fu, fv, fw, indexing="ij"), dim=-1)
+    s_cart = H @ inv_orth
+    return (s_cart * s_cart).sum(-1)
+
+
+def blur_density(density, orth_matrix, blur_b, inv_d2_grid=None):
+    """
+    density convolved with a Gaussian, as density * exp(-B s^2 / 4).
+
+    THE PROBE RADIUS, see the module docstring. B is in A^2, the same
+    convention as b_sol and as compute_fcalc's blur, so the real-space Gaussian
+    has sigma = sqrt(B / (8 pi^2)) -- B = 100 is sigma = 1.13 A.
+
+    Done in reciprocal space because on a periodic grid that is exact and
+    costs one FFT pair, where a real-space convolution would need a truncated
+    kernel and would reintroduce exactly the boundary artifacts this is here to
+    remove. It is differentiable, though the default detach_mask means it does
+    not normally carry gradients.
+
+    Pass inv_d2_grid to reuse a cached frequency grid; it depends only on the
+    grid shape and the cell, so recomputing it per configuration is pure waste.
+    """
+    if blur_b == 0.0:
+        return density
+    if inv_d2_grid is None:
+        inv_d2_grid = grid_inv_d2(density.shape, orth_matrix)
+    weight = torch.exp(-0.25 * blur_b * inv_d2_grid).to(density.dtype)
+    return torch.fft.ifftn(torch.fft.fftn(density) * weight).real
 
 
 def solvent_mask(density, cutoff, taper_width):
@@ -281,6 +347,11 @@ class SolventModel:
       b_sol         solvent B-factor, A^2
       k_overall     overall scale
       u_aniso       (3,3) anisotropic scaling tensor, or None
+      mask_blur     B in A^2 smoothing the density before it is thresholded --
+                    this model's probe radius, see the module docstring.
+                    Defaults to MASK_BLUR_DEFAULT (sigma 1.13 A); 0.0 restores
+                    the unsmoothed threshold and does NOT reproduce
+                    conventional solvent scales on real data.
       detach_mask   build the mask from a detached copy of the density
                     (default True). Keeps the solvent envelope out of the
                     gradient of every parameter the density depends on --
@@ -298,15 +369,21 @@ class SolventModel:
 
     __slots__ = ("cutoff", "taper_width", "k_sol", "b_sol", "k_overall",
                  "u_aniso", "detach_mask", "check_occupancy",
-                 "density_scale", "last_occupancy", "last_shell_voxels")
+                 "density_scale", "mask_blur", "last_occupancy",
+                 "last_shell_voxels", "_inv_d2_grid", "_inv_d2_key")
 
     def __init__(self, cutoff, taper_width, k_sol=K_SOL_DEFAULT,
                  b_sol=B_SOL_DEFAULT, k_overall=1.0, u_aniso=None,
-                 detach_mask=True, check_occupancy=True, density_scale=1.0):
+                 detach_mask=True, check_occupancy=True, density_scale=1.0,
+                 mask_blur=MASK_BLUR_DEFAULT):
         if taper_width <= 0:
             raise ValueError(
                 "taper_width must be > 0; a hard threshold has no usable "
                 "gradient (that is the whole reason for the taper)")
+        if mask_blur < 0:
+            raise ValueError("mask_blur must be >= 0 A^2; a negative B "
+                             "sharpens the density and amplifies exactly the "
+                             "boundary roughness the blur exists to remove")
         self.cutoff = cutoff
         self.taper_width = taper_width
         self.k_sol = k_sol
@@ -316,8 +393,65 @@ class SolventModel:
         self.detach_mask = detach_mask
         self.check_occupancy = check_occupancy
         self.density_scale = density_scale
+        self.mask_blur = mask_blur
         self.last_occupancy = None
         self.last_shell_voxels = None
+        self._inv_d2_grid = None
+        self._inv_d2_key = None
+
+    def _cached_inv_d2(self, density, orth_matrix):
+        """The frequency grid for the blur, built once per (shape, device,
+        dtype). It is a full extra grid, so it is not built at all when
+        mask_blur is 0."""
+        key = (tuple(density.shape), str(density.device), density.dtype)
+        if self._inv_d2_key != key:
+            self._inv_d2_grid = grid_inv_d2(density.shape, orth_matrix)
+            self._inv_d2_key = key
+        return self._inv_d2_grid
+
+    def mask_source(self, density, orth_matrix):
+        """The grid the mask is thresholded from: detached if detach_mask, and
+        smoothed by mask_blur.
+
+        Public because CALIBRATION MUST SEE THE SAME GRID. Calibrating a cutoff
+        on the raw density and then thresholding the blurred one asks for an
+        occupancy from one distribution and applies it to another -- measured
+        on 7FPV, that misses the requested occupancy by more than a third.
+        calibrate() below does this correctly; anything hand-rolled must too.
+        """
+        rho = density.detach() if self.detach_mask else density
+        if self.mask_blur == 0.0:
+            return rho
+        return blur_density(rho, orth_matrix, self.mask_blur,
+                            self._cached_inv_d2(rho, orth_matrix))
+
+    def build_mask(self, density, orth_matrix):
+        """density -> the solvent mask, including the one-time occupancy check.
+
+        The single place a mask is built. structure_factor_torch's supercell
+        path used to inline its own copy of this, which is how a mask_blur
+        added in one place would have silently not applied in the other.
+        """
+        mask = solvent_mask(self.mask_source(density, orth_matrix),
+                            self.cutoff, self.taper_width)
+        if self.check_occupancy and self.last_occupancy is None:
+            self._check(mask)
+        return mask
+
+    def calibrate(self, density, orth_matrix, target_occupancy,
+                  taper_width_frac=0.5):
+        """Set cutoff and taper_width so the mask calls target_occupancy of the
+        cell solvent, measured on the grid the mask will actually see.
+
+        Returns the cutoff. Run once at setup, on a representative
+        configuration -- the cutoff is a calibration and not a constant, but it
+        is not so unstable that it needs redoing per frame.
+        """
+        source = self.mask_source(density, orth_matrix)
+        self.cutoff = calibrate_cutoff(source, target_occupancy,
+                                       taper_width_frac=taper_width_frac)
+        self.taper_width = taper_width_frac * self.cutoff
+        return self.cutoff
 
     def _check(self, mask):
         """Once per model. Reads back two scalars from the device, which is a
@@ -352,10 +486,7 @@ class SolventModel:
         Returns (F_total, mask), the mask being handed back so callers can
         report mask_occupancy() without recomputing it.
         """
-        rho = density.detach() if self.detach_mask else density
-        mask = solvent_mask(rho, self.cutoff, self.taper_width)
-        if self.check_occupancy and self.last_occupancy is None:
-            self._check(mask)
+        mask = self.build_mask(density, orth_matrix)
         F_mask = f_solvent(mask, cell_volume, hkl, orth_matrix)
         inv_d2 = reciprocal_inv_d2(orth_matrix, hkl)
         F = f_total(

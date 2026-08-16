@@ -128,11 +128,9 @@ def structure_factors_one_config(
     # The mask is built BEFORE folding, where the boundary still exists.
     mask = None
     if solvent is not None and supercell is not None:
-        rho = density.detach() if solvent.detach_mask else density
-        from .solvent_torch import solvent_mask as _solvent_mask
-        mask = _solvent_mask(rho, solvent.cutoff, solvent.taper_width)
-        if solvent.check_occupancy and solvent.last_occupancy is None:
-            solvent._check(mask)
+        # splat_orth, not orth_matrix: the mask is built in the SUPERCELL's
+        # frame, so the blur's frequency grid has to be the supercell's too.
+        mask = solvent.build_mask(density, splat_orth)
 
     if supercell is not None:
         density = fold_supercell(density, n)

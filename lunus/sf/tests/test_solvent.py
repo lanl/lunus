@@ -623,3 +623,155 @@ def test_calibrate_cutoff_reports_an_unreachable_target():
     assert floor > 0.3, floor          # this fixture does have vacuum
     with pytest.raises(ValueError, match="out of reach"):
         calibrate_cutoff(rho, 0.5 * floor)
+
+
+# --------------------------------------------------------------------------
+# 9. mask_blur: the probe radius
+
+def test_mask_blur_zero_reproduces_the_bare_threshold():
+    """The escape hatch has to be exact, because every number measured before
+    mask_blur existed was measured at 0 and has to stay reproducible."""
+    sys = _system()
+    rho = _density(sys)
+    cutoff = 0.1 * float(rho.max())
+    model = SolventModel(cutoff=cutoff, taper_width=0.5 * cutoff,
+                         mask_blur=0.0, check_occupancy=False)
+
+    assert torch.equal(model.build_mask(rho, sys["orth"]),
+                       solvent_mask(rho, cutoff, 0.5 * cutoff))
+
+
+def test_mask_blur_rejects_a_negative_b():
+    """A negative B sharpens, which amplifies the boundary roughness the blur
+    exists to remove -- the opposite of the intent, and silent."""
+    with pytest.raises(ValueError, match="mask_blur"):
+        SolventModel(cutoff=0.1, taper_width=0.05, mask_blur=-1.0)
+
+
+def test_mask_blur_smooths_the_mask_boundary_on_a_dense_model():
+    """What the blur is for: closing the crevices between neighbouring atoms,
+    and so less high-frequency content in F_mask.
+
+    Asserted on the transform rather than the grid because that is what reaches
+    F_total, and with the occupancy held fixed by recalibration so this
+    measures SHAPE and not size.
+
+    IT MUST BE A DENSE FIXTURE, and that is the interesting part. Measured on
+    the 40-atom fixture the rest of this file uses -- 85% genuine vacuum -- the
+    blur changes sum|F(h!=0)| by 0.1%, because isolated atoms have no crevices
+    between them to close; blurring merely inflates them into bigger blobs and
+    the boundary AREA grows about as fast as its roughness falls. Pack the same
+    cell until there is no vacuum, which is what a real structure looks like,
+    and the effect appears: 0.93 here, and far larger on 7FPV.
+
+    This is the third time a conclusion drawn from a sparse fixture has failed
+    to transfer to a packed one -- see the fixed-fraction cutoff and the parity
+    test's voxel agreement, both in docs/solvent-design.md. A sparse model has
+    real vacuum between its atoms and a real one has only overlapping tails,
+    and the two behave differently for anything that depends on where the
+    density crosses a threshold.
+    """
+    rng = np.random.default_rng(3)
+    n_atoms = 400
+    frac = torch.tensor(rng.random((n_atoms, 3)), dtype=DTYPE)
+    M_np = orth_matrix(*CELL)
+    orth = torch.tensor(M_np, dtype=DTYPE)
+    volume = float(np.linalg.det(M_np))
+    grid = (32, 32, 32)
+    hkl = torch.tensor([[h, k, l] for h in range(9) for k in range(9)
+                        for l in range(9)], dtype=torch.long)[1:]   # drop (000)
+
+    A, lam, offsets, radius, taper_w, _ = build_element_kernels_torch(
+        ["C"], IT92_COEFFS, 20.0, 0.0, grid, M_np, cutoff=0.01,
+        device="cpu", dtype=DTYPE)
+    idx = torch.zeros(n_atoms, dtype=torch.long)
+    rho = splat_density(frac, idx, torch.ones(n_atoms, dtype=DTYPE),
+                        A[idx], lam[idx], offsets, radius[idx], grid, orth,
+                        taper_w, compile_core=False)
+    target = 0.5
+    d = 1.0 / torch.sqrt(reciprocal_inv_d2(orth, hkl))
+
+    def content(blur, sel):
+        model = SolventModel(cutoff=1.0, taper_width=0.5, mask_blur=blur,
+                             check_occupancy=False)
+        model.calibrate(rho, orth, target)
+        mask = model.build_mask(rho, orth)
+        assert float(mask_occupancy(mask)) == pytest.approx(target, abs=1e-3)
+        return float(f_solvent(mask, volume, hkl, orth)[sel].abs().sum())
+
+    # THE EFFECT IS RESOLUTION DEPENDENT, and the crossover is the point.
+    # Beyond ~4 A the blur slightly INCREASES |F_mask| -- it is changing the
+    # envelope's gross shape, and a smoothed boundary encloses a marginally
+    # different volume at fixed occupancy. Below 4 A, where the crevices live
+    # and where the excess drove b_sol to 199 on real data, it removes 30-50%.
+    # Asserting on the whole reflection set would average these two and pin
+    # nothing.
+    high = d < 4.0
+    assert content(100.0, high) < 0.8 * content(0.0, high)
+
+    low = d >= 4.0
+    assert content(100.0, low) == pytest.approx(content(0.0, low), rel=0.15)
+
+
+def test_calibration_must_see_the_grid_the_mask_is_built_from():
+    """The trap mask_source() exists to close.
+
+    Calibrating a cutoff on the raw density and then thresholding a blurred
+    one asks for an occupancy from one distribution and applies it to another.
+    It does not raise, it just misses -- so this pins that model.calibrate()
+    hits the target and the naive two-step does not.
+    """
+    from lunus.sf.solvent_torch import calibrate_cutoff
+
+    sys = _system(n_atoms=40, seed=5)
+    rho = _density(sys)
+    target = 0.9
+    model = SolventModel(cutoff=1.0, taper_width=0.5, mask_blur=100.0,
+                         check_occupancy=False)
+
+    model.calibrate(rho, sys["orth"], target)
+    assert float(mask_occupancy(model.build_mask(rho, sys["orth"]))) == \
+        pytest.approx(target, abs=1e-3)
+
+    # The naive version: calibrate on the unblurred density, threshold the
+    # blurred one. Same target, different answer.
+    naive_cutoff = calibrate_cutoff(rho, target)
+    naive = SolventModel(cutoff=naive_cutoff, taper_width=0.5 * naive_cutoff,
+                         mask_blur=100.0, check_occupancy=False)
+    missed = float(mask_occupancy(naive.build_mask(rho, sys["orth"])))
+    assert abs(missed - target) > 0.05
+
+
+def test_mask_blur_is_a_length_and_so_survives_a_change_of_grid():
+    """B is in A^2, so the same value means the same physical smoothing on any
+    grid. That is what makes it a shippable default when the cutoff -- which
+    moves with grid, B convention and system -- is not.
+
+    Measured through the occupancy the same cutoff produces on a 24^3 and a
+    36^3 grid of the same cell. Some drift is the density's own resampling and
+    is present without any blur; the test asserts the blur does not ADD
+    grid dependence, by comparing the two drifts.
+    """
+    rng = np.random.default_rng(11)
+    frac = torch.tensor(rng.random((40, 3)), dtype=DTYPE)
+    M_np = orth_matrix(*CELL)
+    orth = torch.tensor(M_np, dtype=DTYPE)
+
+    def occupancy(grid, blur, cutoff):
+        A, lam, offsets, radius, taper_w, _ = build_element_kernels_torch(
+            ["C"], IT92_COEFFS, 20.0, 0.0, grid, M_np, cutoff=0.01,
+            device="cpu", dtype=DTYPE)
+        idx = torch.zeros(frac.shape[0], dtype=torch.long)
+        rho = splat_density(frac, idx, torch.ones(frac.shape[0], dtype=DTYPE),
+                            A[idx], lam[idx], offsets, radius[idx], grid,
+                            orth, taper_w, compile_core=False)
+        model = SolventModel(cutoff=cutoff, taper_width=0.5 * cutoff,
+                             mask_blur=blur, check_occupancy=False)
+        return float(mask_occupancy(model.build_mask(rho, orth)))
+
+    cutoff = 0.05
+    drift_bare = abs(occupancy((24, 24, 24), 0.0, cutoff)
+                     - occupancy((36, 36, 36), 0.0, cutoff))
+    drift_blurred = abs(occupancy((24, 24, 24), 100.0, cutoff)
+                        - occupancy((36, 36, 36), 100.0, cutoff))
+    assert drift_blurred < drift_bare + 0.02
