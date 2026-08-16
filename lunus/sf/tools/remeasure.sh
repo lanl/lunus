@@ -5,6 +5,11 @@
 #     OMP_NUM_THREADS=3 ./tools/remeasure.sh --quick         # smoke test, ~2 min
 #     OMP_NUM_THREADS=3 TRAJ=md_restrained_last_10ns.xtc LAST=250 ./tools/remeasure.sh
 #
+# The interpreter is found rather than assumed: where the python on PATH cannot
+# import torch and pixi is installed -- which is the pod -- every call goes
+# through `pixi run python`. Override with PYTHON_CMD="pixi run python" or
+# PYTHON_CMD=/path/to/python if the guess is wrong.
+#
 # WHY THIS EXISTS. Every absolute number in docs/performance.md was measured
 # with unit_cell=88.451,88.451,39.823 and space_group=P43, carried over from a
 # different example. The crystal is 7FPV -- 34.196 x 45.558 x 99.044,
@@ -36,6 +41,21 @@ export PYTHONPATH="${PYTHONPATH:-}:${REPO_ROOT}"
 
 QUICK=0
 [ "${1:-}" = "--quick" ] && QUICK=1
+
+# ---- the interpreter --------------------------------------------------------
+# An array, not a string: `pixi run python` is three words and has to survive
+# being passed as a command.
+if [ -n "${PYTHON_CMD:-}" ]; then
+  read -r -a PY <<< "${PYTHON_CMD}"
+elif python -c "import torch" >/dev/null 2>&1; then
+  PY=(python)
+elif command -v pixi >/dev/null 2>&1; then
+  PY=(pixi run python)
+else
+  echo "no python with torch on PATH, and no pixi to reach one." >&2
+  echo "Set PYTHON_CMD to the interpreter to use." >&2
+  exit 1
+fi
 
 # ---- the corrected configuration -------------------------------------------
 CELL=${CELL:-34.196,45.558,99.044,90.00,90.00,90.00}
@@ -76,7 +96,7 @@ done
 if [ -n "${LUNUS_TORCH_DEVICE:-}" ]; then
   DEVICE=${LUNUS_TORCH_DEVICE}
 else
-  DEVICE=$(python - <<'EOF'
+  DEVICE=$("${PY[@]}" - <<'EOF'
 import torch
 print("cuda" if torch.cuda.is_available()
       else "mps" if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available()
@@ -85,7 +105,7 @@ EOF
 )
 fi
 
-GRID=$(python - "$CELL" "$D_MIN" <<'EOF'
+GRID=$("${PY[@]}" - "$CELL" "$D_MIN" <<'EOF'
 import sys
 from lunus.sf.cell_utils import grid_shape_for_resolution
 a, b, c = [float(x) for x in sys.argv[1].split(",")[:3]]
@@ -103,6 +123,7 @@ d_min            ${D_MIN}  ->  grid ${GRID}
 expand_symmetry  ${EXPAND}
 trajectory       $(basename "${TRAJ}"), frames 0..${LAST}
 device           ${DEVICE}
+interpreter      ${PY[*]}
 OMP_NUM_THREADS  ${OMP_NUM_THREADS}
 logs             ${LOGDIR}
 MSG
@@ -112,13 +133,13 @@ step() { echo; echo "=== $* ==="; }
 
 # ---- 1. the splat, which is most of the frame -------------------------------
 step "1/4  splat benchmark  -> replaces the CPU / MPS / CUDA tables"
-python "${HERE}/bench_splat.py" "${TOP}" \
+"${PY[@]}" "${HERE}/bench_splat.py" "${TOP}" \
     --cell "${CELL}" --grid "${GRID}" --device "${DEVICE}" --no-gemmi \
     2>&1 | tee "${LOGDIR}/1-bench_splat.log"
 
 # ---- 2. where the frame goes ------------------------------------------------
 step "2/4  frame budget  -> replaces 'Where the time actually goes'"
-python "${SF_DIR}/xtraj.py" \
+"${PY[@]}" "${SF_DIR}/xtraj.py" \
     top="${TOP}" use_top_bfacs=True traj="${TRAJ}" first=0 last="${LAST}" \
     d_min="${D_MIN}" unit_cell="${CELL}" space_group="${SPACE_GROUP}" \
     expand_symmetry="${EXPAND}" engine=torch torch_compile=False \
@@ -133,7 +154,7 @@ python "${SF_DIR}/xtraj.py" \
 # NOT have moved -- both engines fold identically, whatever cell they are given.
 step "3/4  engine parity  -> replaces the gemmi-vs-torch correlation / R"
 for eng in gemmi torch; do
-  python "${SF_DIR}/xtraj.py" \
+  "${PY[@]}" "${SF_DIR}/xtraj.py" \
       top="${TOP}" use_top_bfacs=True traj="${TRAJ}" first=0 last="${LAST}" \
       d_min="${D_MIN}" unit_cell="${CELL}" space_group="${SPACE_GROUP}" \
       expand_symmetry="${EXPAND}" engine="${eng}" gemmi_cutoff=0.01 \
@@ -143,13 +164,13 @@ for eng in gemmi torch; do
       > "${LOGDIR}/3-engine_${eng}.log" 2>&1
   echo "  ${eng} done"
 done
-python "${HERE}/compare_icalc_mtz.py" \
+"${PY[@]}" "${HERE}/compare_icalc_mtz.py" \
     "${LOGDIR}/icalc_gemmi.mtz" "${LOGDIR}/icalc_torch.mtz" \
     2>&1 | tee "${LOGDIR}/3-parity.log"
 
 # ---- 4. what bulk solvent costs ---------------------------------------------
 step "4/4  solvent cost  -> replaces 'At production scale'"
-python "${HERE}/bench_solvent.py" "${TOP}" \
+"${PY[@]}" "${HERE}/bench_solvent.py" "${TOP}" \
     --cell "${CELL}" --space-group "${SPACE_GROUP}" --grid "${GRID}" \
     --device "${DEVICE}" --selection peptide \
     2>&1 | tee "${LOGDIR}/4-bench_solvent.log"
