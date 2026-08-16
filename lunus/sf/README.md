@@ -129,6 +129,7 @@ torch/cctbx/gemmi/mpi4py, so a partial environment skips rather than errors.
 |---|---|
 | `tools/bench_splat.py` | splat benchmark, gemmi vs torch, CPU/MPS/CUDA. The thing to re-run rather than trusting docs/performance.md. |
 | `tools/compare_icalc_mtz.py` | two Icalc MTZs → correlation and R-factor, overall and by resolution shell. |
+| `tools/fit_solvent_rfactor.py` | fits `k_sol`/`b_sol`/overall scale against deposited amplitudes and reports R and R-free by shell, with and without solvent. The bulk-solvent model's only test against measurements; `--reference` prints what mmtbx reaches on the same model, which is the number to judge it by. See docs/solvent-design.md. |
 | `tools/compare_density.py` | two real-space density grids (needs `save_density=True`). |
 | `tools/make_random_bfacs.py` | writes a PDB with a random B per residue, for exercising the per-atom-B path. Seeded. |
 | `tools/analyze_trace.py` | a `torch.profiler` Chrome trace (from `torch_profile_frames=N`) → GPU busy vs idle, the gap size distribution, what each large gap was blocked in, and a test for cgroup CPU-throttling. Standard library only. |
@@ -188,6 +189,14 @@ repo so those numbers stay reproducible. Both `iotbx.pdb` and `mdtraj` read
 - **Wire up a real loss** against experimental diffuse data; `example_usage.py`
   currently has a placeholder.
 - **Anisotropic ADPs** — the anisotropic case needs a different,
-  tensor-valued kernel, derived the same way as the isotropic one.
+  tensor-valued kernel, derived the same way as the isotropic one. Measured
+  cost: on 7FPV at 1.04 Å it is worth 0.049 in R (0.130 → 0.179), and it is the
+  single largest error in the pipeline's agreement with experimental data.
+- **`mask_blur` on `SolventModel`** — smoothing the density before thresholding,
+  the threshold mask's stand-in for a geometric mask's probe radius. Without it
+  the fitted solvent scales come out unphysical on real data; with it they land
+  on the conventional values. Currently only `--mask-blur` in
+  `tools/fit_solvent_rfactor.py`. See docs/solvent-design.md, "What the
+  R-factor found".
 - **A grid-refinement convergence check** in `test_per_atom_b.py`; see
   docs/design.md.

@@ -6,10 +6,14 @@ points in `structure_factor_torch.py`, `tests/test_solvent.py`, gemmi parity in
 `tools/study_diffuse_solvent.py` (findings in the two sections named "What the
 ... test found" below). Symmetry coverage is in
 `tests/test_solvent_symmetry.py`, the degenerate-mask check is wired into
-`SolventModel`, and float32 is measured (below). Still to do: the scaling fit
-and shell-resolved R against experimental amplitudes, per-configuration
-occupancies (see the API gap below), a numerical test of `u_aniso`, and a run
-at production scale for cost.
+`SolventModel`, and float32 is measured (below). The scaling fit and
+shell-resolved R against experimental amplitudes are done —
+`tools/fit_solvent_rfactor.py`, findings under "What the R-factor found", and
+they carry an unimplemented recommendation (`mask_blur`) that the shipped model
+does not yet have. Still to do: per-configuration occupancies (see the API gap
+below), a numerical test of `u_aniso` inside the test suite rather than only in
+the validation tool, and the diffuse convergence study re-run against a
+smoothed mask.
 
 Written 2026-08-15, revised the same day against the current code — the API
 assumptions below were checked, the cost estimate was replaced with a
@@ -408,10 +412,12 @@ comparable.
 
 - ~~**Parity against gemmi's solvent masking**~~ **done** —
   `tests/test_solvent_gemmi.py`. See "What the parity test found" below.
-- **R-factor against experimental amplitudes** for a structure with a known
-  refined R. Bulk solvent mostly affects low resolution, so a shell-resolved
-  comparison below ~5 Å is where a wrong model shows up.
-  `tools/compare_icalc_mtz.py` already reports by shell.
+- ~~**R-factor against experimental amplitudes**~~ **done** —
+  `tools/fit_solvent_rfactor.py`. See **"What the R-factor found"** below: it
+  passes, but only after a change to how the mask is built, and it overturns
+  the parity test's conclusion about how close the threshold mask is to a
+  geometric one. Bulk solvent mostly affects low resolution, so a
+  shell-resolved comparison below ~5 Å is where a wrong model shows up.
 
   **The data is now in the tree**: `examples/compare_gemmi/7FPV-sf.cif`, the
   deposited structure factors for the crystal `7FPV.pdb` describes, with
@@ -432,13 +438,27 @@ comparable.
   The observations are **intensities, not amplitudes** — anomalous pairs with
   sigmas — so they need merging and a French-Wilson conversion, or the
   comparison should be done in intensities against `|F_calc|²`. French-Wilson
-  rejects 218 reflections and is chatty; pass `log=None`.
+  rejects 218 reflections and is chatty; `log=None` does **not** silence it,
+  so redirect stdout if the output matters.
 
-  **The target**: 7FPV was refined to **R = 0.126, R-free = 0.145** at 1.04 Å
-  (REMARK 3 of the PDB entry), with a 5.0% free set — which is the same free
-  set as the flags in the cif, so the comparison is like-for-like.
+  **The R-free flags are not boolean.** They are CCP4-convention bins 0–19 and
+  the test set is bin 0 — the 3,716 above, 5.0%, matching the 5.010% in
+  REMARK 3. Treating the column as a boolean silently puts 95% of the data in
+  the test set, and the resulting R-free looks plausible.
 
-  Do not expect to reproduce those. They come from a refined model with
+  **The nominal target**: 7FPV was refined to **R = 0.126, R-free = 0.145** at
+  1.04 Å (REMARK 3 of the PDB entry), with a 5.0% free set — which is the same
+  free set as the flags in the cif, so the comparison is like-for-like.
+
+  **The real target is 0.179 / 0.194**, and it had to be measured rather than
+  assumed — see "What the R-factor found". Running mmtbx's own bulk solvent and
+  scaling on the deposited model reproduces 0.130 / 0.151; running it on the
+  same model converted to **isotropic** ADPs, which is all `lunus.sf` can
+  represent, gives 0.179 / 0.194. That 0.049 gap is the missing anisotropic
+  kernel and nothing to do with solvent, so it is the floor this harness works
+  against.
+
+  Do not expect to reproduce the deposited numbers. They come from a refined model with
   refined individual B-factors, anisotropic scaling and an optimised solvent;
   the goal here is far weaker and still worth having: **R should fall
   substantially when the solvent term is switched on**, most of it below 5 Å,
@@ -484,6 +504,138 @@ comparable.
   waters** as the second axis (the width having turned out to be the weak one).
   If the diffuse does not change smoothly in it, the cutoff is sitting inside
   the hydration shell rather than outside it.
+
+## What the R-factor found
+
+`tools/fit_solvent_rfactor.py`, on 7FPV: 74,301 amplitudes over 41.4–1.04 Å,
+3,716 free, against the deposited coordinates as one asymmetric unit
+(`expand_symmetry=True`, `density_scale=1`, deposited occupancies, isotropic
+equivalents of the ADPs), grid 100 × 144 × 288, cutoff calibrated to gemmi's
+Refmac mask occupancy of 0.2982.
+
+**It passes — but only with a change to how the mask is built, and the reason
+is the substantive finding.**
+
+| mask | k_sol | b_sol | R-work | R-free |
+|---|---|---|---|---|
+| threshold, as shipped | 0.554 | 199 | 0.1983 | 0.2085 |
+| threshold, density blurred first (B = 100 Å²) | 0.388 | 48.9 | 0.1894 | 0.2056 |
+| …and anisotropic overall scale | 0.388 | 49.1 | **0.1810** | **0.1947** |
+| gemmi's geometric mask, through the identical fit | 0.386 | 40.0 | 0.1874 | 0.1996 |
+| *mmtbx on the same isotropic model (the target)* | *0.340* | *13.3* | *0.1789* | *0.1936* |
+| conventional values | 0.35 | 46 | — | — |
+
+Read the first row against the last two. As shipped, the threshold mask fits
+`k_sol = 0.554` and `b_sol = 199` — half again the conventional solvent density
+and a B four times too large. That is the "somewhere unphysical" this criterion
+was written to catch, and nothing inside the pipeline can see it.
+
+Worth being precise about `b_sol = 199`, because the obvious dismissal is that
+the scan hit its boundary: it does not. The scan runs to 400 and the subsequent
+LBFGS moves the value freely; 199 is a genuine optimum, which makes it a
+statement about the mask rather than an artifact of the search.
+
+**The fit machinery is not what is wrong.** Handed gemmi's geometric mask and
+changed in no other way, the same code returns `k_sol = 0.386, b_sol = 40.0` —
+the conventional values, and close to what mmtbx independently fits on this
+data (0.38 / 27 on the deposited model). So the fit recovers the right answer
+when the mask is right, which is what makes the first row attributable to the
+mask.
+
+### A density threshold has no probe radius, and at 1 Å it shows
+
+Compared voxel for voxel against gemmi's mask **at matched occupancy**:
+
+| | ours vs gemmi Refmac |
+|---|---|
+| binarised voxel agreement | **0.864** |
+| `\|F_mask\|` ratio, d > 2 Å | 1.0–1.2 |
+| `\|F_mask\|` ratio, d < 2 Å | **~1.5** |
+| `\|F_mask\|` correlation, d < 2 Å | **0.02–0.10** |
+
+The threshold mask carries about half again as much high-resolution amplitude
+as the geometric one, and that excess is *uncorrelated* with it — it is
+structure, but not the geometric mask's structure. The cause is
+straightforward: a geometric mask is built from vdW radius **+ probe** and then
+**shrunk**, and those two steps exist precisely to smooth the boundary and
+close the crevices between neighbouring atoms. A density threshold has no
+equivalent and follows every one of them. The fit responds by driving `b_sol`
+to 199, which is the model doing the only thing it can to suppress content it
+cannot use.
+
+**Smoothing the density before thresholding is the missing step**, and it is
+one FFT pair on a periodic grid, exact and differentiable. Sweeping it:
+
+| blur B (Å²) | σ (Å) | k_sol | b_sol | R-work | voxel agreement | `\|F_mask\|`/gemmi, d < 2 Å |
+|---|---|---|---|---|---|---|
+| 0 | 0 | 0.554 | 199 | 0.1983 | 0.864 | 1.55 |
+| 25 | 0.56 | 0.476 | 116 | 0.1928 | 0.900 | 1.16 |
+| 50 | 0.80 | 0.439 | 79.9 | 0.1907 | 0.921 | 0.92 |
+| **100** | **1.13** | **0.388** | **48.9** | **0.1894** | **0.939** | 0.56 |
+| 200 | 1.59 | 0.366 | 37.2 | 0.1915 | 0.933 | 0.27 |
+
+Everything moves monotonically toward the geometric-mask answer and R-work
+turns over near B = 100 Å². That σ is **1.13 Å**, which is the size of a water
+probe — the parameter arrives at the right physical value without being told
+what it is, which is the strongest evidence here that the diagnosis is right
+rather than merely a fitted improvement.
+
+R-free bottoms out earlier, at B ≈ 50 (0.2042 against 0.2056 at B = 100), so
+**B = 50–100 Å²** is the defensible range and the difference between them is
+not resolved by this one structure.
+
+### Where the improvement falls, which is the other half of the criterion
+
+Solvent contribution is `|k_sol·exp(−b_sol·s²/4)·F_mask| / |F_protein|`:
+
+| d (Å) | n | R-work no/with | ΔR-work | solvent term |
+|---|---|---|---|---|
+| 41.4 – 8 | 195 | 0.7287 / 0.2959 | −0.4328 | 177% |
+| 8 – 5 | 548 | 0.2921 / 0.1938 | −0.0984 | 60% |
+| 5 – 4 | 674 | 0.2331 / 0.1375 | −0.0956 | 17% |
+| 4 – 3 | 1,805 | 0.2370 / 0.1590 | −0.0780 | 9.5% |
+| 3 – 2 | 7,245 | 0.1787 / 0.1595 | −0.0192 | 3.0% |
+
+The improvement tracks the size of the solvent term over nearly two orders of
+magnitude, which is what says the term is doing solvent's job rather than
+absorbing some other error. (The 177% is an amplitude ratio and legitimately
+exceeds 100%: at very low resolution the solvent term is larger than
+`F_protein` and largely cancels it. That cancellation is the effect the model
+exists to represent, not a runaway scale.)
+
+**A trap in reading the per-shell table.** Equal-count shells over a 1.04 Å
+dataset show the *largest* ΔR in the highest-resolution shells — −0.38 at
+1.04 Å, where the solvent term is 0.0% of `F_protein` and `exp(−b_sol·s²/4)` is
+about 10⁻²¹. Bulk solvent is not working at 1 Å. The no-solvent column is not a
+clean baseline: with no solvent term to absorb the low-resolution deficit, the
+overall B compensates (it refines to −5.0 Å²) and throws off every shell,
+including those solvent never reaches. What the solvent restores there is the
+*scaling*. This is why the tool prints the solvent-contribution column next to
+ΔR, and why the fixed low-resolution bands above are the ones to read.
+
+### What this changes upstream
+
+**The parity test's conclusion does not transfer, and should not be relied on
+for a real structure.** It reports 0.995 voxel agreement and `|F_mask|`
+correlating at 0.9998, which reads as "the mask model barely matters". Both
+numbers were measured on 200 clustered carbons in a 30 Å cell and, for the
+transform, over low-resolution reflections only. The same comparison on a real
+crystal at 1.04 Å gives **0.864** and a correlation of **0.02** beyond 2 Å. The
+earlier numbers are not wrong; they are a sparse fixture at low resolution, and
+the discrepancy is the same "sparse model has genuine vacuum, a real one has
+only overlapping tails" effect that already overturned the fixed-fraction
+cutoff recommendation. Two conclusions from that fixture have now been reversed
+by a real structure, which is worth treating as a pattern rather than as two
+accidents.
+
+**Recommended, not yet implemented:** a `mask_blur` on `SolventModel`, defaulting
+to something in the 50–100 Å² range, applied to the density before
+`solvent_mask`. Today it exists only as `--mask-blur` in the validation tool,
+so the shipped model is still the first row of the table above. Doing it
+properly means deciding whether the blur is a fixed hyperparameter or scales
+with the grid, and re-running the diffuse study — a smoother mask is exactly
+what that study wanted for a different reason, so the two should be settled
+together rather than separately.
 
 ## What the parity test found
 
