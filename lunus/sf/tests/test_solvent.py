@@ -775,3 +775,54 @@ def test_mask_blur_is_a_length_and_so_survives_a_change_of_grid():
     drift_blurred = abs(occupancy((24, 24, 24), 100.0, cutoff)
                         - occupancy((36, 36, 36), 100.0, cutoff))
     assert drift_blurred < drift_bare + 0.02
+
+
+def test_mask_blur_undershoot_is_bounded_and_vanishes_with_the_grid():
+    """The blur must not ring, and the honest statement of that is a bound.
+
+    A Gaussian multiplier has a positive kernel, so it would be exactly
+    non-negative if the DFT ran over all frequencies. It stops at Nyquist, so
+    what is left of the Gaussian at the grid edge comes back as a small
+    undershoot -- vanishing as the grid resolves sigma, which is the signature
+    that identifies it as truncation rather than something structural.
+
+    This matters because the failure would be silent and serious rather than
+    obvious: negative density falls below ANY cutoff, so a ringing lobe is a
+    spurious solvent pocket INSIDE the protein while the occupancy still looks
+    reasonable. The contrast case is asserted too, so the test cannot quietly
+    go vacuous if someone swaps the Gaussian for a low-pass.
+    """
+    from lunus.sf.solvent_torch import blur_density, grid_inv_d2
+
+    sys = _system(n_atoms=40, seed=7)
+    rho = _density(sys)
+    assert float(rho.min()) >= 0.0          # splat_density's own guarantee
+
+    # This fixture is 24^3 on a ~22 A cell: 0.9 A voxels, which barely resolve
+    # a 1.13 A sigma, so it sits at the WORST end of the table below.
+    blurred = blur_density(rho, sys["orth"], 100.0)
+    assert -1e-3 < float(blurred.min()) / float(blurred.max()) <= 0.0 + 1e-6
+
+    # Refine the grid and it goes away. Measured: -2.9e-3 at 1.25 A voxels,
+    # -1.9e-5 at 0.83, -3.9e-9 at 0.62, and positive (roundoff) beyond.
+    M_np = orth_matrix(*CELL)
+    orth = torch.tensor(M_np, dtype=DTYPE)
+    idx = torch.zeros(40, dtype=torch.long)
+    rng = np.random.default_rng(7)
+    frac = torch.tensor(rng.random((40, 3)), dtype=DTYPE)
+    fine = (64, 64, 64)
+    A, lam, offsets, radius, taper_w, _ = build_element_kernels_torch(
+        ["C"], IT92_COEFFS, 20.0, 0.0, fine, M_np, cutoff=0.01,
+        device="cpu", dtype=DTYPE)
+    rho_fine = splat_density(frac, idx, torch.ones(40, dtype=DTYPE),
+                             A[idx], lam[idx], offsets, radius[idx], fine,
+                             orth, taper_w, compile_core=False)
+    fine_blurred = blur_density(rho_fine, orth, 100.0)
+    assert abs(float(fine_blurred.min()) / float(fine_blurred.max())) < 1e-6
+
+    # A truncated filter, which is what the docstring warns against: this rings
+    # by percents of peak, not by parts per million.
+    s2 = grid_inv_d2(rho.shape, sys["orth"])
+    hard = torch.fft.ifftn(
+        torch.fft.fftn(rho) * (s2 <= (1 / 3.0) ** 2).to(rho.dtype)).real
+    assert float(hard.min()) / float(hard.max()) < -0.05

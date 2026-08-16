@@ -127,6 +127,35 @@ def blur_density(density, orth_matrix, blur_b, inv_d2_grid=None):
     remove. It is differentiable, though the default detach_mask means it does
     not normally carry gradients.
 
+    IT MUST BE A GAUSSIAN, NOT A LOW-PASS, and that is not a matter of taste.
+    Truncate the filter and it RINGS: a hard low-pass at 3 A gives a minimum of
+    -0.65 on 7FPV, -24% of peak, over 22% of voxels. That would not be a
+    cosmetic defect, because negative density sits below ANY cutoff -- every
+    ringing lobe becomes a spurious solvent pocket in the middle of the
+    protein, while the mask's occupancy still looks entirely reasonable.
+
+    A Gaussian avoids that, but the guarantee is asymptotic rather than exact,
+    and the difference is worth stating because the obvious argument overshoots.
+    The multiplier's inverse transform is a positive kernel, so a non-negative
+    density -- which splat_density's output is by construction -- would stay
+    non-negative if the DFT summed over ALL frequencies. It does not: it stops
+    at Nyquist, and discarding that tail is a truncation, in miniature. So the
+    undershoot is bounded by how much Gaussian is left at the grid edge, and it
+    disappears once the grid resolves sigma. Measured, same 40-atom model:
+
+        voxel 1.25 A   min/peak  -2.9e-03      (sigma barely sampled)
+        voxel 0.83 A             -1.9e-05
+        voxel 0.62 A             -3.9e-09
+        voxel 0.42 A             +1.3e-08      (roundoff; sign is now positive)
+
+    In practice this never matters: sigma = 1.13 A needs voxels below ~0.6 A to
+    be resolved, grid_shape_for_resolution gives d_min/3, and so any d_min
+    finer than ~1.8 A is already there -- 7FPV at 1.04 A has 0.34 A voxels and a
+    blurred minimum of +2.7e-6, positive in float32 and float64 alike. On a
+    deliberately coarse grid the ripples are still ~2 orders of magnitude below
+    a cutoff sitting at ~20% of peak. tests/test_solvent.py pins both the bound
+    and its grid dependence.
+
     Pass inv_d2_grid to reuse a cached frequency grid; it depends only on the
     grid shape and the cell, so recomputing it per configuration is pure waste.
     """
