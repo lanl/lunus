@@ -413,6 +413,46 @@ comparable.
   comparison below ~5 Å is where a wrong model shows up.
   `tools/compare_icalc_mtz.py` already reports by shell.
 
+  **The data is now in the tree**: `examples/compare_gemmi/7FPV-sf.cif`, the
+  deposited structure factors for the crystal `7FPV.pdb` describes, with
+  `7FPV_map_coeffs.mtz` alongside (map coefficients, derived — the R-factor
+  work does not need it).
+
+  What it holds, and the reading path, verified:
+
+  ```python
+  from iotbx.reflection_file_reader import any_reflection_file
+  arrays = any_reflection_file(file_name="7FPV-sf.cif").as_miller_arrays()
+  I    = [a for a in arrays if a.is_xray_intensity_array()][0]   # 142,372, anomalous
+  free = [a for a in arrays if "r_free_flag" in a.info().label_string()][0]
+  F    = I.merge_equivalents().array().average_bijvoet_mates().french_wilson()
+  # -> 74,301 amplitudes, 1.04-41.4 A, with 3,716 free reflections (5.0%)
+  ```
+
+  The observations are **intensities, not amplitudes** — anomalous pairs with
+  sigmas — so they need merging and a French-Wilson conversion, or the
+  comparison should be done in intensities against `|F_calc|²`. French-Wilson
+  rejects 218 reflections and is chatty; pass `log=None`.
+
+  **The target**: 7FPV was refined to **R = 0.126, R-free = 0.145** at 1.04 Å
+  (REMARK 3 of the PDB entry), with a 5.0% free set — which is the same free
+  set as the flags in the cif, so the comparison is like-for-like.
+
+  Do not expect to reproduce those. They come from a refined model with
+  refined individual B-factors, anisotropic scaling and an optimised solvent;
+  the goal here is far weaker and still worth having: **R should fall
+  substantially when the solvent term is switched on**, most of it below 5 Å,
+  and the fitted `k_sol`/`b_sol` should land near the conventional 0.35 / 46
+  rather than somewhere unphysical. If they do not, the mask model is wrong in
+  a way none of the internal checks can see.
+
+  Two gotchas specific to this pipeline. `density_scale` must be 1 for a
+  single-cell model like `7FPV.pdb` and the fold factor for anything folded
+  from a supercell — getting it wrong changes `k_sol`'s meaning by that
+  factor. And `expand_symmetry=True` is correct here, because `7FPV.pdb` is one
+  asymmetric unit and the other three copies genuinely need generating; that is
+  the opposite of the trajectory's setting.
+
   **This criterion conflicts with shipping fixed scales.** A published refined R
   comes from refined `k_sol`, `b_sol`, `k_overall` *and* anisotropic scaling.
   With those pinned at 0.35 / 46 / 1 and `u_aniso=None` it will not be

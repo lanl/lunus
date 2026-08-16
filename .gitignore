@@ -30,6 +30,11 @@ lunus/sf/examples/compare_gemmi/*.pdb
 # is an INPUT: run_xtraj.sh takes its cell and space group from here.
 !lunus/sf/examples/compare_gemmi/7FPV.pdb
 lunus/sf/examples/compare_gemmi/*.mtz
+# ...except 7FPV's experimental data, which are INPUTS for the bulk-solvent
+# validation. 7FPV-sf.cif carries the observations (anomalous intensities,
+# sigmas and R-free flags); the .mtz carries map coefficients derived from
+# them, which the cif also has as pdbx_FWT/PHWT.
+!lunus/sf/examples/compare_gemmi/7FPV_map_coeffs.mtz
 lunus/sf/examples/compare_gemmi/*.hkl
 lunus/sf/examples/compare_gemmi/*.npy
 lunus/sf/examples/compare_gemmi/*.ndx
