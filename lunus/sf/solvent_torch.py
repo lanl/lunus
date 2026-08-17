@@ -382,10 +382,19 @@ class SolventModel:
                     the unsmoothed threshold and does NOT reproduce
                     conventional solvent scales on real data.
       detach_mask   build the mask from a detached copy of the density
-                    (default True). Keeps the solvent envelope out of the
-                    gradient of every parameter the density depends on --
-                    in particular B, once B is differentiable. See the module
-                    docstring.
+                    (default FALSE). False is the consistent choice: the
+                    forward pass rebuilds the mask from the current density
+                    every call, so a backward pass that treats it as constant
+                    is the gradient of a DIFFERENT model. Measured on 7FPV,
+                    coordinate refinement against a known target reaches 4.8x
+                    lower loss with the mask live. See "What detaching the mask
+                    costs" in docs/solvent-design.md.
+
+                    True is not merely worse -- it is the correct gradient of
+                    the model where the mask is HELD FIXED, which is what
+                    Phenix and REFMAC do per macro-cycle. That model is the
+                    better long-term design and is not implementable here yet,
+                    because nothing can pin a mask across calls.
       check_occupancy
                     measure the mask ONCE, on the first configuration, and
                     warn if it is degenerate (default True). The check costs
@@ -404,7 +413,7 @@ class SolventModel:
 
     def __init__(self, cutoff, taper_width, k_sol=K_SOL_DEFAULT,
                  b_sol=B_SOL_DEFAULT, k_overall=1.0, u_aniso=None,
-                 detach_mask=True, check_occupancy=True, density_scale=1.0,
+                 detach_mask=False, check_occupancy=True, density_scale=1.0,
                  mask_blur=MASK_BLUR_DEFAULT):
         if taper_width <= 0:
             raise ValueError(

@@ -11,10 +11,11 @@ shell-resolved R against experimental amplitudes are done —
 `tools/fit_solvent_rfactor.py`, findings under "What the R-factor found". The
 recommendation they produced, `mask_blur`, is now implemented and on by
 default, and per-configuration occupancies are implemented and differentiable
-(see "Per-configuration occupancies" below, including what their gradient
-leaves out). Still to do: a numerical test of `u_aniso` inside the test suite
-rather than only in the validation tool, and splitting `detach_mask` so the
-mask can see occupancy without seeing B. The diffuse convergence study has been re-run against the
+(see "Per-configuration occupancies" below). `detach_mask` now defaults to
+False, measured in "What detaching the mask costs". Still to do: a numerical
+test of `u_aniso` inside the test suite rather than only in the validation
+tool, and a FROZEN-mask mode, which subsumes the per-quantity detachment this
+note used to ask for. The diffuse convergence study has been re-run against the
 smoothed mask and its recommendation changed ("What the diffuse study found"),
 and `mask_blur`'s cost is now measured on CUDA ("At production scale") — it is
 cheap in time and costs ~1.5x peak device memory.
@@ -803,6 +804,85 @@ dimension. It returns **0** whenever the model's own B already clears it —
 which is the case for the published compare_gemmi configuration and for 7FPV at
 `d_min` 1.04, so nothing already measured moves. `xtraj.py`'s torch engine
 takes `torch_blur=auto` (default), a number, or 0.
+
+## What detaching the mask costs, and why freezing it is the better answer
+
+`detach_mask` cuts the autograd edge from the mask back to the density. It
+changes no forward value — `detach()` is an identity on data — so it can only
+change what `backward()` returns.
+
+**The default is now `False`.** The forward pass rebuilds the mask from the
+current density on every call, so a backward pass that treats it as constant is
+the gradient of a *different model* than the one being evaluated. Measured on
+7FPV, 3,341 atoms, 11,011 reflections to 2.0 Å, coordinates displaced 0.296 Å
+and refined against a known target with Adam (learning rate swept for each, so
+neither is penalised for gradient magnitude):
+
+| | best loss / start | mean displacement |
+|---|---|---|
+| `detach_mask=True` | 0.00787 | 0.265 Å |
+| `detach_mask=False` | **0.00163** | **0.213 Å** |
+
+4.8× lower loss, and 2.5× more of the displacement recovered. The live gradient
+costs ~25% more per step, since the mask FFT joins the backward graph.
+
+**A synthetic fixture got this badly wrong, and the way it did is the useful
+part.** On 100 random carbons in a 25 Å cell the same measurement gives
+`cos(detached, live) = −0.5`, and refinement *diverges* with the detached
+gradient — the loss ends 169× worse. On 7FPV the cosine is **+0.77** and both
+settings converge. The mechanism: a sparse model's calibrated cutoff sits far
+down the density tail, so the taper shell is thin, and `∂mask/∂ρ ∝ 1/w`
+amplifies the solvent term until it dominates and reverses the sign. A packed
+crystal never enters that regime. This is the fifth conclusion in this note
+that a sparse fixture got wrong — see also the fixed-fraction cutoff, the
+parity voxel agreement, `mask_blur`'s benefit, and the saturated-mask gradient
+test.
+
+### Why the long-term answer is a frozen mask, not a live one
+
+`detach_mask=True` is not simply a worse gradient. It is the *correct* gradient
+of the model in which the mask is **held fixed** — which is what Phenix and
+REFMAC actually do, recomputing the mask once per macro-cycle and holding it
+constant while gradients flow. Today's pipeline implements neither cleanly: it
+has the forward of the live model and the backward of the frozen one. Both
+alternatives are coherent; freezing is the better one, for four reasons.
+
+**It removes the worst-conditioned term from the gradient.**
+`∂mask/∂ρ = (π/2w)·sin(πx)` is nonzero *only* inside the taper shell, so the
+gradient is carried by a thin set of voxels whose membership changes discretely
+as atoms move. That makes `∂F/∂x` depend partly on grid alignment rather than
+on the structure — Constraint 1's argument, and the same discretization
+sensitivity the diffuse study measured. Freezing keeps the mask in the forward
+model and takes it out of the derivative.
+
+**It generalises to B, where per-quantity detachment is only a patch.** With
+B differentiable, a live mask grows into the protein as B rises — backwards,
+since the envelope is a property of the molecular boundary, not of thermal
+motion (Constraint 3). A frozen mask gives `∂mask/∂B = 0` *by construction*,
+which is exactly geometric-mask semantics, with no need to detach quantities
+selectively.
+
+**It is cheaper where cost actually binds.** A pinned mask is not rebuilt each
+step: no taper evaluation, no `mask_blur` FFT pair, and no mask transform in
+the backward graph. On CUDA that is ~0.4 ms and, more importantly, the +113 MB
+of peak memory the blur costs — amortised over a whole macro-cycle instead of
+paid per step, against a constraint the ensemble path is already bounded by.
+
+**It makes the inner problem consistent.** Within a macro-cycle, forward and
+backward agree on one fixed mask, so the optimizer descends a genuine
+objective; the mask update becomes an outer fixed-point iteration. That is a
+cleaner object than one non-convex objective with a moving level set inside it.
+
+**One thing freezing must not do: share a mask across ensemble members.** A mask
+held fixed across configurations has zero variance and contributes *exactly
+nothing* to `⟨|F|²⟩ − |⟨F⟩|²`. Freezing is across optimizer steps, per member —
+never across the ensemble. See "The diffuse observable" above.
+
+**Not implemented**, because nothing can pin a mask across calls today:
+`SolventModel` rebuilds it inside `apply()`. It needs a way to compute a mask,
+hold it, use it for both forward and backward, and refresh on demand — at which
+point `detach_mask` stops being a choice between a right and a wrong gradient
+and becomes a choice between two models.
 
 ## What the parity test found
 

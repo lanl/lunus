@@ -192,12 +192,15 @@ repo so those numbers stay reproducible. Both `iotbx.pdb` and `mdtraj` read
   tensor-valued kernel, derived the same way as the isotropic one. Measured
   cost: on 7FPV at 1.04 Å it is worth 0.049 in R (0.130 → 0.179), and it is the
   single largest error in the pipeline's agreement with experimental data.
-- **Split `detach_mask` per quantity.** It is one switch over the whole mask,
-  so it governs coordinates, occupancies and (one day) B together. Its
-  justification is entirely about B, and that reasoning does not transfer to
-  occupancy — refining occupancies wants the mask in the graph, which today
-  also re-enables the coordinate path. Measured cost of getting this wrong is
-  in docs/solvent-design.md.
+- **A frozen-mask mode.** `detach_mask=True` is the correct gradient of a model
+  where the mask is held fixed and refreshed per macro-cycle, which is what
+  Phenix and REFMAC do; nothing can pin a mask across calls here, so the
+  pipeline currently has the forward of the live model and the backward of the
+  frozen one. Freezing is better conditioned (it removes the thin-shell
+  `1/w` term from the derivative), subsumes the per-quantity detachment this
+  used to ask for (`∂mask/∂B = 0` by construction), and is cheaper per step.
+  It must be per ensemble member, never shared — a mask with zero variance
+  contributes nothing to diffuse. See docs/solvent-design.md.
 - **Halve `mask_blur`'s cost by reusing the transform `compute_fcalc` already
   computes.** For real input `fftn(d) = N·conj(ifftn(d))`, so the blur's forward
   FFT is recoverable from work already done — one FFT rather than two. Measured
