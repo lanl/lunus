@@ -33,7 +33,9 @@ import subprocess
 import pickle
 import h5py
 import math
-from lunus.sf.aniso import subtract_isotropic
+# lunus.sf imports are deferred to the point of use throughout this file, so
+# that running it as a script works without the repository root on sys.path
+# until something actually needs a sibling module. See to_aniso().
 import gemmi
 
 def mpi_enabled():
@@ -154,6 +156,8 @@ def to_aniso(miller_array, apply_symmetry_str="P1", mask_value=np.nan):
     # is genuinely cctbx-shaped: unpacking the miller_array above, and the Laue
     # merge below. Behaviour is unchanged, bit for bit; tests/test_aniso.py
     # pins that against a copy of the original loop.
+    from lunus.sf.aniso import subtract_isotropic
+
     data_np = subtract_isotropic(data_np, d_star_np, shell_thickness,
                                  mask_value=mask_value)
 
