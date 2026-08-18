@@ -75,6 +75,11 @@ _EXPORTS = {
     "structure_factors_one_config": "structure_factor_torch",
     "structure_factors_batch": "structure_factor_torch",
     "mean_and_diffuse": "structure_factor_torch",
+    # anisotropic component (isotropic-background removal)
+    "shell_bins": "aniso",
+    "spline_basis": "aniso",
+    "subtract_isotropic": "aniso",
+    "IsotropicBackground": "aniso_torch",
     # bulk solvent
     "SolventModel": "solvent_torch",
     "SolventMaskWarning": "solvent_torch",

@@ -33,7 +33,7 @@ import subprocess
 import pickle
 import h5py
 import math
-from scipy.interpolate import CubicSpline
+from lunus.sf.aniso import subtract_isotropic
 import gemmi
 
 def mpi_enabled():
@@ -143,65 +143,20 @@ def to_aniso(miller_array, apply_symmetry_str="P1", mask_value=np.nan):
 
     # Convert to numpy for vectorized binning
     d_star_np = d_star_flex.as_numpy_array()
-    
+
     # Use .copy() to ensure we don't accidentally mutate the bound C++ memory block
     data_np = miller_array.data().as_numpy_array().copy()
 
-    # 1. Normalize the distances against the shell thickness (rscale equivalent)
-    normalized_d_star = d_star_np / shell_thickness
+    # The shell binning, spline fit and subtraction now live in sf/aniso.py,
+    # which needs no crystallography library and so can be shared with callers
+    # that have no cctbx -- sampleworks scores the anisotropic component as a
+    # guidance target through the same code. What stays here is the part that
+    # is genuinely cctbx-shaped: unpacking the miller_array above, and the Laue
+    # merge below. Behaviour is unchanged, bit for bit; tests/test_aniso.py
+    # pins that against a copy of the original loop.
+    data_np = subtract_isotropic(data_np, d_star_np, shell_thickness,
+                                 mask_value=mask_value)
 
-    # 2. Replicate the C rounding logic: (size_t)(val + 0.5)
-    bin_indices = np.floor(normalized_d_star + 0.5).astype(int)
-
-    bin_centers = []
-    bin_averages = []
-
-    # Get all unique 'r' values generated
-    unique_r_bins = np.unique(bin_indices)
-
-    # 3. Average the data
-    for r in unique_r_bins:
-        # Find all reflections assigned to this radius 'r'
-        mask = (bin_indices == r)
-        bin_data = data_np[mask]
-
-        # Filter out the mask value (handles both NaN and specific floats)
-        if np.isnan(mask_value):
-            valid_data = bin_data[~np.isnan(bin_data)]
-        else:
-            valid_data = bin_data[bin_data != mask_value]
-
-        # Only process shells that contain valid data
-        if len(valid_data) > 0:
-            mean_val = np.mean(valid_data)
-            
-            # The center of the bin is exactly r * shell_thickness
-            center = r * shell_thickness
-            bin_centers.append(center)
-            bin_averages.append(mean_val)
-
-    if len(bin_centers) < 4:
-        raise ValueError(
-            f"Only found {len(bin_centers)} populated shells. "
-            "A minimum of 4 is required for cubic spline interpolation."
-        )
-
-    # 4. Fit the interpolating function
-    spline = CubicSpline(bin_centers, bin_averages, bc_type='not-a-knot', extrapolate=True)
-
-    # 5. Evaluate the background
-    isotropic_bg_np = spline(d_star_np)
-
-    # 6. Safe Subtraction: Create a boolean mask of valid data points
-    # This prevents the mask_value flag itself from being subtracted from
-    if np.isnan(mask_value):
-        valid_mask = ~np.isnan(data_np)
-    else:
-        valid_mask = (data_np != mask_value)
-
-    # Apply the subtraction exclusively to valid reflections
-    data_np[valid_mask] -= isotropic_bg_np[valid_mask]
-    
     # 7. Convert back to flex and assign
     data_flex = flex.double(data_np)
     miller_array = miller_array.customized_copy(data=data_flex)
