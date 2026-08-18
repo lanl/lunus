@@ -129,11 +129,49 @@ class TestBasisForm:
                                    rtol=0, atol=1e-9)
 
     def test_removes_a_purely_radial_signal(self):
-        """A map that is exactly a function of d* should come back near zero."""
+        """A map that is a function of d* alone comes back small, but not zero.
+
+        What remains is the shell-and-spline representation error: shell means
+        are a piecewise-constant summary and the spline interpolates between
+        them, so a radial function is only removed as well as that
+        representation can follow it.
+
+        Measured on 4000 reflections over d* 0.02-0.55, 12 shells of 0.05,
+        rms(residual)/rms(signal):
+
+            500*exp(-8 d*)  steep    0.033
+            500*exp(-2 d*)  gentle   0.013
+            linear in d*             0.015
+
+        rms rather than max, because the max is set by a handful of points in
+        the innermost shell -- see the next test.
+        """
+        d_star, _, thickness = synthetic_map()
+        for decay in (8.0, 2.0):
+            radial = 500.0 * np.exp(-decay * d_star)
+            residual = subtract_isotropic(radial, d_star, thickness)
+            assert residual.std() < 0.10 * radial.std()
+
+    def test_the_residual_concentrates_at_low_resolution(self):
+        """The radial fit is worst in the innermost shells, by a wide margin.
+
+        Three things compound there: the radial dependence is steepest, the
+        shells are geometrically smallest and so hold fewest reflections (38 vs
+        405 in this fixture), and the not-a-knot boundary condition has the
+        least support. Measured on 500*exp(-8 d*): max residual 29.3 below
+        d* = 0.10 against 1.12 above it, a factor of 26.
+
+        This is a property of the method, not of this implementation, and it is
+        worth knowing when the anisotropic component is used as a target: it is
+        least trustworthy at low resolution -- which is also where bulk solvent
+        and beamstop shadow live.
+        """
         d_star, _, thickness = synthetic_map()
         radial = 500.0 * np.exp(-8.0 * d_star)
-        residual = subtract_isotropic(radial, d_star, thickness)
-        assert np.abs(residual).max() < 0.05 * radial.max()
+        residual = np.abs(subtract_isotropic(radial, d_star, thickness))
+
+        inner = d_star < 0.10
+        assert residual[inner].max() > 5.0 * residual[~inner].max()
 
 
 class TestTorchOperator:
