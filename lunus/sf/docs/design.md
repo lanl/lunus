@@ -59,12 +59,12 @@ as eps shrinks. See `density_torch.py`'s module docstring for the full argument.
 
 ## Assumptions carried over from xtraj.py
 
-- **Isotropic B-factors.** Either one uniform B across the structure (matching
-  `xrs.convert_to_isotropic()` + `xrs.set_b_iso(...)`), or per-atom isotropic B
-  (`use_top_bfacs=True`). **Anisotropic ADPs are not implemented** —
-  the anisotropic case needs a different, tensor-valued kernel, derived the
-  same way as the isotropic one in `kernel.py` but from the anisotropic
-  Debye-Waller factor. A separate piece of work if ever needed.
+- **B-factors.** One uniform B across the structure (matching
+  `xrs.convert_to_isotropic()` + `xrs.set_b_iso(...)`), per-atom isotropic B
+  (`use_top_bfacs=True`), or — since the anisotropic work — per-atom
+  **anisotropic ADPs**, through the tensor-valued kernel derived at the end of
+  `kernel.py`. The anisotropic path is opt-in and isotropic models never touch
+  it; see "Anisotropic ADPs" below.
 - **Only atomic coordinates are differentiated.** B-factor and blur are fixed
   hyperparameters, which is what lets the per-atom kernel/radius/offset setup
   happen once and be reused for every frame. If that changes, the B-dependence
@@ -197,6 +197,57 @@ resolution falling to 0.9099 in the 0.900–0.932 Å shell — which is the
 signature of a real-space truncation difference, and it halves when the taper is
 narrowed. Reproduce with `examples/compare_gemmi/run_xtraj.sh`.
 
-## Known limitation
+## Anisotropic ADPs
 
-Anisotropic ADPs are still not implemented; see "Assumptions" above.
+Implemented: `precalculate_density_aniso[_batch]` in `kernel.py`,
+`build_atom_kernels_aniso_torch`, and `_density_core_aniso` behind
+`splat_density(atom_L6=..., aniso_mask=...)`. The derivation is in `kernel.py`
+and the conventions are pinned in `tests/test_adp_aniso.py`.
+
+**What it is worth**, which is why it was done: on 7FPV against deposited
+amplitudes, `tools/fit_solvent_rfactor.py` reaches **R-work 0.1322, R-free
+0.1528** with anisotropic ADPs against 0.1810 / 0.1947 with their isotropic
+equivalents. mmtbx on the same model and data reaches 0.1298 / 0.1510, so
+this closes a 0.049 gap to 0.0024. It was the largest single error in the
+pipeline's agreement with experimental data.
+
+**What it costs**: 2.37x on the splat for 7FPV as deposited, measured in situ
+by `tools/bench_aniso_splat.py`. Note that is close to the all-anisotropic
+worst case of 2.45x — only 54% of atoms carry ANISOU, but they are the
+expensive ones (every non-hydrogen), **78% of the work** weighted by r³, which
+is what candidate-voxel count scales as. Hydrogens are 46% of the atoms and
+21.6% of the cost, so keeping them on the fast path buys ~0.08x rather than
+halving the penalty. Proportion of atoms is not proportion of cost. A model
+with **no** anisotropic ADPs pays nothing at all: `aniso_mask=None` runs none
+of the code, asserted by `torch.equal` rather than a tolerance.
+
+### Three things that were not obvious, and cost measurements to settle
+
+**The shared eigenvectors are a precompute trick, not a hot-loop one.** All
+five `Λ_i` are diagonal in `U`'s eigenbasis, which suggests rotating the
+displacement into the principal axes once and reducing each Gaussian to a
+three-term sum — fewest flops. That is the slower choice. It materializes
+`(m,K,3)` intermediates where expanding `d·Λ_i·d` per Gaussian keeps everything
+at `(m,K)`, and this core is memory-bound: measured on CUDA, expanded is
+1.65-1.70x the isotropic core eager and the rotation is 2.61-2.70x. What the
+shared eigenvectors actually buy is one eigendecomposition per atom at setup
+instead of five 3x3 inversions.
+
+**Compiling nearly erases the difference and does not change the answer.**
+Compiled, the two forms are 2.81-2.95x and 2.99-3.11x — a ~5% margin where
+eager showed 40%, because inductor fuses away most of the traffic the rotation
+pays for. Expanded still wins, on speed and by 59 MB of peak memory. The
+in-situ figure is 2.37x, so the isolated core did not badly overstate here.
+
+**`u_star` is not `u_cart`.** A PDB stores anisotropic ADPs in the fractional
+reciprocal basis; the kernel measures displacements in Cartesian angstroms.
+They coincide only for a cubic cell with a = 1, so feeding `u_star` straight in
+gives a correct answer on a toy fixture and a wrong one on every real crystal.
+The conversion must also happen **before** `convert_to_isotropic()`, which
+discards it. `tests/test_adp_aniso.py` pins the convention by splatting one
+anisotropic atom and transforming it against the closed form — a check that a
+transposed `U`, eigenvectors as rows, or the wrong basis all fail, and that the
+isotropic-limit and total-charge checks all pass regardless.
+
+**Not yet wired into `xtraj.py`** — the kernel, the splat and the R-factor tool
+support it; the trajectory driver does not.

@@ -87,6 +87,68 @@ def build_element_kernels_torch(
     return elem_A, elem_lam, elem_offsets, elem_radius_ang, taper_width, element_to_index
 
 
+def build_atom_kernels_aniso_torch(
+    elements_per_atom,
+    element_symbols,
+    coeff_table,
+    u_cart_per_atom,            # (n_atoms,3,3), CARTESIAN A^2
+    blur,
+    grid_shape,
+    orth_matrix_np,
+    cutoff=1e-5,
+    taper_width=None,
+    device="cpu",
+    dtype=torch.float32,
+):
+    """
+    build_atom_kernels_torch's anisotropic counterpart.
+
+    Returns (atom_A, atom_L6, elem_offsets, atom_radius_ang, taper_width,
+    element_to_index), with atom_L6 (n_atoms,5,6) where the isotropic builder
+    returns atom_lam (n_atoms,5).
+
+    Everything else is deliberately identical, INCLUDING the offset candidate
+    list, which stays keyed by element and sized by the largest radius among
+    that element's atoms. An anisotropic atom needs a sphere containing its
+    longest semi-axis, which cutoff_radius_aniso_batch already returns, so the
+    existing per-atom prefix machinery handles the wider spread the same way
+    it handles a high-B atom -- no new code path, and small-radius atoms in the
+    same element group still take a short prefix.
+    """
+    from .kernel import build_atom_kernels_aniso
+
+    A_np, L6_np, radius_np = build_atom_kernels_aniso(
+        elements_per_atom, coeff_table, u_cart_per_atom, blur, cutoff)
+
+    elements_per_atom = np.asarray(elements_per_atom)
+    if taper_width is None:
+        taper_width = 0.1
+
+    Nu, Nv, Nw = grid_shape
+    spacing = np.array([np.linalg.norm(orth_matrix_np[:, i]) / n
+                        for i, n in enumerate((Nu, Nv, Nw))])
+
+    radius_vox_list, max_radius = [], []
+    for el in element_symbols:
+        el_mask = elements_per_atom == el
+        r = float(radius_np[el_mask].max()) if el_mask.any() else 0.0
+        radius_vox_list.append(np.ceil(r / spacing).astype(np.int64))
+        max_radius.append(r)
+
+    orth_matrix = torch.tensor(orth_matrix_np, device=device, dtype=dtype)
+    elem_offsets = precompute_element_offsets(
+        torch.tensor(np.stack(radius_vox_list), device=device, dtype=torch.long),
+        torch.tensor(max_radius, device=device, dtype=dtype),
+        orth_matrix, grid_shape, device)
+
+    return (torch.tensor(A_np, device=device, dtype=dtype),
+            torch.tensor(L6_np, device=device, dtype=dtype),
+            elem_offsets,
+            torch.tensor(radius_np, device=device, dtype=dtype),
+            taper_width,
+            {el: i for i, el in enumerate(element_symbols)})
+
+
 def build_atom_kernels_torch(
     elements_per_atom,          # (n_atoms,) list/array of element symbols, one per atom
     element_symbols,            # distinct symbols present, defines elem_offsets index order

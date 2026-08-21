@@ -191,10 +191,11 @@ repo so those numbers stay reproducible. Both `iotbx.pdb` and `mdtraj` read
   data-parallelism over configurations.
 - **Wire up a real loss** against experimental diffuse data; `example_usage.py`
   currently has a placeholder.
-- **Anisotropic ADPs** — the anisotropic case needs a different,
-  tensor-valued kernel, derived the same way as the isotropic one. Measured
-  cost: on 7FPV at 1.04 Å it is worth 0.049 in R (0.130 → 0.179), and it is the
-  single largest error in the pipeline's agreement with experimental data.
+- **Wire anisotropic ADPs into `xtraj.py`.** The kernel, the splat and
+  `tools/fit_solvent_rfactor.py --aniso-adp` support them; the trajectory
+  driver does not yet. The hard part is done: on 7FPV this takes R-work from
+  0.1810 to 0.1322 against a 0.1298 reference, closing what was the pipeline's
+  largest single error, at 2.37x on the splat. See docs/design.md.
 - **A frozen-mask mode.** `detach_mask=True` is the correct gradient of a model
   where the mask is held fixed and refreshed per macro-cycle, which is what
   Phenix and REFMAC do; nothing can pin a mask across calls here, so the

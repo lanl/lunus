@@ -131,24 +131,46 @@ def read_model(path, log=sys.stdout):
     cell."""
     from iotbx.pdb import hierarchy
 
+    from cctbx import adptbx
+
     pdb_in = hierarchy.input(file_name=path, sort_atoms=False)
     xrs = pdb_in.input.xray_structure_simple()
 
-    n_aniso = xrs.use_u_aniso().count(True)
+    # BEFORE convert_to_isotropic, which discards it. u_star is in the
+    # fractional reciprocal basis; the kernel measures displacements in
+    # Cartesian angstroms, and the two coincide only for a cubic cell with
+    # a = 1 -- so this conversion is invisible on a toy and wrong on a crystal.
+    is_aniso = np.array(xrs.use_u_aniso(), dtype=bool)
+    unit_cell = xrs.unit_cell()
+    u_cart = np.zeros((xrs.scatterers().size(), 3, 3))
+    for i, sc in enumerate(xrs.scatterers()):
+        if is_aniso[i]:
+            c = adptbx.u_star_as_u_cart(unit_cell, sc.u_star)
+            u_cart[i] = [[c[0], c[3], c[4]],
+                         [c[3], c[1], c[5]],
+                         [c[4], c[5], c[2]]]
+
+    n_aniso = int(is_aniso.sum())
     xrs.convert_to_isotropic()
 
     elements = [s.scattering_type for s in xrs.scatterers()]
     b_per_atom = np.array(xrs.extract_u_iso_or_u_equiv()) * (8.0 * np.pi ** 2)
     occ = np.array(xrs.scatterers().extract_occupancies())
     frac = np.array(xrs.sites_frac()).reshape(-1, 3)
+    # Isotropic scatterers get u_iso * I, which the anisotropic kernel
+    # reproduces exactly -- but is_aniso keeps them on the fast path.
+    u_cart[~is_aniso] = (np.array(xrs.extract_u_iso_or_u_equiv())[~is_aniso]
+                         [:, None, None] * np.eye(3))
+
     print("%s: %d atoms, B %.1f-%.1f, occupancy %.2f-%.2f, %d with ANISOU"
           % (path, len(elements), b_per_atom.min(), b_per_atom.max(),
              occ.min(), occ.max(), n_aniso), file=log)
-    return xrs, elements, b_per_atom, occ, frac, n_aniso
+    return xrs, elements, b_per_atom, occ, frac, n_aniso, u_cart, is_aniso
 
 
 def build_density(xrs, elements, b_per_atom, occ, frac, grid, device, dtype,
-                  expand_symmetry, log=sys.stdout):
+                  expand_symmetry, log=sys.stdout, u_cart=None,
+                  is_aniso=None):
     """Splat, then symmetry-expand on the GRID.
 
     expand_symmetry is True here and False for a trajectory, and the difference
@@ -160,7 +182,8 @@ def build_density(xrs, elements, b_per_atom, occ, frac, grid, device, dtype,
     from lunus.sf.cell_utils import orth_matrix
     from lunus.sf.density_torch import splat_density
     from lunus.sf.elements import IT92_COEFFS
-    from lunus.sf.kernel_torch import build_atom_kernels_torch
+    from lunus.sf.kernel_torch import (build_atom_kernels_aniso_torch,
+                                       build_atom_kernels_torch)
     from lunus.sf.symmetry_torch import build_grid_ops_from_cctbx, symmetrize_sum
 
     cell = xrs.unit_cell().parameters()
@@ -170,6 +193,20 @@ def build_density(xrs, elements, b_per_atom, occ, frac, grid, device, dtype,
         elements, present, IT92_COEFFS, b_per_atom, 0.0, grid, M_np,
         cutoff=0.01, device=device, dtype=dtype)
 
+    atom_L6 = aniso_mask = None
+    if u_cart is not None:
+        # The anisotropic kernels REPLACE atom_A and the radii for every atom,
+        # including the isotropic ones -- for which U = u_iso*I gives exactly
+        # the isotropic values back, so the two paths stay consistent. Only
+        # atom_lam and the dispatch mask distinguish them.
+        atom_A, atom_L6, offsets, atom_r, taper_w, _ = \
+            build_atom_kernels_aniso_torch(
+                elements, present, IT92_COEFFS, u_cart, 0.0, grid, M_np,
+                cutoff=0.01, device=device, dtype=dtype)
+        aniso_mask = torch.tensor(is_aniso, device=device)
+        print("anisotropic ADPs: %d of %d atoms on the tensor kernel"
+              % (int(is_aniso.sum()), len(elements)), file=log)
+
     frac_t = torch.tensor(frac, dtype=dtype, device=device)
     element_idx = torch.tensor([e2i[e] for e in elements], dtype=torch.long,
                                device=device)
@@ -178,7 +215,8 @@ def build_density(xrs, elements, b_per_atom, occ, frac, grid, device, dtype,
 
     density = splat_density(frac_t, element_idx, occ_t, atom_A, atom_lam,
                             offsets, atom_r, grid, orth, taper_w,
-                            compile_core=False)
+                            compile_core=False, atom_L6=atom_L6,
+                            aniso_mask=aniso_mask)
     if expand_symmetry:
         grid_ops = build_grid_ops_from_cctbx(xrs.space_group(), grid)
         density = symmetrize_sum(density, grid_ops)
@@ -492,9 +530,11 @@ def external_reference(pdb, cif, d_min, log=sys.stdout):
         print("  %-34s %8.4f %8.4f %8.3f %8.1f"
               % (name, fmodel.r_work(), fmodel.r_free(), k_sol, b_sol),
               file=log)
-    print("  The SECOND row is this harness's target. The gap between the two",
+    print("  Which row is the target depends on --aniso-adp: without it the",
           file=log)
-    print("  is the anisotropic ADPs, which lunus.sf does not model.", file=log)
+    print("  second, with it the first. The gap between them is the",
+          file=log)
+    print("  anisotropic ADPs.", file=log)
 
 
 # --------------------------------------------------------------------- report
@@ -560,6 +600,14 @@ def main():
                         "thresholding; the threshold mask's probe radius "
                         "(default: SolventModel's own, so the tool reports "
                         "the shipped configuration; 0 disables it)")
+    p.add_argument("--aniso-adp", action="store_true",
+                   help="use each atom's ANISOTROPIC DISPLACEMENT PARAMETER "
+                        "instead of its isotropic equivalent. Distinct from "
+                        "--aniso, which is the overall SCALE tensor: that is a "
+                        "fitted correction to |F|, this is the atomic model. "
+                        "The gap --reference quantifies is this one -- on 7FPV "
+                        "mmtbx reaches 0.130/0.151 with ADPs and 0.179/0.194 "
+                        "without.")
     p.add_argument("--reference", action="store_true",
                    help="also report what mmtbx reaches on the same model")
     p.add_argument("--aniso", action="store_true",
@@ -594,7 +642,8 @@ def main():
           % (args.cif, len(fobs_np), d_np.max(), d_np.min(), free_np.sum(),
              100.0 * free_np.mean()))
 
-    xrs, elements, b_per_atom, occ, frac, n_aniso = read_model(args.pdb)
+    xrs, elements, b_per_atom, occ, frac, n_aniso, u_cart, is_aniso = \
+        read_model(args.pdb)
     cell = xrs.unit_cell().parameters()
     d_min_grid = args.d_min if args.d_min is not None else float(d_np.min())
     grid = adjust_grid_for_symmetry(
@@ -608,7 +657,8 @@ def main():
 
     density, orth, volume = build_density(
         xrs, elements, b_per_atom, occ, frac, grid, device, dtype,
-        expand_symmetry=not args.no_expand_symmetry)
+        expand_symmetry=not args.no_expand_symmetry,
+        u_cart=u_cart if args.aniso_adp else None, is_aniso=is_aniso)
 
     hkl = torch.tensor(hkl_np, dtype=torch.long, device=device)
     F_obs = torch.tensor(fobs_np, dtype=dtype, device=device)
@@ -733,12 +783,18 @@ def main():
         external_reference(args.pdb, args.cif, args.d_min)
 
     print("\ncaveats, in descending order of how much they cost")
-    print("  * %d of %d atoms were refined with ANISOTROPIC ADPs and are used"
-          % (n_aniso, len(elements)))
-    print("    here as their isotropic equivalents -- lunus.sf has no")
-    print("    anisotropic kernel (docs/design.md). This inflates R at HIGH")
-    print("    resolution and is unrelated to the solvent model. It is the")
-    print("    largest single reason the overall R here is not the deposited one.")
+    if args.aniso_adp:
+        print("  * %d of %d atoms use their full ANISOTROPIC ADP. The largest"
+              % (n_aniso, len(elements)))
+        print("    approximation in this pipeline is therefore NOT in play, and")
+        print("    the target is the deposited-model row of --reference.")
+    else:
+        print("  * %d of %d atoms were refined with ANISOTROPIC ADPs and are used"
+              % (n_aniso, len(elements)))
+        print("    here as their isotropic equivalents. This inflates R at HIGH")
+        print("    resolution and is unrelated to the solvent model. It is the")
+        print("    largest single reason the overall R here is not the deposited")
+        print("    one -- pass --aniso-adp to remove it.")
     print("  * No positional, ADP or occupancy refinement happens here at all:")
     print("    the deposited coordinates are used exactly as given, against")
     print("    which only 3-4 scale parameters are fitted.")

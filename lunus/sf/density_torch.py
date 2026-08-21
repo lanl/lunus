@@ -249,6 +249,67 @@ def _density_core(c_rem, c_off, c_off_sq, A_e, lam_e, R_e, occ_e, taper_width):
     return dens * taper_factor(torch.sqrt(r2), R_e[:, None], taper_width)
 
 
+def _density_core_aniso(c_rem, c_off, c_off_sq, L6_e, A_e, R_e, occ_e,
+                        taper_width):
+    """
+    _density_core for anisotropic ADPs: 5 ellipsoidal Gaussians instead of
+    5 spherical ones.
+
+    THE EXPANDED FORM, not the eigenbasis rotation the derivation is written
+    in. Both are in kernel.py; this one evaluates
+
+        d.Lam_i.d = c_off.Lam_i.c_off - 2 c_rem.Lam_i.c_off + c_rem.Lam_i.c_rem
+
+    so every intermediate stays (m,K) and every matmul is plain 2-D, at the
+    price of paying that per Gaussian. Rotating into the principal axes needs
+    fewer flops but materializes (m,K,3) and a batched matmul; measured on
+    CUDA it is slower either way -- 2.6-2.7x the isotropic core eager against
+    1.6-1.7x, and 3.0-3.1x compiled against 2.8-3.0x -- and costs 59 MB more
+    peak. See tools/bench_aniso_core.py.
+
+    Lam is passed as its six unique components rather than a (m,5,3,3), and
+    the matrix-vector products are written out, so nothing here materializes a
+    3x3 per atom per Gaussian.
+
+    The taper still uses the true radial distance |d| with the atom's own
+    radius, which cutoff_radius_aniso_batch sized to contain the whole
+    ellipsoid. Tapering on a level set of the ellipsoid instead would be more
+    natural and is not worth the divergence from the isotropic path: this
+    keeps taper_factor's C^1 guarantee and tests/test_taper.py applying
+    unchanged, and errs by tapering slightly early along the short axes.
+    """
+    ox, oy, oz = c_off[:, 0], c_off[:, 1], c_off[:, 2]
+    P = torch.stack([ox * ox, oy * oy, oz * oz,
+                     2.0 * ox * oy, 2.0 * ox * oz, 2.0 * oy * oz], dim=1)  # (K,6)
+    rx = c_rem[:, 0:1]
+    ry = c_rem[:, 1:2]
+    rz = c_rem[:, 2:3]
+
+    dens = None
+    for j in range(5):
+        l0 = L6_e[:, j, 0:1]
+        l1 = L6_e[:, j, 1:2]
+        l2 = L6_e[:, j, 2:3]
+        l3 = L6_e[:, j, 3:4]
+        l4 = L6_e[:, j, 4:5]
+        l5 = L6_e[:, j, 5:6]
+        gx = l0 * rx + l3 * ry + l4 * rz
+        gy = l3 * rx + l1 * ry + l5 * rz
+        gz = l4 * rx + l5 * ry + l2 * rz                       # (m,1) each
+        const = rx * gx + ry * gy + rz * gz                    # (m,1)
+        q = (L6_e[:, j, :] @ P.T
+             - 2.0 * (torch.cat([gx, gy, gz], dim=1) @ c_off.T)
+             + const)                                          # (m,K)
+        term = A_e[:, j:j + 1] * torch.exp(-q.clamp_min(0.0))
+        dens = term if dens is None else dens + term
+
+    dens = dens * occ_e[:, None]
+    r2 = (c_off_sq.unsqueeze(0)
+          - 2.0 * (c_rem @ c_off.T)
+          + (c_rem * c_rem).sum(-1, keepdim=True)).clamp_min(0.0)
+    return dens * taper_factor(torch.sqrt(r2), R_e[:, None], taper_width)
+
+
 def _scatter_core(grid_flat, base_i, offsets, dens, Nu, Nv, Nw):
     """
     Wrap each candidate voxel into the cell, flatten it, and accumulate the
@@ -533,6 +594,13 @@ def splat_density(
     max_pairs_per_batch: int = 4_000_000,
     compile_core: bool = True,
     out: torch.Tensor = None,        # optional preallocated flat grid, see below
+    atom_L6: torch.Tensor = None,    # (n_atoms,5,6) anisotropic Lam, packed
+                                      # (xx,yy,zz,xy,xz,yz) -- see kernel.py
+    aniso_mask: torch.Tensor = None, # (n_atoms,) bool. None means every atom
+                                      # is isotropic and NOTHING on the
+                                      # anisotropic path runs -- not even the
+                                      # compile -- so results are bit-identical
+                                      # to before it existed
     stats: dict = None,              # optional dict; work counters written into it
 ) -> torch.Tensor:
     """
@@ -619,6 +687,16 @@ def splat_density(
         grid_flat = out.zero_()
     core = _resolve_compiled(_density_core, compile_core)
     scatter = _resolve_compiled(_scatter_core, compile_core)
+    core_aniso = (_resolve_compiled(_density_core_aniso, compile_core)
+                  if aniso_mask is not None else None)
+    if aniso_mask is not None:
+        if atom_L6 is None:
+            raise ValueError("aniso_mask given without atom_L6")
+        if bool((~aniso_mask).any()) and atom_lam is None:
+            raise ValueError(
+                "atom_lam is required while any atom is isotropic; pass "
+                "aniso_mask=None for an all-isotropic model, or an all-True "
+                "mask with atom_lam=None for an all-anisotropic one")
 
     # Sub-voxel geometry for EVERY atom at once (cheap, (n_atoms,3)): base is
     # piecewise-constant in pos so it carries no gradient (round()'s derivative
@@ -645,13 +723,17 @@ def splat_density(
         stats["pairs_ideal"] = 0
         stats["pairs_actual"] = 0
 
-    n_elements = len(elem_offsets)
-    for e in range(n_elements):
-        mask = element_idx == e
-        if not torch.any(mask):
-            continue
-        atom_indices = torch.nonzero(mask, as_tuple=True)[0]  # (M,)
-        eo = elem_offsets[e]
+    def _run_group(atom_indices, eo, use_aniso):
+        """One element's atoms of one KIND -- isotropic or anisotropic --
+        sorted, chunked, evaluated and scattered.
+
+        Split out so the two kinds share every line except which core runs.
+        Splatting is a sum over atoms, so evaluating the two groups separately
+        and accumulating into the same grid is exact rather than an
+        approximation, and an isotropic atom never touches the slower core.
+        """
+        if atom_indices.numel() == 0:
+            return
 
         # Sort by reach so each chunk spans a narrow range and uses a short
         # offset prefix, instead of every atom paying for this element's
@@ -680,12 +762,33 @@ def splat_density(
                 stats["chunks"] += 1
                 stats["pairs_actual"] += n * K
 
-            dens = core(
-                c_rem_all[sel], eo.c_off[:K], eo.c_off_sq[:K],
-                atom_A[sel], atom_lam[sel], atom_radius_ang[sel], occ[sel],
-                taper_width,
-            )                                                      # (m,K)
+            if use_aniso:
+                dens = core_aniso(
+                    c_rem_all[sel], eo.c_off[:K], eo.c_off_sq[:K],
+                    atom_L6[sel], atom_A[sel], atom_radius_ang[sel], occ[sel],
+                    taper_width,
+                )                                                  # (m,K)
+            else:
+                dens = core(
+                    c_rem_all[sel], eo.c_off[:K], eo.c_off_sq[:K],
+                    atom_A[sel], atom_lam[sel], atom_radius_ang[sel], occ[sel],
+                    taper_width,
+                )                                                  # (m,K)
 
             scatter(grid_flat, base_i_all[sel], eo.offsets[:K], dens, Nu, Nv, Nw)
+
+    n_elements = len(elem_offsets)
+    for e in range(n_elements):
+        mask = element_idx == e
+        if not torch.any(mask):
+            continue
+        atom_indices = torch.nonzero(mask, as_tuple=True)[0]  # (M,)
+        eo = elem_offsets[e]
+        if aniso_mask is None:
+            _run_group(atom_indices, eo, False)
+        else:
+            kind = aniso_mask[atom_indices]
+            _run_group(atom_indices[~kind], eo, False)
+            _run_group(atom_indices[kind], eo, True)
 
     return grid_flat.view(Nu, Nv, Nw)
