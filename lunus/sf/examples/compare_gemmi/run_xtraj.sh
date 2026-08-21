@@ -70,19 +70,28 @@ ARGS="${ARGS} unit_cell=${UNIT_CELL} space_group=${SPACE_GROUP}"
 ARGS="${ARGS} fcalc=fcalc_${var}.mtz icalc=icalc_${var}.mtz diffuse=diffuse_${var}.hkl"
 ARGS="${ARGS} engine=${var}"
 
-# torch.compile is off here because it currently FAILS on both platforms this
-# has been run on -- Linux/CUDA has no cuda.h for triton to compile against in
-# a driver-only container, and inductor's Metal backend is broken on MPS in
-# torch 2.13. The fallback to eager is automatic and numerically identical, but
-# the attempt itself costs ~9 s per run.
+# torch.compile is ON, and the comment that used to sit here saying it "buys
+# nothing on a GPU" was wrong. It cited 5140e6 pairs/s compiled against 5126e6
+# eager -- but the same note said the compile had FAILED, so both figures were
+# the eager fallback and the comparison was eager against itself.
 #
-# It also buys nothing on a GPU even when it works: measured on an NVIDIA card,
-# 5140e6 pairs/s compiled against 5126e6 eager, i.e. no difference. Fusing
-# memory-bound passes mattered on CPU (~2.9x); a GPU does not need it.
+# Measured properly, on the same card and the same 135,834-atom configuration:
 #
-# Set torch_compile=True to re-enable if you are on CPU, or once the headers
-# are available.
-if [ "${var}" = "torch" ]; then
+#     eager      0.07 s    5258e6 pairs/s
+#     compiled   0.02 s   14120e6 pairs/s      2.69x
+#
+# On CPU it is 2.35x in situ. It still fails on MPS (inductor's Metal backend,
+# torch 2.13), where the fallback is automatic and numerically identical.
+#
+# The cost is a one-off ~9 s compile on CUDA against 40.4 ms saved per frame,
+# so BREAK-EVEN IS ~224 FRAMES. THIS SCRIPT RUNS 10, where compiling spends 9 s
+# to save 0.4 s -- so it is off here and the default is right for a long run
+# rather than for this one. Set LUNUS_COMPILE=1 if you raise the frame count.
+#
+# (That break-even assumes inductor's on-disk cache does not carry between
+# runs. If it does, only the first run on a machine pays and this should be
+# revisited.)
+if [ "${var}" = "torch" ] && [ -z "${LUNUS_COMPILE:-}" ]; then
   ARGS="${ARGS} torch_compile=False"
 fi
 

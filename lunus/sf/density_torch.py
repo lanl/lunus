@@ -79,6 +79,7 @@ validated in test_torch.py's autograd-vs-analytic gradient check.
 """
 
 import math
+import os
 import warnings
 
 import torch
@@ -279,6 +280,72 @@ _COMPILE_PROVEN = set()     # functions whose compiled form has actually run
 _COMPILE_FAILED = False
 
 
+_CUDA_HEADERS_CHECKED = False
+
+
+def _ensure_cuda_headers_visible():
+    """Put the CUDA driver header on CPATH, so inductor can build its shim.
+
+    Inductor compiles a small cuda_utils.c that #includes cuda.h -- the CUDA
+    DRIVER header, not the runtime one. A runtime-focused container ships it
+    under CUDA_HOME but does not put it on the compiler's search path, and
+    Triton does not reliably derive -I from CUDA_HOME: measured on one such
+    image, setting CUDA_HOME alone was not enough and CPATH was. gcc honours
+    CPATH whatever flags it is handed, which is why that is the reliable place
+    to say it.
+
+    Done automatically because the cost of not doing it is large and easy to
+    miss: compiling the splat's elementwise core is worth 4.9x on CUDA
+    (tools/bench_aniso_core.py), and without the header inductor just fails and
+    the pipeline runs eager. One pod did exactly that for an unknown length of
+    time.
+
+    No-op unless the header actually exists where CUDA_HOME says and is not
+    already visible, so it does nothing on CPU, on MPS, or where the
+    environment is already correct.
+    """
+    global _CUDA_HEADERS_CHECKED
+    if _CUDA_HEADERS_CHECKED:
+        return
+    _CUDA_HEADERS_CHECKED = True
+
+    home = (os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
+            or "/usr/local/cuda")
+    include = os.path.join(home, "include")
+    if not os.path.isfile(os.path.join(include, "cuda.h")):
+        return
+    current = os.environ.get("CPATH", "")
+    if include in current.split(os.pathsep):
+        return
+    os.environ["CPATH"] = (include + os.pathsep + current) if current else include
+
+
+def _warn_compile_fallback(fn, exc):
+    """One warning, naming the cost and -- on CUDA -- the usual cause.
+
+    "Slower" undersells it: compiling this core is worth 4.9x on CUDA and
+    ~3.5x on CPU, against a splat that is ~94% of the frame. And the usual
+    CUDA cause is a missing include path rather than anything about the GPU,
+    which is worth saying outright: the message that just says gcc failed
+    invites the conclusion that the machine is broken.
+    """
+    first = str(exc).splitlines()[0][:200] if str(exc) else type(exc).__name__
+    hint = ""
+    if "cuda.h" in str(exc) or "cuda_utils" in str(exc):
+        hint = (" This looks like inductor being unable to find cuda.h, the "
+                "CUDA DRIVER header: set CUDA_HOME, or put its include "
+                "directory on CPATH. It is not a GPU or torch fault.")
+    warnings.warn(
+        "torch.compile failed for %s (%s: %s); falling back to the eager "
+        "implementation for the rest of this process. Results are unaffected. "
+        "The cost is not small -- compiling this core measures 4.9x on CUDA "
+        "and ~3.5x on CPU, on a splat that is ~94%% of the frame.%s Pass "
+        "compile_core=False (xtraj.py: torch_compile=False) to skip the "
+        "attempt entirely."
+        % (fn.__name__, type(exc).__name__, first, hint),
+        RuntimeWarning, stacklevel=3)
+
+
 def _resolve_compiled(fn, enable):
     """
     Returns fn, torch.compile'd when asked for and available.
@@ -304,6 +371,7 @@ def _resolve_compiled(fn, enable):
     global _COMPILE_FAILED
     if not enable or _COMPILE_FAILED:
         return fn
+    _ensure_cuda_headers_visible()
     if fn not in _COMPILED:
         try:
             # Donated buffers let the compiled backward reuse forward
@@ -318,8 +386,13 @@ def _resolve_compiled(fn, enable):
             pass                       # older torch: option simply not present
         try:
             _COMPILED[fn] = torch.compile(fn, dynamic=True)
-        except Exception:
+        except Exception as exc:
             _COMPILE_FAILED = True
+            # This site used to return silently. torch.compile is lazy so it
+            # rarely raises here -- the guarded call below is where failures
+            # normally surface -- but "rarely" is not "never", and a silent
+            # fallback costs 4.9x on CUDA with nothing in the log.
+            _warn_compile_fallback(fn, exc)
             return fn
 
     compiled = _COMPILED[fn]
@@ -338,15 +411,7 @@ def _resolve_compiled(fn, enable):
             out = compiled(*args, **kwargs)
         except Exception as exc:
             _COMPILE_FAILED = True
-            warnings.warn(
-                f"torch.compile failed for {fn.__name__} "
-                f"({type(exc).__name__}: {str(exc).splitlines()[0][:200]}); "
-                "falling back to the eager implementation for the rest of this "
-                "process. Results are unaffected, but the splat will be slower "
-                "-- pass compile_core=False (xtraj.py: torch_compile=False) to "
-                "skip the attempt entirely.",
-                RuntimeWarning, stacklevel=2,
-            )
+            _warn_compile_fallback(fn, exc)
             return fn(*args, **kwargs)
         _COMPILE_PROVEN.add(fn)
         return out

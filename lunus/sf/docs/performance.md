@@ -37,7 +37,9 @@ context it says so.
 
 ## Where this stands (2026-08-16)
 
-On CUDA, 135,834 atoms, `d_min` 0.9, steady state per frame:
+On CUDA, 135,834 atoms, `d_min` 0.9, steady state per frame. **Measured
+eager**; with `torch.compile` the splat drops to 25.5 ms and the frame to
+~36 ms, which re-ranks everything below it — see the CUDA section:
 
 | phase | median ms/frame |
 |---|---|
@@ -51,9 +53,13 @@ On CUDA, 135,834 atoms, `d_min` 0.9, steady state per frame:
 | symmetrize | 0.0 |
 | **per-frame total** | **≈ 70** |
 
-plus a per-*chunk* trajectory read of 1.95 s, which is 195 ms/frame spread over
-10 frames and 7.8 over 251 — read it against the `calls` column, not as a
-per-frame cost.
+plus the trajectory read, which is ~12.8 ms/frame and **does not depend on
+`chunk=`**: 251 frames cost ~3.2 s in total whether that is 26 calls of 10
+frames or 6 of 50 (12.6 against 12.9 ms/frame measured). It is batched into
+per-chunk calls, so its `calls` column and median are per chunk, but the WORK
+scales with frames. An earlier version of this note read the per-call figure as
+a fixed per-chunk cost and concluded that larger chunks would amortize it; they
+do not.
 
 The splat is 94% of the per-frame work and nothing else is above 2 ms. It is
 also remarkably steady: over ten frames, median 65.9, min 65.8, max 65.9, with
@@ -109,9 +115,32 @@ multi-rank runs: under `mpirun -n N` on CPU, `xtraj.py` gives each rank one
 torch thread to avoid oversubscription, so the per-core figure is the one that
 applies.
 
-The `torch.compile` row is gone from this table: it fails on both platforms
-this has been run on (see below), and the numbers it used to carry were from
-the superseded configuration.
+The `torch.compile` row is gone from this table: it fails on the CPU/MPS
+platforms this has been run on (see below), and the numbers it used to carry
+were from the superseded configuration.
+
+**On CUDA it does work** — see the CUDA section below, including why the
+entry that said otherwise was measuring the eager fallback against itself.
+
+**On CPU, compiling is worth 2.35x on the real splat**: 135,834 atoms on the
+120 x 160 x 360 grid, 6 threads, **2.00 s eager against 0.85 s compiled**
+(174e6 against 410e6 atom-voxel pairs/s). The first call costs ~1.4 s extra
+for the compilation itself, which matters for short runs and not for a
+trajectory.
+
+Read that against **3.5x on the isolated elementwise core** (15.1 → 4.3 ms,
+`tools/bench_aniso_core.py`). The microbenchmark overstates by ~1.5x, which is
+the usual direction and the reason this page keeps saying so: the real splat
+also pays the scatter, the offset prefixes and the allocator, none of which
+fusion touches.
+
+One trap that comes with it. Compiling on CUDA emits a suggestion to enable
+TF32 matmuls. **Do not take it without measuring.** The splat computes `r2`
+as `c_off_sq - 2*(c_rem @ c_off.T) + |c_rem|^2` — a difference of terms much
+larger than the result, which is why it carries a `clamp_min(0.0)` — and the
+anisotropic quadratic form cancels the same way. TF32 keeps 10 mantissa bits
+against float32's 23, so it would attack precisely the operation this pipeline
+is least able to afford it on.
 
 Rebalancing ranks against threads does not rescue it. Measured over 10 frames
 on the SUPERSEDED cell, and not re-measured — the ratios are the point and they
@@ -193,15 +222,91 @@ Environment notes, all of which cost a round to discover:
   `platforms = [{ platform = "linux-64", cuda = "13" }]`, with the value being
   the maximum CUDA version the *driver* supports (`nvidia-smi`, top right).
   Under-declaring is what causes spurious failures.
-- `torch.compile` fails here: triton compiles a small `cuda_utils.c` needing
-  the driver API header, and a container that mounts the driver still has no
-  headers. `cuda-driver-dev` provides `cuda.h` but the compile still failed,
-  and **it is worth nothing on a GPU regardless** — 5140e6 pairs/s compiled
-  against 5126e6 eager. Fusing memory-bound passes mattered on CPU (~2.9x); a
-  GPU does not need it. The eager fallback is automatic and numerically
-  identical, but the attempt costs ~10 s per run, so it is off by default in
-  `examples/compare_gemmi/run_xtraj.sh` and opt-in (`--compile`) in
-  `bench_splat.py`.
+- `torch.compile` **does** work here now, and the entry that used to say
+  otherwise was wrong in a way worth keeping. It read: "`cuda-driver-dev`
+  provides `cuda.h` but the compile still failed, and it is worth nothing on a
+  GPU regardless — 5140e6 pairs/s compiled against 5126e6 eager."
+
+  **Those two numbers are 0.3% apart, which is run-to-run noise, and the same
+  sentence says the compile failed.** So the comparison was eager against the
+  eager fallback, and the conclusion drawn from it — that fusion does not help
+  a GPU — does not follow from it. The fallback is automatic and silent enough
+  to be measured by mistake.
+
+  What was actually missing is the include path, not the package: inductor
+  shells out to gcc for its `cuda_utils.c` shim, and `CPATH` is what gcc
+  honours whatever flags triton constructs. `density_torch` now derives that
+  from `CUDA_HOME` and sets it itself, so this needs no environment setup, and
+  a compile failure now warns with its cost and likely cause instead of
+  quietly halving throughput.
+
+  **Measured properly, compiling is worth 2.69x on the real CUDA splat**,
+  135,834 atoms on the 120 x 160 x 360 grid:
+
+  | | s | atom-voxel pairs/s |
+  |---|---|---|
+  | eager | 0.07 | 5,258e6 |
+  | **compiled** | **0.02** | **14,120e6** |
+
+  Note that today's *eager* figure, 5,258e6, is within noise of the number the
+  retracted entry reported as *compiled* (5,140e6) — which is the confirmation
+  that it had been measuring the fallback.
+
+  The scatter-bound hypothesis was wrong too: fusion helps the GPU roughly as
+  much as the CPU (2.69x against 2.35x in situ). The one-off compile costs
+  ~12 s on CUDA, which a trajectory amortizes and a two-frame smoke test does
+  not.
+
+  **Confirmed in situ**, 251 frames, `torch_timing=True`: the splat's median
+  is **25.5 ms/frame against 65.9 eager, 2.58x**. `bench_splat`'s compiled
+  0.02 s understated the real loop by 27%, which is the usual direction.
+
+  **Read the MEDIAN, not the mean.** The same run reports a splat mean of
+  61.6 ms, nearly the eager figure, because `torch.compile` spends **9.07 s on
+  frame 0** and the mean spreads it over 251 frames. That very nearly produced
+  the conclusion that compiling had done nothing.
+
+  **The first frame costs 8.77 s, and that is compilation** — separated by
+  running the identical trajectory with `torch_compile=False`:
+
+  | | frame 0 | median |
+  |---|---|---|
+  | eager | 195.9 ms | 66.7 ms |
+  | compiled | 8961.5 ms | 25.0 ms |
+
+  So ~196 ms is CUDA and library initialization, which both pay, and the
+  remaining 8.77 s is inductor. Worth measuring rather than assuming: this
+  page already records an "85.9% of the frame" figure that turned out to be
+  `torch.linalg.inv` loading cuSOLVER, so a large first frame is not
+  self-evidently the compiler. The eager median of 66.7 ms also confirms the
+  65.9 ms baseline above has not drifted.
+
+  **Break-even is therefore ~210 frames**: 8.77 s against 41.7 ms saved per
+  frame. A 251-frame run is only ~8% faster overall, and anything shorter is a
+  net LOSS.
+
+  **A persistent cache helps by a third, and does not remove it.** With
+  `TORCHINDUCTOR_CACHE_DIR` on real storage, frame 0 goes from ~12.5 s cold to
+  **8.35 s warm** — so ~4 s was codegen, and ~8.15 s is not. Break-even barely
+  moves, ~197 frames warm against ~210 cold, and compiling stays a long-run
+  optimization rather than becoming unconditional.
+
+  What survives caching is per-PROCESS rather than per-machine: Dynamo re-traces
+  the graph and rebuilds its guards in every new interpreter, whatever is on
+  disk.
+
+  **It is ONE compilation, not many.** `TORCH_LOGS=recompiles` counts zero over
+  a full run, so `dynamic=True` is covering all ~95 per-frame chunk shapes with
+  a single specialization rather than re-specializing as `K` varies. That was
+  worth checking because it was the one cheap lever available — bucketing `K`
+  to a handful of sizes would have removed most of the residue if it had been
+  recompilation. It is not, so there is nothing there to remove, and ~8.1 s of
+  single-trace cost is simply what compiling this graph costs per process.
+
+  **Conclusion, so this does not get re-litigated.** Compiling is worth 2.67x
+  on the splat and costs ~8.1 s per process that no cache or configuration
+  recovers. Break-even is ~196 frames. Turn it on for trajectories, leave it
+  off for smoke tests, and do not expect a persistent cache to change that.
 
 ### GPU runs are not bit-reproducible
 

@@ -951,8 +951,14 @@ if __name__=="__main__":
     # and a genuine per-frame cost are indistinguishable in an average, and
     # differ by the frame count -- which is how a 10-frame comparison can show
     # an effect a 251-frame one cannot see.
-    if torch_splat_stats:
-      _phase_series.setdefault(name, []).append(dt)
+    #
+    # ALWAYS recorded, where this used to be gated behind torch_splat_stats.
+    # It costs one float per phase per frame -- a few thousand for a long run
+    # -- and without it the table reports only a mean, which is how a run whose
+    # steady-state splat was ~20 ms/frame reported 67.8: torch.compile spends
+    # ~12 s on frame 0 and the mean spreads it over all 251. That is the very
+    # failure this series exists to expose, so it should not need a flag.
+    _phase_series.setdefault(name, []).append(dt)
 
   @contextlib.contextmanager
   def host_phase(name):
