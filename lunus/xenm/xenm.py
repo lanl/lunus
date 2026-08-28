@@ -730,6 +730,7 @@ if __name__=="__main__":
     readsvd = False
     coupling="default"
     writeH = False
+    writeDk = False
     writeHtilde = False
     writeHrenorm = False
     writecorr = False
@@ -783,6 +784,13 @@ if __name__=="__main__":
 # device ("mps" on Mac, "cuda", or "cpu"); ignored by the numpy backend.
     diffuse_backend = "numpy"
     diffuse_device = "mps"
+# decouple.resid: comma-separated residue sequence numbers whose covariance is
+# forced to be independent of the rest of the network. For each listed residue,
+# the off-diagonal covariance rows/columns (in V and every C[indr]) are zeroed
+# while the diagonal (imposed experimental B-factor) is preserved -- i.e. the
+# residue still scatters with its own B-factor but has zero correlation with all
+# other atoms ("independent rigid domain"). Empty = no decoupling.
+    decouple_resids = []
     args = sys.argv[1:]
     input_dict = get_input_dict(args)
     for a in input_dict:
@@ -808,6 +816,8 @@ if __name__=="__main__":
           diffuse_backend = input_dict[a]
         if (a == "diffuse.device"):
           diffuse_device = input_dict[a]
+        if (a == "decouple.resid"):
+          decouple_resids = [int(x) for x in str(input_dict[a]).split(",") if x != ""]
         if (a == "output.hkl"):
           hkloutname = input_dict[a]
           writeDiffuse = True
@@ -869,6 +879,9 @@ if __name__=="__main__":
         if (a == "output.H"):
           Houtname = input_dict[a]
           writeH = True
+        if (a == "output.Dk"):
+          Dkoutname = input_dict[a]
+          writeDk = True
         if (a == "output.Htilde"):
           Htildeoutname = input_dict[a]
           writeHtilde = True
@@ -1102,6 +1115,13 @@ if __name__=="__main__":
 #      print H[i][i]," ",
     if writeH:
       np.save(Houtname,H)
+    if writeDk:
+# Dump the k=0 dynamical matrix D[0] = sum_R H(R) that is actually inverted at
+# kpoints=1, plus the selected-atom coords and molid, for offline eigenmode
+# analysis of the near-singular soft modes.
+      np.save(Dkoutname,D[0])
+      np.save(Dkoutname+".coords.npy",coords)
+      np.save(Dkoutname+".molid.npy",molid)
     etime = time.time()
     print("time = ",etime-stime," seconds")
 # Calculate the pseudoinverse of the Hessian
@@ -1272,6 +1292,24 @@ if __name__=="__main__":
           C[indr] *= cov_shrink
           np.fill_diagonal(C[indr], Cdiag_keep)
       print("Applied covariance shrinkage cov_shrink = ",cov_shrink)
+# Decouple selected residues into independent rigid domains: zero their
+# off-diagonal covariance (rows and columns) in V and every C[indr], preserving
+# the diagonal (imposed B-factor). The atom still scatters with its own B-factor
+# but is uncorrelated with the rest of the network.
+    if len(decouple_resids) > 0:
+      dec_mask = np.isin(resid, np.array(decouple_resids))
+      dec_idx = np.where(dec_mask)[0]
+      print("Decoupling ",len(dec_idx)," atoms (resids ",decouple_resids,
+            ") into independent rigid domains")
+      def decouple(M):
+        d = M.diagonal().copy()
+        M[dec_idx, :] = 0.0
+        M[:, dec_idx] = 0.0
+        np.fill_diagonal(M, d)
+      decouple(V)
+      if (kpoints > 0 or Hmodel == "LLM"):
+        for indr in range(len(C)):
+          decouple(C[indr])
     if (writeCvsR==True):
       cvsr = CvsR(coords,Rlist,C)
       np.savetxt(cvsrname,cvsr)
