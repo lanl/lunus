@@ -578,6 +578,95 @@ def calc_diffuse_vectorized(nh, nk, nl, q0, twopi, coupling_matrix, Vdiag,
     DS = ((Dmain.real + Dcorr) / W)
     return DS.reshape(nh, nk, nl)
 
+def calc_diffuse_torch(nh, nk, nl, q0, twopi, coupling_matrix, Vdiag,
+                       sites_np, a, b, c, G, cir, W, coupling,
+                       device="mps", point_block=1024):
+    """PyTorch/GPU diffuse-scattering calculation, a drop-in for
+    calc_diffuse_vectorized (same math, same (nh,nk,nl) real output).
+
+    Two device-specific numerical choices are essential and were verified
+    against the NumPy path (see notes below):
+
+    (1) MPS is float32/complex64 only (no float64), and -- worse -- its
+        multi-operand complex einsum and batched complex matmul (bmm) silently
+        mis-contract (relerr ~1). So the coupling contraction is done in the
+        MPS-safe TWO-STEP form: tmp = einsum('pmn,pn->pm'); D = (f.conj()*tmp).sum(1).
+
+    (2) At fine resolution q^2 V_mn reaches ~47, so a bare float32
+        exp(q^2 V)-1 overflows.  We use the mathematically identical BOUNDED
+        form: with bare scattering factors f0 (DW factored out),
+          fr_m* fr_n (exp(q^2 V_mn) - 1)
+            = f0_m* f0_n [ exp(q^2(V_mn - 1/2 V_mm - 1/2 V_nn)) - DW_m DW_n ],
+        where DW_m = exp(-1/2 q^2 V_mm) and the shifted exponent is <= 0, so
+        every exponential lies in (0, 1] and float32 never overflows.
+
+    coupling_matrix is V (kpoints==0) or C[0] (kpoints==1); Vdiag is
+    V.diagonal(), matching calc_diffuse_vectorized. Differentiable in the
+    coupling matrix (autodiff path): all ops are smooth tensor ops.
+    """
+    import torch
+    dev = torch.device(device)
+    use32 = (dev.type == "mps")            # MPS has no float64
+    rdt = torch.float32 if use32 else torch.float64
+    cdt = torch.complex64 if use32 else torch.complex128
+
+    h = np.arange(nh) - nh//2 + 1
+    k = np.arange(nk) - nk//2 + 1
+    l = np.arange(nl) - nl//2 + 1
+    H, K, L = np.meshgrid(h, k, l, indexing='ij')
+    hvec = np.stack([H.reshape(-1), K.reshape(-1), L.reshape(-1)], axis=1).astype(float)
+    npts = hvec.shape[0]
+    q_np = hvec * q0[None, :]
+    qsq_np = np.einsum('pi,pi->p', q_np, q_np)
+    ssq_np = qsq_np / twopi / twopi
+
+    # Move the (constant, param-independent) tensors to device once.
+    Vt = torch.as_tensor(np.ascontiguousarray(coupling_matrix), dtype=rdt, device=dev)
+    Vdt = torch.as_tensor(np.ascontiguousarray(Vdiag), dtype=rdt, device=dev)
+    # Bounded shift: exponent V_mn - 1/2 V_mm - 1/2 V_nn <= 0.
+    Vshift = Vt - 0.5*Vdt[:, None] - 0.5*Vdt[None, :]
+    Gt = torch.as_tensor(np.ascontiguousarray(G), dtype=rdt, device=dev)
+    sites_t = torch.as_tensor(np.ascontiguousarray(sites_np), dtype=rdt, device=dev)
+    a_t = torch.as_tensor(np.ascontiguousarray(a), dtype=rdt, device=dev)   # (2, nat)
+    b_t = torch.as_tensor(np.ascontiguousarray(b), dtype=rdt, device=dev)   # (2, nat)
+    c_t = torch.as_tensor(np.ascontiguousarray(c), dtype=rdt, device=dev)   # (nat,)
+    q_t = torch.as_tensor(q_np, dtype=rdt, device=dev)
+    qsq_t = torch.as_tensor(qsq_np, dtype=rdt, device=dev)
+    ssq_t = torch.as_tensor(ssq_np, dtype=rdt, device=dev)
+
+    DS = torch.empty(npts, dtype=rdt, device=dev)
+    for s in range(0, npts, point_block):
+        e = min(s + point_block, npts)
+        qb = q_t[s:e]; qsqb = qsq_t[s:e]; ssqb = ssq_t[s:e]
+        # Phase factors, form factors, coarse-grained bare scattering factors f0.
+        pf = torch.exp(1j * (qb @ sites_t.T).to(cdt))
+        ff = (c_t[None, :]
+              + a_t[0][None, :] * torch.exp(-b_t[0][None, :] * ssqb[:, None])
+              + a_t[1][None, :] * torch.exp(-b_t[1][None, :] * ssqb[:, None]))
+        f0 = (pf * ff.to(cdt)) @ Gt.to(cdt).T             # (b, nsel), bare (no DW)
+        DWb = torch.exp(-0.5 * qsqb[:, None] * Vdt[None, :])   # (b, nsel) in (0,1]
+        if coupling == "qsqV":
+            Kb = (qsqb[:, None, None] * Vt[None, :, :]).to(cdt)
+        else:
+            # bounded coupling: both terms <= 1
+            Kb = (torch.exp(qsqb[:, None, None] * Vshift[None, :, :])
+                  - DWb[:, :, None] * DWb[:, None, :]).to(cdt)
+        # MPS-safe two-step contraction f0^H K f0.
+        tmp = torch.einsum('pmn,pn->pm', Kb, f0)
+        Dmain = (f0.conj() * tmp).sum(dim=1)
+        # Intra-residue correction. Written on the BARE factors f0 so it stays
+        # bounded: the DW-weighted form |fr_m|^2 (exp(cir q^2 V_mm)-exp(q^2 V_mm))
+        # with |fr_m|^2 = |f0_m|^2 exp(-q^2 V_mm) equals
+        #   |f0_m|^2 ( exp((cir-1) q^2 V_mm) - 1 ),
+        # whose exponent (cir-1) q^2 V_mm <= 0 for cir<=1, avoiding the float32
+        # overflow of the intermediate exp(q^2 V_mm) (~1e63 at res=1.6).
+        f0sq = (f0 * f0.conj()).real
+        corr = torch.exp((cir - 1.0) * Vdt[None, :] * qsqb[:, None]) - 1.0
+        Dcorr = (f0sq * corr).sum(dim=1)
+        DS[s:e] = (Dmain.real + Dcorr) / W
+
+    return DS.detach().cpu().numpy().reshape(nh, nk, nl)
+
 # All atom diffuse scattering calculation
 def calc_diffuse_layer_aa(i):
     global nh,nk,nl,q0,twopi,V,seln,sites_np,W,nat,nca,a,b,c,coupling,cir
@@ -682,7 +771,12 @@ if __name__=="__main__":
     asel = "CA"
     res = 1.6
     kpoints=0
-    args = sys.argv[1:] 
+# Diffuse-calculation backend: "numpy" (default, calc_diffuse_vectorized) or
+# "torch" (calc_diffuse_torch on GPU/CPU). diffuse.device selects the torch
+# device ("mps" on Mac, "cuda", or "cpu"); ignored by the numpy backend.
+    diffuse_backend = "numpy"
+    diffuse_device = "mps"
+    args = sys.argv[1:]
     input_dict = get_input_dict(args)
     for a in input_dict:
         if (a == "input.pdb"):
@@ -703,6 +797,10 @@ if __name__=="__main__":
           Hmodel = input_dict[a]
         if (a == "kpoints"):
           kpoints = int(input_dict[a])
+        if (a == "diffuse.backend"):
+          diffuse_backend = input_dict[a]
+        if (a == "diffuse.device"):
+          diffuse_device = input_dict[a]
         if (a == "output.hkl"):
           hkloutname = input_dict[a]
           writeDiffuse = True
@@ -1287,9 +1385,16 @@ if __name__=="__main__":
         if use_vectorized:
             coupling_matrix = V if (kpoints == 0) else C[0]
             G = build_group_matrix(seln, nat, nsel)
-            DS = calc_diffuse_vectorized(nh, nk, nl, q0, twopi,
-                                         coupling_matrix, V.diagonal(),
-                                         sites_np, a, b, c, G, cir, W, coupling)
+            if diffuse_backend == "torch":
+                print("Diffuse backend: torch on device",diffuse_device)
+                DS = calc_diffuse_torch(nh, nk, nl, q0, twopi,
+                                        coupling_matrix, V.diagonal(),
+                                        sites_np, a, b, c, G, cir, W, coupling,
+                                        device=diffuse_device)
+            else:
+                DS = calc_diffuse_vectorized(nh, nk, nl, q0, twopi,
+                                             coupling_matrix, V.diagonal(),
+                                             sites_np, a, b, c, G, cir, W, coupling)
         else:
             pool = ThreadPool(processes=nproc)
             if (asel == "heavy"):
