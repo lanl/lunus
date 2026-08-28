@@ -747,6 +747,13 @@ if __name__=="__main__":
     readGamma = False
     calcR = False
     usecutoff = True
+# pinv.rcond sets the relative singular-value cutoff for the Hessian
+# pseudoinverse (np.linalg.pinv). None uses numpy's default (~1e-15), which sits
+# right on the softest surviving mode of the near-singular ANMEXP Hessian and is
+# therefore machine/BLAS-dependent (can explode to negative V.diagonal on a
+# different LAPACK). Setting an explicit value (e.g. 1e-6) truncates the
+# near-zero soft modes deterministically and portably.
+    pinv_rcond = None
     w_benm=1.
     fnm=1.
     anmexp_lambda=0.157
@@ -854,6 +861,8 @@ if __name__=="__main__":
         if (a == "fast.pinv"):
           if (input_dict[a] == "True"):
             usefastpinv = True
+        if (a == "pinv.rcond"):
+          pinv_rcond = float(input_dict[a])
         if (a == "read.svd"):
           if (input_dict[a] == "True"):
             readsvd = True
@@ -1117,8 +1126,11 @@ if __name__=="__main__":
       call_params = shlex.split(command)
       subprocess.call(call_params)
      else:
+      pinv_kw = {} if pinv_rcond is None else {"rcond": pinv_rcond}
+      if pinv_rcond is not None:
+        print("pinv.rcond = ",pinv_rcond," (explicit SVD truncation floor)")
       if (kpoints==0):
-        Htilde = np.linalg.pinv(H)
+        Htilde = np.linalg.pinv(H,**pinv_kw)
       else:
 #        print D[0].shape
         Htilde = np.zeros(D[0].shape,dtype=complex)
@@ -1126,7 +1138,7 @@ if __name__=="__main__":
 #        print "There are ",np.sum(np.abs(np.imag(Ddag[0]))>0.001)," imaginary components of abs(Ddag[0]) > 0.001"
         print(len(D))
         for i in range(len(D)):
-          Ddag.append(np.linalg.pinv(D[i]))
+          Ddag.append(np.linalg.pinv(D[i],**pinv_kw))
 #          Ddag.append(sp.linalg.pinv(D[i]))
 #          print "There are ",np.sum(np.abs(np.imag(Ddag[i]))>0.001)," imaginary components of abs(Ddag[",i,"]) > 0.001"
           Htilde = Htilde + Ddag[i]
