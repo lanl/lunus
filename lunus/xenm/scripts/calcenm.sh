@@ -43,14 +43,22 @@ INTER_WIDTH=${INTER_WIDTH:-1.5}
 # (plain model); ~40 reproduces the all-atom density of states for an ANM.
 W_BENM=${W_BENM:-1.0}
 
+# Covariance shrinkage toward the diagonal. Off-diagonal covariance elements are
+# scaled by COV_SHRINK after renormalization (diagonal preserved). Default 1.0 =
+# off (raw model). Set COV_SHRINK=auto to derive the minimal shrinkage from the
+# matrix itself (from its most-negative correlation eigenvalue), restoring
+# positive definiteness with no user-supplied value. A numeric value (e.g. 0.95)
+# still works as a manual override.
+COV_SHRINK=${COV_SHRINK:-1.0}
+
 if [ "$MODEL" = "ANMEXP_DOMAIN" ]; then
   OMP_NUM_THREADS=2 python "$XENM_PY" input.pdb=$1 output.hkl=tmp.hkl anmexp.lambda=$2 \
     inter.thresh=$INTER_THRESH inter.k=$INTER_K inter.width=$INTER_WIDTH \
-    backbone.enhancement=$W_BENM \
+    backbone.enhancement=$W_BENM covariance.shrinkage=$COV_SHRINK \
     nproc=32 model=ANMEXP_DOMAIN kpoints=1 resolution=$RES > /dev/null
 else
   OMP_NUM_THREADS=2 python "$XENM_PY" input.pdb=$1 output.hkl=tmp.hkl anmexp.lambda=$2 \
-    backbone.enhancement=$W_BENM \
+    backbone.enhancement=$W_BENM covariance.shrinkage=$COV_SHRINK \
     nproc=32 model=$MODEL kpoints=1 resolution=$RES > /dev/null
 fi
 if [ -e tmp.hkl ]; then

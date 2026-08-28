@@ -669,6 +669,14 @@ if __name__=="__main__":
     inter_thresh = 10.0
     inter_k = 1.0
     inter_width = 1.5
+# Covariance shrinkage toward the diagonal (Ledoit-Wolf style): after
+# renormalization, off-diagonal covariance elements are scaled by cov_shrink
+# while the diagonal (the imposed experimental B-factors) is preserved exactly.
+# cov_shrink=1.0 is the raw model; a value slightly below 1 restores positive
+# definiteness when the near-singular pseudoinverse leaves a small negative mode.
+# cov_shrink="auto" derives the minimal shrinkage from the matrix itself (from
+# the most-negative correlation eigenvalue) so the user need not supply a value.
+    cov_shrink = 1.0
     llm_gamma = 4.0
     svdbasename = "svd"
     asel = "CA"
@@ -717,6 +725,11 @@ if __name__=="__main__":
           inter_k = float(input_dict[a])
         if (a == "inter.width"):
           inter_width = float(input_dict[a])
+        if (a == "covariance.shrinkage"):
+          if str(input_dict[a]).lower() == "auto":
+            cov_shrink = "auto"
+          else:
+            cov_shrink = float(input_dict[a])
         if (a == "expcut.lambda"):
           expcut_lambda = float(input_dict[a])
         if (a == "expcut.thresh"):
@@ -1107,6 +1120,48 @@ if __name__=="__main__":
                 Ddag4D[j][i,k1,:,k2] *= renorm_fac
                 Ddag4D[j][:,k1,i,k2] *= renorm_fac
     print("Renorm done")
+# Covariance shrinkage toward the diagonal: M -> cov_shrink*M + (1-cov_shrink)*diag(M),
+# i.e. scale every off-diagonal element by cov_shrink while preserving the
+# diagonal (the imposed experimental B-factors) exactly. This is a mild global
+# rescale that restores positive definiteness lost to the near-singular
+# pseudoinverse; cov_shrink=1.0 leaves the model unchanged. Applied to both V
+# (kpoints==0 diffuse path) and every C[indr] (kpoints>0 path) so the diffuse
+# calculation is consistent regardless of method. It commutes with
+# renormalization (both are diagonal-preserving), so order does not matter.
+# cov_shrink=="auto": derive the minimal shrinkage from the matrix itself.
+# Off-diagonal scaling by a maps correlation eigenvalues lam -> (1-a)+a*lam, so
+# the most-negative correlation eigenvalue lam_min sets the positive-definite
+# threshold a* = 1/(1-lam_min).  A matrix is PD iff its correlation matrix is,
+# and shrinkage is applied uniformly to V and every C[indr], so we take lam_min
+# over whichever matrices actually feed the diffuse calc: V (kpoints==0) or C[0]
+# (kpoints>0).  Each correlation uses its own diagonal.  We take a hair below a*
+# (scaled by 1-eps) so the smallest eigenvalue lands just above 0.
+    if cov_shrink == "auto":
+      shrink_targets = [C[0]] if (kpoints>0) else [V]
+      lam_min = 0.0
+      for M in shrink_targets:
+        d = np.sqrt(np.clip(M.diagonal(), 1.0e-30, None))
+        Corr = M / np.outer(d, d)
+        lam_min = min(lam_min, np.linalg.eigvalsh(0.5*(Corr+Corr.T)).min())
+      if lam_min < 0.0:
+        a_star = 1.0/(1.0 - lam_min)
+        cov_shrink = a_star*(1.0 - 1.0e-6)
+        print("Auto covariance shrinkage: lam_min(Corr) = ",lam_min,
+              " -> cov_shrink = ",cov_shrink)
+      else:
+        cov_shrink = 1.0
+        print("Auto covariance shrinkage: Corr already PD (lam_min = ",
+              lam_min,"), cov_shrink = 1.0 (no-op)")
+    if cov_shrink != 1.0:
+      Vdiag_keep = V.diagonal().copy()
+      V *= cov_shrink
+      np.fill_diagonal(V, Vdiag_keep)
+      if (kpoints>0 or Hmodel == "LLM"):
+        for indr in range(len(C)):
+          Cdiag_keep = C[indr].diagonal().copy()
+          C[indr] *= cov_shrink
+          np.fill_diagonal(C[indr], Cdiag_keep)
+      print("Applied covariance shrinkage cov_shrink = ",cov_shrink)
     if (writeCvsR==True):
       cvsr = CvsR(coords,Rlist,C)
       np.savetxt(cvsrname,cvsr)
