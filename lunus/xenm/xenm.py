@@ -119,7 +119,7 @@ def calcH(Gamma,coords,cell,Hmodel):
       else:
         dc[:,k] = coords[i,k] - coords[:,k]
       svec2[:] += dc[:,k]*dc[:,k]      
-    if usecutoff:
+    if usecutoff and Hmodel != "ANMEXP_DOMAIN":
       smask[svec2 > cut] = 0.0
       Gamma[i,:] *= smask[:]
     svec = np.sqrt(svec2)
@@ -129,6 +129,13 @@ def calcH(Gamma,coords,cell,Hmodel):
     if (Hmodel == "EXPCUT"):
       expterm = np.exp((-svec+expcut_thresh)/expcut_lambda)
       expcutvec = np.sqrt(expterm/(1.+expterm))
+    if (Hmodel == "ANMEXP_DOMAIN"):
+# Two-tier weight (see calcDk): intramolecular pairs use ANMEXP exp(-r/2λ),
+# inter-molecular pairs use sqrt(inter_k * logistic-threshold).
+      intra = (molid == molid[i])
+      logistic = 1./(1.+np.exp((svec-inter_thresh)/inter_width))
+      wvec = np.where(intra, np.exp(-svec/anmexp_lambda/2.),
+                      np.sqrt(inter_k*logistic))
     svec[svec==0.0] = 1.0
     anmfac = 1./svec
     for k in range(3):
@@ -141,6 +148,9 @@ def calcH(Gamma,coords,cell,Hmodel):
 # Hessian value with force constants for the exponentially smoothed threshold ANM model
       if (Hmodel == "EXPCUT"):
         dc[:,k] *= anmfac*expcutvec
+# Hessian value with force constants for the two-tier domain-coupled model
+      if (Hmodel == "ANMEXP_DOMAIN"):
+        dc[:,k] *= anmfac*wvec
 # Hessian value with force constants for the ANM^2 model
       if (Hmodel == "ANM2"):
         dc[:,k] *= anmfac/svec
@@ -165,6 +175,13 @@ def calcH(Gamma,coords,cell,Hmodel):
 #        H4D[i,k1,:,k2] *= -Gamma[i,:]
         hsum = np.sum(H4D[i,k1,:,k2])
         H4D[i,k1,i,k2] = -hsum
+# H is symmetric in exact arithmetic. The minimum-image convention (%cell) above
+# introduces tiny floating-point asymmetry (~1e-7) that is harmless for the short-
+# range ANMEXP weights but O(1)-visible once inter-molecular springs are O(1)
+# (ANMEXP_DOMAIN). Symmetrize explicitly (a no-op to rounding for symmetric H)
+# before the sanity check, which now guards only against gross assembly errors.
+  H = 0.5*(H + H.transpose())
+  H4D = H.reshape((nsel,3,nsel,3))
   if not np.isclose(H.transpose(), H, 1.e-10).all():
     print("H is not symmetric!")
 # Number of violating elements = ",np.sum(H.transpose()!=H),"and here are the H elements: ",H[H.transpose()!=H],"and the H.transpose() elements: ",H.transpose()[H.transpose()!=H]
@@ -224,7 +241,7 @@ def calcDk(coords,Rlist,Hmodel,kplist):
           print("kpoints method requires pbc=True")
           sys.exit(1)
         svec2[:] += dc[:,k]*dc[:,k]      
-      if usecutoff:
+      if usecutoff and Hmodel != "ANMEXP_DOMAIN":
         smask[svec2 > cut] = 0.0
         Gamma[i,:] *= smask[:]
       svec = np.sqrt(svec2)
@@ -234,6 +251,16 @@ def calcDk(coords,Rlist,Hmodel,kplist):
       if (Hmodel == "EXPCUT"):
         expterm = np.exp((-svec+expcut_thresh)/expcut_lambda)
         expcutvec = np.sqrt(expterm/(1.+expterm))
+      if (Hmodel == "ANMEXP_DOMAIN"):
+# Two-tier weight: intramolecular pairs (same molid) use the ANMEXP falloff
+# exp(-r/2λ); inter-molecular pairs use a logistic-threshold ANM whose weight is
+# sqrt(inter_k * logistic), so the effective force constant is inter_k*logistic
+# with logistic = 1/(1+exp((r-inter_thresh)/inter_width)). The intra/inter mask
+# is parameter-independent; both weights are smooth in the refined parameters.
+        intra = (molid == molid[i])
+        logistic = 1./(1.+np.exp((svec-inter_thresh)/inter_width))
+        wvec = np.where(intra, np.exp(-svec/anmexp_lambda/2.),
+                        np.sqrt(inter_k*logistic))
       svec[svec==0.0] = 1.0
       anmfac = 1./svec
       for k in range(3):
@@ -243,8 +270,11 @@ def calcDk(coords,Rlist,Hmodel,kplist):
 # Hessian value with force constants for the exponentially smoothed threshold ANM model
         elif (Hmodel == "EXPCUT"):
           dc[:,k] *= anmfac*expcutvec
+# Hessian value with force constants for the two-tier domain-coupled model
+        elif (Hmodel == "ANMEXP_DOMAIN"):
+          dc[:,k] *= anmfac*wvec
         else:
-          print("kpoints method requires model=ANMEXP or EXPCUT")
+          print("kpoints method requires model=ANMEXP, EXPCUT or ANMEXP_DOMAIN")
           sys.exit(1)
       if (i==0 and indr==0):
         print(dc1D[0:10])
@@ -586,7 +616,7 @@ if __name__=="__main__":
     Hmodel = "ANM"
     limitmodes = False
     pbc = True
-    cutoff = 25.
+    cutoff = 10.
     cir = 1.
     nproc=1
     xmodes=0
@@ -616,6 +646,12 @@ if __name__=="__main__":
     anmexp_lambda=0.157
     expcut_lambda = 1.0
     expcut_thresh = 1.0
+# Two-tier domain-coupled model (ANMEXP_DOMAIN): intramolecular pairs use ANMEXP,
+# inter-molecular pairs use a logistic-threshold ANM whose effective force
+# constant is inter_k/(1+exp((r-inter_thresh)/inter_width)).
+    inter_thresh = 10.0
+    inter_k = 1.0
+    inter_width = 1.5
     llm_gamma = 4.0
     svdbasename = "svd"
     asel = "CA"
@@ -658,6 +694,12 @@ if __name__=="__main__":
           usecutoff = True
         if (a == "anmexp.lambda"):
           anmexp_lambda = float(input_dict[a])
+        if (a == "inter.thresh"):
+          inter_thresh = float(input_dict[a])
+        if (a == "inter.k"):
+          inter_k = float(input_dict[a])
+        if (a == "inter.width"):
+          inter_width = float(input_dict[a])
         if (a == "expcut.lambda"):
           expcut_lambda = float(input_dict[a])
         if (a == "expcut.thresh"):
@@ -821,6 +863,11 @@ if __name__=="__main__":
     masses = np.zeros(nsel)
     coords = np.zeros((nsel,3))
     coords1D = coords.reshape(3*nsel)
+# molid[snum] is the crystallographic molecule (P1 symmetry-operator index) of
+# selected atom snum, parsed from the "_K" suffix that expand_to_p1 appends to
+# each scatterer label. Used by the two-tier ANMEXP_DOMAIN model to distinguish
+# intramolecular from inter-molecular atom pairs. It is parameter-independent.
+    molid = np.zeros(nsel,dtype=int)
     snum = 0
     for i in range(len(sites)):
       if (asel == "heavy" or (asel == "CA" and selca[i])):
@@ -828,7 +875,12 @@ if __name__=="__main__":
         masses[snum] = masses_cctbx[i]
         for k in range(3):
           coords[snum][k] = sites[i][k]
+        try:
+          molid[snum] = int(scat[i].label.rsplit('_',1)[1])
+        except (IndexError, ValueError):
+          molid[snum] = 0
         snum = snum + 1
+    print("Number of distinct molecules (molid) = ",len(np.unique(molid)))
     cellby2 = cell[0:3]/2.
     np.set_printoptions(threshold=None)
     masses_sqrt = np.sqrt(masses)

@@ -29,7 +29,7 @@ This example demonstrates xenm calculations using the staphylococcal nuclease st
 ```bash
 cd examples/4wor
 python ../../xenm.py input.pdb=4wor.pdb model=ANMEXP \
-    anmexp.lambda=0.157 cutoff=25.0 resolution=4.0 output.hkl=test.hkl nproc=8
+    anmexp.lambda=0.157 cutoff=10.0 resolution=4.0 output.hkl=test.hkl nproc=8
 ```
 
 ### With K-point Sampling

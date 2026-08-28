@@ -38,7 +38,7 @@ Main program for calculating ENM and predicting diffuse scattering.
   - `EXPCUT`: Exponentially smoothed cutoff
   - `ANM2`, `ANM6`: Power law variants
   - `LLM`: Lattice-based local model
-- `cutoff=<distance>` - Distance cutoff for interactions (default: 25 Å)
+- `cutoff=<distance>` - Distance cutoff for interactions (default: 10 Å)
 - `anmexp.lambda=<value>` - Decay length for ANMEXP model (default: 0.157)
 - `kpoints=<N>` - Use k-point sampling (0=off, 1+=grid size)
 - `nproc=<N>` - Number of processors for parallel diffuse calculation
@@ -52,7 +52,7 @@ Main program for calculating ENM and predicting diffuse scattering.
 **Example** (with cctbx in the active environment, use plain `python`):
 ```bash
 python xenm.py input.pdb=protein.pdb model=ANMEXP anmexp.lambda=0.16 \
-    cutoff=25.0 resolution=4.0 nproc=8 output.hkl=diffuse.hkl output.V=covar.npy
+    cutoff=10.0 resolution=4.0 nproc=8 output.hkl=diffuse.hkl output.V=covar.npy
 ```
 
 ### refine_enm.py

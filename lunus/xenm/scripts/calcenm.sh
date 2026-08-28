@@ -29,7 +29,22 @@ fi
 # experimental grid.
 RES=${RES:-4.0}
 
-OMP_NUM_THREADS=2 python "$XENM_PY" input.pdb=$1 output.hkl=tmp.hkl anmexp.lambda=$2 nproc=32 model=ANMEXP kpoints=1 resolution=$RES > /dev/null
+# Model selection. Default is the single-tier ANMEXP (backward compatible: two
+# positional args <pdb> <lambda>). Set MODEL=ANMEXP_DOMAIN to use the two-tier
+# domain-coupled model; the inter-molecular logistic springs are then controlled
+# by the environment variables INTER_THRESH, INTER_K and INTER_WIDTH.
+MODEL=${MODEL:-ANMEXP}
+INTER_THRESH=${INTER_THRESH:-10.0}
+INTER_K=${INTER_K:-1.0}
+INTER_WIDTH=${INTER_WIDTH:-1.5}
+
+if [ "$MODEL" = "ANMEXP_DOMAIN" ]; then
+  OMP_NUM_THREADS=2 python "$XENM_PY" input.pdb=$1 output.hkl=tmp.hkl anmexp.lambda=$2 \
+    inter.thresh=$INTER_THRESH inter.k=$INTER_K inter.width=$INTER_WIDTH \
+    nproc=32 model=ANMEXP_DOMAIN kpoints=1 resolution=$RES > /dev/null
+else
+  OMP_NUM_THREADS=2 python "$XENM_PY" input.pdb=$1 output.hkl=tmp.hkl anmexp.lambda=$2 nproc=32 model=ANMEXP kpoints=1 resolution=$RES > /dev/null
+fi
 if [ -e tmp.hkl ]; then
 lunus.hkl2lat tmp.hkl tmp.lat "$EXP_LAT" >/dev/null
 lunus.symlt tmp.lat tmp_sym.lat 1>/dev/null
