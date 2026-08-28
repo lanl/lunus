@@ -51,14 +51,24 @@ W_BENM=${W_BENM:-1.0}
 # still works as a manual override.
 COV_SHRINK=${COV_SHRINK:-1.0}
 
+# Rigid-body diffuse term. RIGID_BODY=True superimposes an independent
+# rigid-body translation on the internal ENM motions, preserving the total per-atom
+# B-factor. RIGID_U is the per-axis rigid translational variance sigma^2 (Ang^2);
+# RIGID_CLUSTER selects the rigid units ("components" = spring-graph connected
+# components, "molid" = crystallographic molecule). Default off (backward compatible).
+RIGID_BODY=${RIGID_BODY:-False}
+RIGID_U=${RIGID_U:-0.0}
+RIGID_CLUSTER=${RIGID_CLUSTER:-components}
+RIGID_ARGS="rigid.body=$RIGID_BODY rigid.u=$RIGID_U rigid.cluster=$RIGID_CLUSTER"
+
 if [ "$MODEL" = "ANMEXP_DOMAIN" ]; then
   OMP_NUM_THREADS=2 python "$XENM_PY" input.pdb=$1 output.hkl=tmp.hkl anmexp.lambda=$2 \
     inter.thresh=$INTER_THRESH inter.k=$INTER_K inter.width=$INTER_WIDTH \
-    backbone.enhancement=$W_BENM covariance.shrinkage=$COV_SHRINK \
+    backbone.enhancement=$W_BENM covariance.shrinkage=$COV_SHRINK $RIGID_ARGS \
     nproc=32 model=ANMEXP_DOMAIN kpoints=1 resolution=$RES > /dev/null
 else
   OMP_NUM_THREADS=2 python "$XENM_PY" input.pdb=$1 output.hkl=tmp.hkl anmexp.lambda=$2 \
-    backbone.enhancement=$W_BENM covariance.shrinkage=$COV_SHRINK \
+    backbone.enhancement=$W_BENM covariance.shrinkage=$COV_SHRINK $RIGID_ARGS \
     nproc=32 model=$MODEL kpoints=1 resolution=$RES > /dev/null
 fi
 if [ -e tmp.hkl ]; then

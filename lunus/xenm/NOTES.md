@@ -280,7 +280,7 @@ edge of double precision.
   k=1; diffuse corr 0.047 at k=0, flat −0.023 for k=1e-4…1.0, thresh sweep 6–15 Å,
   λ sweep 0.16–1.0) measured end-to-end via `calcenm.sh` at `resolution=4.0`.
 
-## Milestone: the fragile ~0.40 correlation is the acoustic (rigid-translation) diffuse signature
+## Milestone: the fragile ~0.40 correlation is a rigid-translation diffuse signature
 
 A GPU-backend port to a Linux/CUDA box (different LAPACK) exposed the root cause
 of the long-standing cutoff/rcond fragility, and a full eigenmode analysis of the
@@ -319,10 +319,10 @@ eigenvalue ~1.5e-15, one per P4_1 molecule) are:
 
 A uniform correlated covariance `V ~ σ² u uᵀ` makes the one-phonon diffuse term
 collapse to `q²|Σ_m fr_m|² = q²|F_cell(q)|²` -- the coherent crystal structure
-factor of essentially the whole protein. So the artifactual 0.40 is the
-**acoustic / rigid-body-translation diffuse pattern** `q²|F(q)|²`, which real
-crystals genuinely have. That is why it correlates with the data -- and why it is
-still not a physical ENM result.
+factor of essentially the whole protein. So the artifactual 0.40 is a
+**coherent whole-cell rigid-body-translation pattern** `q²|F(q)|²`. That is why
+it correlates with the data -- and why it is still not a physical ENM result: it
+enters only as a precision-floor leak of a mode the pseudoinverse projects out.
 
 **Why no inter-molecular ("floppy-inter") model can reach 0.40 in any limit.**
 Coherent whole-cell translation is an *exact* `λ=0` zero mode of any ENM (modes
@@ -332,8 +332,8 @@ molecular modes (modes 7+, per-molecule COM coherence exactly 0.000 -- molecules
 oppose and sum to zero), which give the **incoherent** sum `Σ_mol|F_mol|²`
 already contained in the honest 0.238 -- never the coherent `|F_cell|²`. LYS 6's
 single-spring mode sits on the floor with a small-but-nonzero overlap with the
-projected-out acoustic mode, so at rcond=1e-15 it slips just above truncation and
-smuggles a `1/λ`-amplified sliver of coherent translation back in.
+projected-out rigid-translation zero mode, so at rcond=1e-15 it slips just above
+truncation and smuggles a `1/λ`-amplified sliver of coherent translation back in.
 
 **Confirming experiments (all measured directly on 4WOR):**
 - Removing LYS 6 entirely: 4 flip modes vanish, no abort at rcond=1e-15, corr is
@@ -350,31 +350,31 @@ smuggles a `1/λ`-amplified sliver of coherent translation back in.
   optimum is λ≈0.20 (corr ~0.256).
 
 **Conclusion.** The well-conditioned single-molecule ENM has an honest ceiling of
-~0.24; it structurally *cannot* represent the acoustic/translational diffuse
+~0.24; it structurally *cannot* represent the rigid-body-translation diffuse
 component (it projects rigid-body motion out, as it must for an isolated network).
-The 0.24 -> 0.40 gap indicates that acoustic/rigid-body diffuse scattering is real
-and important for 4WOR.
+The 0.24 -> 0.40 gap suggests that a coherent rigid-body-translation contribution
+is present in the 4WOR data and is not captured by the internal modes alone.
 
 ## Way forward
 
-Capturing the acoustic component *honestly* requires giving whole-molecule
-translation a **finite** restoring force -- a proper crystalline Born-von Karman
-treatment where inter-molecular contact springs pin the acoustic branch at small
-but nonzero frequency, rather than a truncated single-molecule pseudoinverse.
-Concretely:
-- **More k-points.** At `kpoints=1` the only sampled wavevector is k=0, where
-  D(0)=Σ_R H(R) and the acoustic branch is exactly the projected-out zero mode.
-  Sampling a k-grid (BvK dynamical matrix D(k)=Σ_R H(R)e^{ik·R}) gives the acoustic
-  modes finite frequency `ω(k) ~ c|k|` away from the zone center, so their diffuse
-  contribution enters honestly instead of via a precision-floor accident.
+The rigid-translation component the pseudoinverse projects out needs to be put
+back into the model *explicitly*, rather than leaking in through the rcond floor.
+Directions to try, roughly in order of directness:
+- **Add rigid-body translation as an explicit term** (done -- see "Rigid-body
+  diffuse term" below). Each cluster is given an independent rigid translation with
+  a refinable amplitude σ², superimposed on the internal modes, with the total
+  per-atom B-factor preserved. This is the most direct way to test whether the
+  0.24->0.40 gap is a rigid-translation contribution, and it is well-conditioned
+  (no rcond dependence).
+- **Sample wavevectors away from k=0.** At `kpoints=1` the only sampled wavevector
+  is k=0, where D(0)=Σ_R H(R) and rigid translation is exactly the projected-out
+  zero mode. Sampling a k-grid (D(k)=Σ_R H(R)e^{ik·R}) would give the
+  inter-molecular springs a chance to lift that mode off zero away from the zone
+  center; whether this improves the correlation is untested here.
 - **Evaluate the diffuse signal between Bragg peaks.** Sampling reciprocal space
-  at points off the integer HKL lattice captures the continuous diffuse
-  distribution that the acoustic and low-frequency modes produce between Braggs --
-  where the k-dependence of D(k) actually shows up -- rather than only at the
-  Bragg positions.
-- Both together let the model represent `q²|F(q)|²`-like acoustic scattering with
-  a *physical* dispersion, which is the legitimate route to (and test of) a
-  correlation above the 0.24 single-molecule ceiling.
+  off the integer HKL lattice would capture the continuous diffuse distribution
+  between Bragg positions, where any k-dependence of D(k) would show up. Also
+  untested.
 
 ## Verified (this milestone)
 
@@ -387,3 +387,79 @@ Concretely:
   / `bench_backends.sh` at `resolution=4.0`.
 - GPU backend validated on a Tesla V100S: same correlation as numpy (0.240 vs
   0.238) at ~16-18x speed (15 s vs 270 s at resolution 1.6).
+
+## Rigid-body diffuse term -- implemented (`rigid.body=True`)
+
+The pseudoinverse projects out per-cluster rigid translation (an exact λ=0 zero
+mode). Instead of discarding it, we add an independent rigid-body **translation**
+of each cluster back into the diffuse calculation, superimposed on the internal
+ENM motions, as an explicit refinable amplitude. (Each cluster translates
+independently, with no coupling across clusters or unit cells -- so this is a
+per-cluster rigid translation, not a coupled acoustic branch.)
+
+**Model.** Treating internal and rigid translation as independent Gaussian
+motions, their covariances add:
+
+    M_total = M_internal(diag = u_iso − σ²)  +  σ²·(block-constant within each cluster)
+
+- The internal covariance diagonal is *retargeted* during renormalization to
+  `u_iso − σ²` (per atom), then the block-constant `σ²` is added back across each
+  cluster block (diagonal included). The diagonal returns to `u_iso` exactly, so
+  the **total per-atom B-factor is preserved** (verified: `max|V.diag − u_iso|`
+  ≈ 9e-16). The Debye-Waller factor is unchanged; only the correlation structure
+  gains the rigid component.
+- Within-cluster off-diagonals gain `+σ²`; in the linear (`coupling=qsqV`) limit
+  the rigid contribution is `Σ_g q²·σ²·|Σ_{m∈g} fr_m|²` -- a sum of per-cluster
+  `|F_cluster(q)|²` terms.
+- Both summands are PSD, so `M_total` is PD by construction -- no rcond fragility,
+  no "nonpositive V.diagonal" abort. Confirmed rcond-independent: aniso corr =
+  0.336353 at both rcond=1e-15 and 1e-13 (the pre-fix rcond leak varied 0.24-0.40).
+- The term is added to `V` (kpoints==0) and to `C[0]` only; `C[R≠0]` gets nothing.
+
+**Clusters.** `rigid.cluster=components` (default) = connected components of the
+spring graph; `rigid.cluster=molid` = the crystallographic molecule index. On 4WOR
+at λ=0.157, `components` finds 8 clusters -- 4 proteins of 136 CA + 4 isolated Ca²⁺
+ions (size 1, no springs) -- and `molid` gives 4; both score identically (the lone
+Ca contributes negligibly). σ² is capped per cluster at that cluster's smallest
+`u_iso` (minus a tiny floor) so `u_internal` stays > 0.
+
+**Result (RES=4.0, λ=0.157, `components`).** aniso corr rises with σ² = `rigid.u`:
+
+    rigid.u:      0.0    0.05   0.10   0.20   0.40   0.80   1.5
+    aniso corr:  0.2388 0.2514 0.2640 0.2889 0.3364 0.3743 0.3745
+
+The rigid-translation amplitude raises the correlation to ~0.37, plateauing near
+σ²≈0.8. `rigid.u=0` reproduces the baseline 0.238765 exactly (regression); numpy
+and torch(mps) agree to 6 digits.
+
+**Params / usage.** `rigid.body=True rigid.u=<σ² Å²> rigid.cluster=components|molid`
+(xenm.py); via `calcenm.sh`: `RIGID_BODY=True RIGID_U=0.4 RIGID_CLUSTER=components`.
+`refine_enm.py` co-refines `[λ, rigid.u]` when `RIGID_BODY=True`. The term is a
+smooth function of σ² with a parameter-independent cluster mask; the torch kernel
+consumes it unchanged.
+
+**Joint (λ, σ²) surface (RES=4.0, `components`).** Widening the λ range with the
+rigid term on: the λ optimum moves from ~0.2 (rigid off) to ~0.4.
+
+    λ ↓ / σ² →    0.0      0.4      0.8
+    0.1          0.041   −0.004   −0.033
+    0.2          0.256    0.345    0.378
+    0.4          0.200    0.406    0.417   <- best observed
+    0.8          0.160    0.388    0.405
+    1.6          0.122    0.371    0.394
+    3.2          0.099    0.360    0.387
+    6.4          0.088    0.351    0.384
+
+Best observed correlation ≈ **0.417 at (λ≈0.4, σ²≈0.8)**. The ridge is shallow in
+σ² (near-flat past ~0.8).
+
+CAVEAT -- cluster topology confound at large λ: with `rigid.cluster=components`,
+λ≥1.6 makes the ANMEXP springs bridge the crystallographic molecules and the graph
+collapses to a **single 548-atom cluster**. So the λ≥1.6 rows are a single-cluster
+rigid translation, NOT a stiffer 4-molecule model; only the λ≤0.8 rows keep the 4
+molecules as distinct rigid units. For a clean λ scan that varies internal
+stiffness *alone*, fix `rigid.cluster=molid`.
+
+**Future.** Per-cluster independent `σ²_g` (currently one shared value); then full
+rigid body (T+L / TLS) with libration displacement growing from each cluster COM;
+joint refinement of `(λ, σ²_g)`.

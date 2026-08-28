@@ -98,6 +98,50 @@ def calcCM(q,V):
   qsq = np.dot(q,q)
   return np.exp(qsq*V)-1
 
+def rigid_clusters(H, molid, mode, link_thresh):
+  """Assign each of the nsel selected atoms to a rigid-body cluster.
+
+  mode=="molid": cluster = crystallographic molecule index (a rigid unit per
+    molecule -- the weak-inter-spring limit).
+  mode=="components": cluster = connected component of the spring graph, where a
+    pair (i,j) is an edge iff the 3x3 off-diagonal Hessian block has Frobenius
+    norm > link_thresh. In the weak-inter limit this recovers the molecules
+    automatically; as inter-molecular springs strengthen, components merge.
+
+  Returns an integer cluster_id array (len nsel) with contiguous labels 0..K-1.
+  """
+  nsel = len(molid)
+  if mode == "molid":
+    labels = molid
+  else:
+    # 3x3 block-norm adjacency from the (mass-weighted) Hessian H (3*nsel square).
+    H4 = np.asarray(H).reshape(nsel, 3, nsel, 3)
+    blocknorm = np.sqrt(np.sum(H4*H4, axis=(1, 3)))   # (nsel, nsel), symmetric
+    adj = blocknorm > link_thresh
+    np.fill_diagonal(adj, False)
+    try:
+      from scipy.sparse.csgraph import connected_components
+      from scipy.sparse import csr_matrix
+      _, labels = connected_components(csr_matrix(adj), directed=False)
+    except Exception:
+      # Fallback: iterative BFS/flood-fill (small nsel, so O(nsel^2) is fine).
+      labels = np.full(nsel, -1, dtype=int)
+      cid = 0
+      for s in range(nsel):
+        if labels[s] != -1:
+          continue
+        stack = [s]
+        labels[s] = cid
+        while stack:
+          u = stack.pop()
+          nbrs = np.where(adj[u] & (labels == -1))[0]
+          labels[nbrs] = cid
+          stack.extend(nbrs.tolist())
+        cid += 1
+  # Relabel to contiguous 0..K-1.
+  uniq, inv = np.unique(labels, return_inverse=True)
+  return inv.astype(int)
+
 def calcH(Gamma,coords,cell,Hmodel):
   global masses_sqrt, bbond, w_benm
 # Backbone-enhanced ENM: multiply the force constant of sequence-adjacent
@@ -791,6 +835,22 @@ if __name__=="__main__":
 # residue still scatters with its own B-factor but has zero correlation with all
 # other atoms ("independent rigid domain"). Empty = no decoupling.
     decouple_resids = []
+# Rigid-body diffuse term: superimpose an independent rigid-body TRANSLATION of
+# each cluster on the internal ENM motions. rigid.body=True activates it (default
+# path is byte-identical when off). rigid.u is the per-axis rigid translational
+# variance sigma^2 (Ang^2), a single shared value initially. rigid.cluster picks
+# how the rigid units are defined: "components" = connected components of the
+# spring graph, "molid" = the crystallographic molecule index directly.
+# rigid.link_thresh is the 3x3 off-diagonal Hessian block-norm above which a pair
+# (i,j) counts as a spring graph edge for the connected-components clustering. The
+# total per-atom B-factor is preserved exactly: the internal covariance diagonal
+# is retargeted to u_iso - sigma^2 and the rigid block-constant sigma^2 is added
+# back. Clusters translate independently (no cross-cluster or cross-cell coupling),
+# so this is a per-cluster rigid translation, not a coupled acoustic branch.
+    rigid_body = False
+    rigid_u = 0.0
+    rigid_cluster = "components"
+    rigid_link_thresh = 1.0e-12
     args = sys.argv[1:]
     input_dict = get_input_dict(args)
     for a in input_dict:
@@ -818,6 +878,14 @@ if __name__=="__main__":
           diffuse_device = input_dict[a]
         if (a == "decouple.resid"):
           decouple_resids = [int(x) for x in str(input_dict[a]).split(",") if x != ""]
+        if (a == "rigid.body"):
+          rigid_body = (str(input_dict[a]) == "True")
+        if (a == "rigid.u"):
+          rigid_u = float(input_dict[a])
+        if (a == "rigid.cluster"):
+          rigid_cluster = input_dict[a]
+        if (a == "rigid.link_thresh"):
+          rigid_link_thresh = float(input_dict[a])
         if (a == "output.hkl"):
           hkloutname = input_dict[a]
           writeDiffuse = True
@@ -1124,6 +1192,16 @@ if __name__=="__main__":
       np.save(Dkoutname+".molid.npy",molid)
     etime = time.time()
     print("time = ",etime-stime," seconds")
+# Rigid-body clustering: partition the selected atoms into rigid units. Uses the
+# real-space Hessian H (kpoints==0) or the k=0 dynamical matrix D[0] = sum_R H(R)
+# (kpoints>0) for the "components" spring-graph adjacency. cluster_id is computed
+# here (once) and consumed after renormalization to build the rigid covariance.
+    if rigid_body:
+      cluster_src = H if (kpoints == 0 and Hmodel != "LLM") else D[0]
+      cluster_id = rigid_clusters(cluster_src, molid, rigid_cluster, rigid_link_thresh)
+      csizes = np.bincount(cluster_id)
+      print("Rigid-body term: rigid.u (sigma^2) = ",rigid_u," Ang^2 ; cluster mode = ",
+            rigid_cluster," ; number of clusters = ",len(csizes)," ; sizes = ",csizes.tolist())
 # Calculate the pseudoinverse of the Hessian
     if (Hmodel != "LLM"):
      print("Calculate the peseudoinverse of the Hessian")
@@ -1231,8 +1309,32 @@ if __name__=="__main__":
       raise ValueError("There are nonpositive V.diagonal() elements, aborting")
     if writeV0:
       np.save(V0outname,V)
-# Renormalize V and Htilde
-    renorm_fac = sigs/Vsigs
+# Renormalize V and Htilde. Normally the internal covariance diagonal is
+# renormalized to the experimental variance sigs**2 (= u_iso). With the rigid-body
+# term on, the total B is split u_iso = u_internal + sigma^2: the internal part is
+# retargeted to u_iso - sigma^2 here, and the block-constant sigma^2 is added back
+# after shrinkage/decoupling so the diagonal returns to u_iso exactly.
+    if rigid_body:
+      # Rigid translation is fully correlated within a cluster, so its covariance
+      # contribution is a single constant sigma^2 across the whole cluster block
+      # (diagonal included). To keep u_internal = u_iso - sigma^2 strictly positive
+      # for every atom, cap sigma^2 per cluster at the smallest u_iso in that
+      # cluster (minus a tiny floor). sigma2_atom is then constant within a cluster.
+      uiso = sigs*sigs
+      floor = 1.0e-8
+      sigma2_cluster = np.zeros(len(np.bincount(cluster_id)))
+      for g in range(len(sigma2_cluster)):
+        umin_g = float(np.min(uiso[cluster_id == g]))
+        sigma2_cluster[g] = min(rigid_u, max(umin_g - floor, 0.0))
+      sigma2_atom = sigma2_cluster[cluster_id]
+      ncap = int(np.sum(sigma2_cluster < rigid_u - 1.0e-15))
+      if ncap > 0:
+        print("WARNING: rigid.u exceeds the smallest u_iso in ",ncap,
+              " cluster(s); capped sigma^2 there (min u_iso = ",float(np.min(uiso)),").")
+      sigs_int = np.sqrt(uiso - sigma2_atom)
+    else:
+      sigs_int = sigs
+    renorm_fac = sigs_int/Vsigs
     for i in range(nsel):
       V[i,:] *= renorm_fac
       V[:,i] *= renorm_fac
@@ -1310,6 +1412,26 @@ if __name__=="__main__":
       if (kpoints > 0 or Hmodel == "LLM"):
         for indr in range(len(C)):
           decouple(C[indr])
+# Rigid-body term: add the block-constant rigid translational covariance sigma^2
+# back into each cluster block. The internal covariance diagonal was retargeted to
+# u_iso - sigma^2 during renormalization, so adding sigma^2 across the whole
+# cluster block (diagonal included) restores the diagonal to u_iso (total B
+# preserved exactly) and installs the within-cluster correlation that yields a
+# q^2 |F_cluster(q)|^2 diffuse term per cluster. Each cluster translates
+# independently (no cross-cluster or cross-cell coupling), so the term is added to
+# V (kpoints==0 path) and to C[0] only; C[R!=0] gets nothing.
+    if rigid_body:
+      def add_rigid(M):
+        for g in range(len(sigma2_cluster)):
+          if sigma2_cluster[g] <= 0.0:
+            continue
+          idx = np.where(cluster_id == g)[0]
+          M[np.ix_(idx, idx)] += sigma2_cluster[g]
+      add_rigid(V)
+      if (kpoints > 0 or Hmodel == "LLM"):
+        add_rigid(C[0])
+      bcons = float(np.max(np.abs(V.diagonal() - sigs*sigs)))
+      print("Rigid-body term added. B-conservation check: max|V.diagonal() - u_iso| = ",bcons)
     if (writeCvsR==True):
       cvsr = CvsR(coords,Rlist,C)
       np.savetxt(cvsrname,cvsr)
