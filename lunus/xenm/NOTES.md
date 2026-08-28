@@ -279,3 +279,111 @@ edge of double precision.
 - Two-tier `ANMEXP_DOMAIN` results (cond 6.4e14 -> ~1e3, 9 -> 3 near-zero modes at
   k=1; diffuse corr 0.047 at k=0, flat −0.023 for k=1e-4…1.0, thresh sweep 6–15 Å,
   λ sweep 0.16–1.0) measured end-to-end via `calcenm.sh` at `resolution=4.0`.
+
+## Milestone: the fragile ~0.40 correlation is the acoustic (rigid-translation) diffuse signature
+
+A GPU-backend port to a Linux/CUDA box (different LAPACK) exposed the root cause
+of the long-standing cutoff/rcond fragility, and a full eigenmode analysis of the
+k=0 dynamical matrix `D[0] = sum_R H(R)` (the matrix actually inverted at
+`kpoints=1`) resolved what the "high" correlation physically is.
+
+**Portability first.** numpy's default `pinv` rcond (~1e-15) sits exactly on the
+softest surviving mode of the near-singular Hessian, so the pseudoinverse is
+BLAS/LAPACK-dependent: fine on macOS Accelerate, but on Linux/MKL it produced
+negative `V.diagonal()` and aborted. The new `pinv.rcond` option makes the SVD
+truncation explicit and deterministic. `pinv.rcond=1e-14` gives a stable,
+machine-independent anisotropic correlation of **0.238** (matches Mac and V100 to
+3 decimals). The real rcond sweep (now that the option is actually wired in):
+
+| pinv.rcond | aniso corr |
+|-----------:|-----------:|
+| 1e-16      | aborts (negative diagonal) |
+| 1e-15      | 0.40 (fragile) |
+| >= 3e-15   | 0.238 (wide stable plateau) |
+
+The 0.40 depends on a **single** mode between relative singular value 1e-15 and
+3e-15 -- i.e. balanced on the last bit of double precision.
+
+**What the 0.40 physically is.** The four "flip" modes that carry it (rel
+eigenvalue ~1.5e-15, one per P4_1 molecule) are:
+- ~99% localized on **LYS 6** -- the sole residue in the structure connected by a
+  *single* strong spring. Weight `(1/r)exp(-r/2λ)` with `2λ=0.32 Å`: LYS 6's one
+  neighbour LEU 7 is at 3.83 Å, the next (HIS 8) at 6.49 Å is ~4 orders weaker.
+  One anchor -> a near-zero-eigenvalue pivot on the precision floor. (LYS 6 is
+  disordered: PDB `REMARK 470` flags missing side-chain atoms; B=60 Å², 94th
+  percentile -- high, but *not* the cause: residues 44-50 have higher B and make
+  no soft mode. Connectivity, not B-factor, is decisive.)
+- Their contribution to the covariance among all *other* atoms is **rank-1 to 5
+  significant figures**, with a **perfectly uniform** eigenvector (std 0.0000).
+  Per-molecule COM coherence 0.85-0.97: all four molecules translate *in phase*.
+
+A uniform correlated covariance `V ~ σ² u uᵀ` makes the one-phonon diffuse term
+collapse to `q²|Σ_m fr_m|² = q²|F_cell(q)|²` -- the coherent crystal structure
+factor of essentially the whole protein. So the artifactual 0.40 is the
+**acoustic / rigid-body-translation diffuse pattern** `q²|F(q)|²`, which real
+crystals genuinely have. That is why it correlates with the data -- and why it is
+still not a physical ENM result.
+
+**Why no inter-molecular ("floppy-inter") model can reach 0.40 in any limit.**
+Coherent whole-cell translation is an *exact* `λ=0` zero mode of any ENM (modes
+0-2, 100% in the global-translation null space) and the pseudoinverse projects it
+out by construction. Softening inter-molecular springs only lowers the *relative*
+molecular modes (modes 7+, per-molecule COM coherence exactly 0.000 -- molecules
+oppose and sum to zero), which give the **incoherent** sum `Σ_mol|F_mol|²`
+already contained in the honest 0.238 -- never the coherent `|F_cell|²`. LYS 6's
+single-spring mode sits on the floor with a small-but-nonzero overlap with the
+projected-out acoustic mode, so at rcond=1e-15 it slips just above truncation and
+smuggles a `1/λ`-amplified sliver of coherent translation back in.
+
+**Confirming experiments (all measured directly on 4WOR):**
+- Removing LYS 6 entirely: 4 flip modes vanish, no abort at rcond=1e-15, corr is
+  **identical (0.237) at both rcond 1e-14 and 1e-15** -- the pathology is gone and
+  the honest signal is unchanged.
+- The fragility does *not* migrate to the new terminus (LEU 7): LEU 7 has two
+  ~3.8 Å neighbours, so it is not singly-connected.
+- Decoupling LYS 6 as an "independent rigid domain" (zero its off-diagonal
+  covariance post-pinv, keep its B-factor) does **not** remove the 0.40 (still
+  0.404 at rcond 1e-15), because the signal is contamination of the *inverse*, not
+  LYS 6's own covariance rows. Only removing LYS 6 *before* inversion works.
+- Stiffening the terminus (larger λ, `backbone.enhancement`) monotonically
+  *lowers* the correlation (0.238 -> 0.177 as λ 0.16 -> 0.60); the well-conditioned
+  optimum is λ≈0.20 (corr ~0.256).
+
+**Conclusion.** The well-conditioned single-molecule ENM has an honest ceiling of
+~0.24; it structurally *cannot* represent the acoustic/translational diffuse
+component (it projects rigid-body motion out, as it must for an isolated network).
+The 0.24 -> 0.40 gap indicates that acoustic/rigid-body diffuse scattering is real
+and important for 4WOR.
+
+## Way forward
+
+Capturing the acoustic component *honestly* requires giving whole-molecule
+translation a **finite** restoring force -- a proper crystalline Born-von Karman
+treatment where inter-molecular contact springs pin the acoustic branch at small
+but nonzero frequency, rather than a truncated single-molecule pseudoinverse.
+Concretely:
+- **More k-points.** At `kpoints=1` the only sampled wavevector is k=0, where
+  D(0)=Σ_R H(R) and the acoustic branch is exactly the projected-out zero mode.
+  Sampling a k-grid (BvK dynamical matrix D(k)=Σ_R H(R)e^{ik·R}) gives the acoustic
+  modes finite frequency `ω(k) ~ c|k|` away from the zone center, so their diffuse
+  contribution enters honestly instead of via a precision-floor accident.
+- **Evaluate the diffuse signal between Bragg peaks.** Sampling reciprocal space
+  at points off the integer HKL lattice captures the continuous diffuse
+  distribution that the acoustic and low-frequency modes produce between Braggs --
+  where the k-dependence of D(k) actually shows up -- rather than only at the
+  Bragg positions.
+- Both together let the model represent `q²|F(q)|²`-like acoustic scattering with
+  a *physical* dispersion, which is the legitimate route to (and test of) a
+  correlation above the 0.24 single-molecule ceiling.
+
+## Verified (this milestone)
+
+- rcond sweep, the LYS6 localization/connectivity analysis, the rank-1 uniform
+  decomposition of the artifact covariance (rank-1 fraction 1.0000, eigenvector
+  std 0.0000), the global-translation null-space overlaps (modes 0-2: 100%;
+  flip modes 3-6: small nonzero; modes 7+: 0.0%), per-molecule COM coherence
+  (flip 0.85-0.97, relative modes 0.000), and the remove/decouple/stiffen
+  experiments were all measured directly on the dumped `D[0]` and via `calcenm.sh`
+  / `bench_backends.sh` at `resolution=4.0`.
+- GPU backend validated on a Tesla V100S: same correlation as numpy (0.240 vs
+  0.238) at ~16-18x speed (15 s vs 270 s at resolution 1.6).
