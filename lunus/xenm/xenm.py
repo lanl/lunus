@@ -99,7 +99,12 @@ def calcCM(q,V):
   return np.exp(qsq*V)-1
 
 def calcH(Gamma,coords,cell,Hmodel):
-  global masses_sqrt
+  global masses_sqrt, bbond, w_benm
+# Backbone-enhanced ENM: multiply the force constant of sequence-adjacent
+# backbone bonds by w_benm. Single-cell (minimum-image) path, so all bbond pairs
+# are real backbone bonds. Applied on a copy so the caller's Gamma is untouched.
+  if w_benm != 1.0:
+    Gamma = np.where(bbond, Gamma*w_benm, Gamma)
   nsel = len(coords)
   cellby2 = cell[:]/2.
   H = np.full((3*nsel,3*nsel),1.)
@@ -215,7 +220,7 @@ def CvsR(coords,Rlist,C):
   return np.array(rslt)
 
 def calcDk(coords,Rlist,Hmodel,kplist):
-  global masses_sqrt
+  global masses_sqrt, bbond, w_benm
   Dklist = list()
   Dk4Dlist = list()
   nsel = len(coords)
@@ -226,6 +231,13 @@ def calcDk(coords,Rlist,Hmodel,kplist):
     R = Rlist[indr]
 #    print "R=",R
     Gamma = np.full((nsel,nsel),1.)
+# Backbone-enhanced ENM: multiply the force constant of sequence-adjacent
+# backbone bonds by w_benm, but ONLY in the home cell (indr==0): a backbone bond
+# is a covalent link between residues i and i+1 within one molecule, which exists
+# only at R=0. For R!=0 the partner is a copy in a neighboring cell (a crystal
+# contact), never a backbone bond. The mask is parameter-independent.
+    if w_benm != 1.0 and indr == 0:
+      Gamma = np.where(bbond, Gamma*w_benm, Gamma)
     H = np.full((3*nsel,3*nsel),1.)
     H4D =  H.reshape((nsel,3,nsel,3))
     for i in range(nsel):
@@ -252,12 +264,17 @@ def calcDk(coords,Rlist,Hmodel,kplist):
         expterm = np.exp((-svec+expcut_thresh)/expcut_lambda)
         expcutvec = np.sqrt(expterm/(1.+expterm))
       if (Hmodel == "ANMEXP_DOMAIN"):
-# Two-tier weight: intramolecular pairs (same molid) use the ANMEXP falloff
-# exp(-r/2λ); inter-molecular pairs use a logistic-threshold ANM whose weight is
+# Two-tier weight: intramolecular pairs use the ANMEXP falloff exp(-r/2λ);
+# inter-molecular pairs use a logistic-threshold ANM whose weight is
 # sqrt(inter_k * logistic), so the effective force constant is inter_k*logistic
-# with logistic = 1/(1+exp((r-inter_thresh)/inter_width)). The intra/inter mask
-# is parameter-independent; both weights are smooth in the refined parameters.
-        intra = (molid == molid[i])
+# with logistic = 1/(1+exp((r-inter_thresh)/inter_width)). A pair is
+# intramolecular ONLY if it has the same molid AND lies in the same unit cell
+# (R=0, indr==0): for any R!=0 the partner is a copy in a neighboring cell, a
+# physically distinct protein, so it is inter-molecular regardless of molid.
+# The intra/inter mask is parameter-independent; both weights are smooth in the
+# refined parameters.
+        home = (indr == 0)
+        intra = (molid == molid[i]) & home
         logistic = 1./(1.+np.exp((svec-inter_thresh)/inter_width))
         wvec = np.where(intra, np.exp(-svec/anmexp_lambda/2.),
                         np.sqrt(inter_k*logistic))
@@ -867,7 +884,13 @@ if __name__=="__main__":
 # selected atom snum, parsed from the "_K" suffix that expand_to_p1 appends to
 # each scatterer label. Used by the two-tier ANMEXP_DOMAIN model to distinguish
 # intramolecular from inter-molecular atom pairs. It is parameter-independent.
+# resid[snum] is the residue sequence number, parsed from the same label
+# (e.g. 'pdb=" CA  LYS A   6 "_0' -> 6). Used by the backbone-enhanced ENM (BENM)
+# to identify sequence-adjacent CA pairs. chnid[snum] is the chain identifier
+# (a single character) so backbone bonds are not made across chain breaks.
     molid = np.zeros(nsel,dtype=int)
+    resid = np.zeros(nsel,dtype=int)
+    chnid = np.empty(nsel,dtype='U4')
     snum = 0
     for i in range(len(sites)):
       if (asel == "heavy" or (asel == "CA" and selca[i])):
@@ -879,8 +902,28 @@ if __name__=="__main__":
           molid[snum] = int(scat[i].label.rsplit('_',1)[1])
         except (IndexError, ValueError):
           molid[snum] = 0
+# Parse residue number and chain id from the pdb= field of the label, e.g.
+# 'pdb=" CA  LYS A   6 "_0' -> chain 'A', residue 6. The pdb field is fixed-width:
+# atom name (4) + altloc(1) + resname(3) + chain(1) + resseq(4).
+        try:
+          fld = scat[i].label.split('pdb="',1)[1]
+          chnid[snum] = fld[9]
+          resid[snum] = int(fld[10:14])
+        except (IndexError, ValueError):
+          chnid[snum] = ''
+          resid[snum] = -1000000 - snum
         snum = snum + 1
     print("Number of distinct molecules (molid) = ",len(np.unique(molid)))
+# Backbone-bond mask for the backbone-enhanced ENM (BENM, Ming & Wall 2005).
+# A pair (i,j) is a backbone bond iff it is sequence-adjacent (|resid|==1) within
+# the same chain AND the same crystallographic molecule (R=0 handled per-cell in
+# calcDk). The mask is parameter-independent; the BENM multiplies the force
+# constant of these pairs by the refinable factor w_benm (backbone.enhancement).
+    bbond = (np.abs(resid[:,None] - resid[None,:]) == 1) \
+            & (molid[:,None] == molid[None,:]) \
+            & (chnid[:,None] == chnid[None,:])
+    print("Number of backbone bonds (i<j) = ",int(np.sum(np.triu(bbond,1))),
+          " ; backbone.enhancement w_benm = ",w_benm)
     cellby2 = cell[0:3]/2.
     np.set_printoptions(threshold=None)
     masses_sqrt = np.sqrt(masses)

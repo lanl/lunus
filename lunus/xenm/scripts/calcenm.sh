@@ -38,12 +38,20 @@ INTER_THRESH=${INTER_THRESH:-10.0}
 INTER_K=${INTER_K:-1.0}
 INTER_WIDTH=${INTER_WIDTH:-1.5}
 
+# Backbone-enhanced ENM factor (BENM, Ming & Wall 2005). w_benm multiplies the
+# force constant of sequence-adjacent backbone (CA-CA) bonds. Default 1.0 = off
+# (plain model); ~40 reproduces the all-atom density of states for an ANM.
+W_BENM=${W_BENM:-1.0}
+
 if [ "$MODEL" = "ANMEXP_DOMAIN" ]; then
   OMP_NUM_THREADS=2 python "$XENM_PY" input.pdb=$1 output.hkl=tmp.hkl anmexp.lambda=$2 \
     inter.thresh=$INTER_THRESH inter.k=$INTER_K inter.width=$INTER_WIDTH \
+    backbone.enhancement=$W_BENM \
     nproc=32 model=ANMEXP_DOMAIN kpoints=1 resolution=$RES > /dev/null
 else
-  OMP_NUM_THREADS=2 python "$XENM_PY" input.pdb=$1 output.hkl=tmp.hkl anmexp.lambda=$2 nproc=32 model=ANMEXP kpoints=1 resolution=$RES > /dev/null
+  OMP_NUM_THREADS=2 python "$XENM_PY" input.pdb=$1 output.hkl=tmp.hkl anmexp.lambda=$2 \
+    backbone.enhancement=$W_BENM \
+    nproc=32 model=$MODEL kpoints=1 resolution=$RES > /dev/null
 fi
 if [ -e tmp.hkl ]; then
 lunus.hkl2lat tmp.hkl tmp.lat "$EXP_LAT" >/dev/null
