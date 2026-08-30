@@ -1,0 +1,1296 @@
+# Design note: bulk solvent for lunus.sf
+
+Status: **stages 1-3 implemented** — `solvent_torch.py`, `solvent=` on both entry
+points in `structure_factor_torch.py`, `tests/test_solvent.py`, gemmi parity in
+`tests/test_solvent_gemmi.py`, and the diffuse discretization study in
+`tools/study_diffuse_solvent.py` (findings in the two sections named "What the
+... test found" below). Symmetry coverage is in
+`tests/test_solvent_symmetry.py`, the degenerate-mask check is wired into
+`SolventModel`, and float32 is measured (below). The scaling fit and
+shell-resolved R against experimental amplitudes are done —
+`tools/fit_solvent_rfactor.py`, findings under "What the R-factor found". The
+recommendation they produced, `mask_blur`, is now implemented and on by
+default, and per-configuration occupancies are implemented and differentiable
+(see "Per-configuration occupancies" below). `detach_mask` now defaults to
+False, measured in "What detaching the mask costs". Still to do: a numerical
+test of `u_aniso` inside the test suite rather than only in the validation
+tool, and a FROZEN-mask mode, which subsumes the per-quantity detachment this
+note used to ask for. The diffuse convergence study has been re-run against the
+smoothed mask and its recommendation changed ("What the diffuse study found"),
+and `mask_blur`'s cost is now measured on CUDA ("At production scale") — it is
+cheap in time and costs ~1.5x peak device memory.
+
+Written 2026-08-15, revised the same day against the current code — the API
+assumptions below were checked, the cost estimate was replaced with a
+measurement, and three constraints were added (symmetry ordering, B-factor
+differentiation, and the explicit/bulk boundary).
+
+Scope, decided: the model is **explicit ordered waters plus a mask for the
+disordered remainder**, and it is aimed at **ensemble models** — N
+configurations sharing one atom array, in which the hydration is free to differ
+between members and that difference is part of what is being modelled — rather
+than at MD trajectories, where a frozen explicit water dissociates into the bulk
+that the mask already represents. Solvent **is** applied to the diffuse
+observable, `per_conformer`.
+
+lunus.sf currently computes `F_protein` only. Fitting experimental amplitudes —
+and matching what SFcalculator, Phenix and REFMAC produce — needs a bulk-solvent
+contribution. This note proposes the model, where it plugs into the existing
+pipeline, and the two design constraints that make it non-trivial here.
+
+## The model
+
+The flat / mask-based bulk solvent model (Jiang & Brünger 1994), which is what
+every refinement program implements:
+
+```
+F_total(h) = k_overall · exp(-h·U_aniso·h) · [ F_protein(h) + k_sol · exp(-B_sol·s²/4) · F_mask(h) ]
+```
+
+`F_mask` is the Fourier transform of a real-space solvent mask. Conventional
+defaults are `k_sol ≈ 0.35 e/Å³` and `B_sol ≈ 46 Å²` (Phenix; confirm against a
+current reference before pinning). `s² = 1/d²` already comes from
+`structure_factor_torch.reciprocal_inv_d2()`.
+
+Everything outside `F_mask` is arithmetic on quantities the pipeline already has.
+
+## Building the mask: threshold the density we already compute
+
+Two families are in use:
+
+- **Geometric (Phenix / REFMAC).** Solvent is everything beyond `vdW radius +
+  r_probe` from any atom center, then eroded by `r_shrink`. Conventional and
+  accurate, but a distance transform is awkward on GPU and unpleasant to
+  differentiate.
+- **Density threshold.** Solvent is wherever the protein density falls below a
+  cutoff. This is what SFC_Torch does.
+
+**Recommendation: density threshold.** `splat_density()` already produces exactly
+that grid, and `compute_fcalc()` already FFTs and extracts Miller indices from an
+arbitrary grid — so `F_mask` is one call to existing code, and the mask inherits
+the same symmetry expansion and grid conventions as the protein density.
+
+Two details, both checked against the current code:
+
+**The units work out with no new normalization.** `compute_fcalc` computes
+`ifftn(grid) · cell_volume`, so for a dimensionless mask,
+`k_sol · compute_fcalc(mask, …)` is in electrons — `e/Å³ · Å³`. And its existing
+blur term is `exp(blur · 0.25 · inv_d2)`, the same convention as
+`exp(−B_sol·s²/4)`, so `f_total` and `compute_fcalc` cannot disagree by a factor
+of four.
+
+**Mask the density AFTER symmetry expansion.** `symmetrize_sum` *sums* over the
+orbit. Build the mask from the pre-symmetrization grid and sum it, and the
+result reaches |orbit| rather than 1 and means nothing. The natural insertion
+point is right after the `if grid_ops:` line in `structure_factors_one_config`,
+which is correct — but this is a silent wrong answer, not an exception, so it is
+pinned in `tests/test_solvent_symmetry.py`.
+
+Measured there, on P4₃, the error is not distributed the way one would guess.
+The summed mask is roughly `(|orbit| − 1) +` the correct mask, and a constant
+offset lands **entirely in F(000)** — 4.3× too large against an orbit of 4.
+What survives for `h ≠ 0` is only the structure where orbit copies overlap:
+22% on that system, and less on a sparser one. So the reliable detector is the
+**grid**, not the transform: a mask whose values exceed 1 is wrong whatever its
+`F_mask` happens to look like. `mask_occupancy()` sees this immediately.
+
+**A known limitation, for the parity test's sake.** A density threshold is not
+invariant to grid spacing, B-factors or `taper_width`, and a geometric mask is
+invariant to all three. The same structure at `d_min` 0.9 and 1.8 gives
+different solvent regions, and with per-atom B up to 100 a high-B surface atom
+can fall below cutoff and be labelled solvent. That is acceptable for a
+self-consistent reward function and it is a real difference from
+Phenix/REFMAC — expect the gemmi parity check to show it, and do not read it as
+a bug.
+
+## Constraint 1: the mask must not kill gradients
+
+A binary mask `rho < cutoff` has zero gradient almost everywhere and an undefined
+one at the boundary. This is the same problem the density cutoff had, solved once
+already with `taper_factor()` — see `examples/demo_taper_gradient.py` for why the
+hard version is unusable.
+
+Reuse that function, not just its shape. `taper_factor(r, R, w)` returns 1 for
+`r ≤ R−w` and 0 for `r ≥ R`, so the mask is literally
+
+```python
+mask = taper_factor(density, cutoff, width)   # 1 in solvent, 0 in protein
+```
+
+with no rearrangement, and it inherits the C¹ guarantee and `tests/test_taper.py`
+along with it.
+
+**`width` is in density units (e/Å³), not Å.** Structurally it is the same class
+of hyperparameter as `taper_width`; numerically it is nothing like it, and a
+value copied across from the 0.1 Å atomic taper would be meaningless.
+
+**Choose the width from the shell, not from forward accuracy.**
+`∂mask/∂ρ = (π/2w)·sin(πx)`, so the gradient scales as **1/w** and is nonzero
+only in the thin shell where `cutoff−w < ρ < cutoff`. Narrow width means a large
+gradient carried by few voxels, which is grid-discretization sensitive: which
+voxels land in the shell changes with grid spacing, so `dF/dparam` can be
+unstable across `d_min` even where the forward `F` is not. The shell should span
+**at least 2–3 voxels**, which is directly checkable — count voxels with
+`0 < mask < 1` and compare against the boundary area divided by the voxel
+spacing squared. Assert it in the test.
+
+Note this tension is much sharper than for the atomic taper. There the taper is
+per-atom and the gradient is a sum over ~10⁵ atoms, which averages; here it is a
+single global level set with nothing to average against.
+
+### Two mistakes not to inherit from SFC_Torch
+
+Both are documented in sampleworks'
+`core/rewards/structure_factor.py::_compute_ensemble_ftotal`, observed in
+SFC_Torch 0.3.3's `rsgrid2realmask`:
+
+1. **Not permutation-invariant over an ensemble.** Its batch path takes the
+   quantile cutoff from batch element 0 and applies it to every configuration.
+2. **Nondeterministic above ~5M voxels per configuration.** The cutoff is then a
+   quantile of an *unseeded* `torch.randperm` subsample, so the mask and its
+   gradients vary run to run.
+
+Both disappear by deriving the cutoff from an absolute density scale rather than
+a per-batch quantile. That also makes the mask independent of ensemble
+composition — a property worth having when the ensemble is the thing being
+refined.
+
+## Constraint 2: ensemble semantics are a choice, not a detail
+
+The mask operator is nonlinear, so `mask(⟨ρ⟩) ≠ ⟨mask(ρ)⟩`:
+
+- **One mask from the summed density** — the ensemble is one averaged structure
+  with one solvent region.
+- **Mean of per-configuration masks** — each configuration carries its own
+  solvent region, averaged after masking.
+
+These are different physical models. sampleworks already exposes exactly this
+distinction as `bulk_solvent="combined"` vs `"per_conformer"`. Make it a named
+argument in `structure_factors_batch`, not an accident of where the sum lands.
+
+### The diffuse observable: compute it, and only per conformer
+
+`mean_and_diffuse` computes `⟨|F|²⟩ − |⟨F⟩|²`, which is what lunus exists for,
+and solvent belongs in it. **Decision: compute it, `per_conformer`.**
+
+The physics is the excluded volume. The mask fluctuation is *anti-correlated*
+with the protein's — where an atom moves out, solvent moves in — so per-conformer
+solvent does not add diffuse near the surface so much as **cancel** part of it.
+Diffuse computed from `F_protein` alone overestimates the contrast at low
+resolution, and this is the correction.
+
+Note that `combined` is not a weaker version of this: one mask shared by all
+configurations has zero variance and contributes **exactly nothing** to diffuse
+while still changing Bragg. The `combined` / `per_conformer` choice is the
+difference between having the effect and not having it.
+
+**What the mask cannot give back.** A static mask fluctuates only where the
+protein boundary moves. Explicit water additionally produces water–water
+correlated scattering — the diffuse water ring near ~3.5 Å, and low-angle
+solvent density fluctuations — which are real, measurable components of a
+crystal's diffuse signal. Replacing waters with a mask removes that
+contribution rather than approximating it. For the diffuse observable an
+all-atom model is therefore *more* physical than the hybrid; the hybrid's
+justification is cost, or a trajectory whose far-field solvent is not
+trustworthy. Say which claim is being made, because a low-resolution diffuse
+comparison will show the difference.
+
+### Diffuse is a variance, so mask noise biases it upward
+
+This is the constraint that should drive the parameter choices. In the Bragg
+average, per-configuration numerical jitter in the mask averages out. In
+`⟨|F|²⟩ − |⟨F⟩|²` it does not: **variance of noise adds**, so any
+frame-to-frame jitter that is not physics becomes a systematic *positive bias*
+in the diffuse signal, not a random error.
+
+The source is **level-set discretization**: the mask is sampled on a grid, and
+as atoms move, voxels flip across the taper shell partly discretely.
+
+*Measured since* — see "What the diffuse study found" below. The effect is real
+(the mask raises the pipeline's grid sensitivity about sevenfold) but the taper
+width barely controls it: a 16× wider shell buys ~25% less noise, because what
+dominates is where the sampled density crosses the cutoff rather than how
+smoothly it crosses. Grid spacing is a lever, with the noise falling as roughly
+its square, and `mask_blur` turned out to be a better one -- it attacks the
+bandlimiting directly rather than sampling a step function more finely. The
+"wider taper for diffuse" instinct is directionally right and quantitatively
+almost irrelevant.
+
+Note this is about *numerical* noise. Genuine variation between configurations —
+including which waters are associated and at what occupancy — is signal, not
+bias; see "The array must correspond; the hydration may vary" below.
+
+And the existing precision floor gets worse exactly where solvent matters:
+`docs/performance.md` records diffuse reproducing to 2e-4 on CUDA against 4e-5
+for Icalc, because it is a difference of two large nearly-equal numbers. The
+cancellation above shrinks the low-resolution diffuse signal further, so the
+same absolute noise is a larger relative error in the shells the solvent model
+was added for. Re-measure that floor with solvent on — two identical CUDA runs —
+before trusting low-resolution diffuse; float64 for the mask FFT is the
+fallback.
+
+Finally, `k_overall` and `exp(−h·U·h)` are Bragg scaling parameters. Applied per
+conformer they scale diffuse by their square. That is probably what is wanted
+for comparison, but it should be explicit rather than incidental.
+
+## The explicit/bulk boundary: ordered waters stay explicit
+
+The intended model is the crystallographic one: **ordered waters are explicit
+atoms, and the mask covers the disordered remainder** — what Phenix and REFMAC
+do. The density-threshold mask suits this better than a geometric one, because
+it does not care which atoms produced the density: explicit waters raise the
+density where they sit and so exclude themselves from the solvent region, with
+no special handling of the boundary between the two models.
+
+**Do not police this with the atom selection.** "Water is selected" is not the
+failure; a fully solvated box is. Check the mask instead, once, at setup:
+
+```python
+occupancy = mask.mean()        # or the fraction of voxels above 0.5
+```
+
+| occupancy | meaning |
+|---|---|
+| ~0.3–0.7 | a plausible crystal solvent content; the hybrid is working |
+| ≈ 0 | the selected atoms already fill the cell — `F_mask ≈ 0` and the feature is a **silent no-op** |
+| ≈ 1 | cutoff too high, or almost nothing was selected |
+
+The middle row is the one that matters. `xtraj.py`'s `selection` defaults to
+`all`, and the tracked example system is 38.1% explicit water (51,690 of 135,834
+atoms), so the default path on a solvated trajectory produces an empty mask, no
+error, and the conclusion that bulk solvent does not matter.
+
+**Implemented**: `SolventModel` measures the mask once, on the first
+configuration, and raises `SolventMaskWarning` outside [0.05, 0.99] — a band
+deliberately much wider than a real crystal's 0.3–0.7, since the point is to
+catch a model doing *nothing* rather than to second-guess an unusual one. The
+measurement is kept in `last_occupancy` / `last_shell_voxels` for callers that
+would rather report than be warned, `check_occupancy=False` disables it, and
+`warnings.simplefilter("error", SolventMaskWarning)` turns it into a failure —
+worth doing in a pipeline, since both degenerate cases otherwise produce
+numbers rather than exceptions. It costs one reduction per run, not per
+configuration, because reading the scalars back synchronises the device.
+
+### The array must correspond; the hydration may vary
+
+Whatever waters are explicit sit at the **same positions in the coordinate array
+in every configuration**, with the same count. That is a **mechanical**
+requirement: kernels are built once from a fixed element and B list, and
+`xtraj.py`'s `xray.structure` bypass resolves the selection, occupancies and
+element indices once at setup. A per-configuration *selection* would not be
+slow, it would be **silently ignored**, with the setup-time set used for every
+configuration.
+
+**It is not a claim that the hydration must be identical across
+configurations.** The opposite: an ensemble model is exactly where which waters
+are associated with the protein, and how strongly, is *meant* to differ between
+members. That variation is part of the model being fitted, and its contribution
+to the diffuse term is signal — the surface disorder the ensemble exists to
+represent. Express it as **coordinates and occupancies differing between
+configurations within a fixed array layout**, rather than as atoms entering and
+leaving the array.
+
+The density-threshold mask handles that gracefully, which is a second point in
+its favour here: as an explicit water's occupancy falls, the density where it
+sits falls with it, and the threshold hands that region back to the bulk. The
+explicit and bulk contributions stay continuous across the transition instead of
+double-counting at one end and leaving a hole at the other. How completely the
+bulk takes over is then set by `k_sol` and the cutoff, which makes it a modelling
+knob rather than an accident.
+
+**Two things that genuinely are artifacts**, and should not be confused with the
+above:
+
+- **A per-configuration selection rule.** Re-picking "waters within X Å of the
+  protein" per configuration makes membership a property of the rule and the
+  grid rather than of the model, and it is silently ignored anyway for the
+  mechanical reason above.
+- **A frozen explicit subset of an MD trajectory.** Waters wander: a first-shell
+  water at frame 0 is in the bulk a few hundred frames later, and keeping it
+  explicit there both double-counts against the region the mask represents and
+  injects one molecule's diffusion into the surface diffuse. For MD, use all
+  atoms and no mask, or protein only and a mask. Do not try to freeze a
+  hydration shell out of a diffusing solvent.
+
+### Per-configuration occupancies, and what their gradient leaves out
+
+**Implemented.** `structure_factors_batch` takes `occ` as `(n_atoms,)` — shared,
+exactly as before — or `(N, n_atoms)`, one row per configuration. That is how
+varying hydration is expressed: the array layout is fixed, so a water
+associated in one member and dissolved in another is one slot at two
+occupancies rather than an atom entering and leaving.
+
+Occupancies were **already differentiable** and nobody had noticed, because the
+batch entry point could not express per-member values. `_density_core` ends in
+`dens * occ_e[:, None]` and the per-element gather is plain indexing, so the
+gradient existed the whole time; only the shape stood in the way. Verified
+against a finite difference to 7e-11, identical with and without
+checkpointing, and with no leakage between members.
+
+**But the occupancy gradient is incomplete by default, and not slightly.**
+
+The forward model is continuous across a water dissolving — its density falls,
+the threshold hands that region back to the bulk, and `F_mask` grows to replace
+what `F_protein` lost. That continuity is one of the reasons a density
+threshold was chosen over a geometric mask. The *gradient* is not continuous in
+the same way, because `detach_mask=True` builds the mask from a detached
+density: `d(F_total)/d(occ)` carries the protein term and not the bulk term
+that cancels part of it.
+
+Measured, 300 atoms, mask calibrated to 0.5 occupancy with a live taper shell:
+
+| | Σ\|d\|F\|²/d occ\| |
+|---|---|
+| `detach_mask=True` (default), `mask_blur=0` | 3.80e5 |
+| `detach_mask=False` | **2.18e5** |
+| `detach_mask=True`, `mask_blur=100` | 7.78e5 |
+| `detach_mask=False` | **6.81e5** |
+
+The live gradient is ~40% smaller, which is the right direction — the bulk
+filling in cancels part of what the protein loses. With the blur on, the
+per-atom differences *exceed* the gradient itself, so some components change
+**sign**. Refining occupancies against the detached gradient is not a slightly
+noisy version of the right thing.
+
+**The default is not obviously wrong, and it is not obviously right either.**
+`detach_mask` was argued in Constraint 3, and that argument is entirely about
+B-factors: raising B should not grow the solvent region, because the envelope
+is a property of the molecular boundary and not of thermal motion. **That
+reasoning does not transfer to occupancy.** Lowering an occupancy genuinely
+removes matter and bulk solvent genuinely fills the space — that is physics the
+model is supposed to have, not a shortcut for an optimizer to exploit.
+
+The flag cannot distinguish them: it is one switch over the whole mask, so it
+governs coordinates, occupancies and (one day) B together. Refining occupancies
+therefore wants `detach_mask=False`, which simultaneously re-enables the
+coordinate path through the mask, and there is no way to ask for one and not
+the other today. Splitting it — per-quantity control, or a mask built from a
+density in which B is detached and occupancy is not — is the real fix and has
+not been done.
+
+**Until then: pass `detach_mask=False` when occupancies are being refined**, and
+read Constraint 3 before doing it if B is differentiable by that point.
+`tests/test_solvent.py` pins the size of the effect so it cannot change
+silently.
+
+## Constraint 3: what a threshold mask does to ∂/∂B
+
+Today `b_per_atom` reaches `build_atom_kernels_torch` as a numpy array and the
+kernels are built once at setup, so **B is not in the autograd graph** and
+`∂mask/∂B = 0`. That is not a property of the mask; it is a property of nobody
+differentiating B yet. The day `kernel_torch` becomes differentiable in B — a
+change with no diff in `solvent_torch.py` and no failing test — the solvent
+envelope silently becomes a function of thermal parameters. This section exists
+so that decision is made deliberately, while it still costs one keyword.
+
+**The derivative has the wrong sign structure.** Raising B spreads an atom's
+density and lowers it near the surface, pushing fringe voxels below cutoff, so
+the solvent region *grows into the protein* as B increases. But the bulk-solvent
+envelope is a property of the molecular boundary: a larger B means an atom's
+position is less well determined, not that there is more disordered solvent
+there. Phenix and REFMAC define the mask from vdW radii plus a probe precisely so
+that it carries no thermal dependence, and recompute it per macro-cycle rather
+than per gradient step — the mask is deliberately held constant while
+gradients flow.
+
+**It opens a cheap and wrong route for the optimizer.** `k_sol · F_mask` is
+large at low resolution and partly cancels `F_protein` there. With a
+B-differentiable mask, low-resolution amplitudes can be moved by inflating
+surface B — growing the solvent region — without moving any atom. B refinement
+is already the worst-conditioned part of low-resolution refinement; this couples
+it to the solvent model and the refined B values stop meaning what B means.
+
+**It is asymmetric between surface and core.** With per-atom B, `∂mask/∂B_i` is
+nonzero only for atoms whose density crosses the cutoff, i.e. surface atoms.
+Buried atoms get exactly zero. The solvent term therefore changes B refinement
+only where B is already least constrained by the data.
+
+**Recommendation: the mask should not see B by default.** Make the mask's
+density source explicit rather than implicitly "the grid `F_protein` used", and
+default to a detached grid (or one splatted at a fixed reference B):
+
+```python
+def solvent_mask(density, cutoff, taper_width):
+    """... The mask carries whatever gradients `density` carries. Passing the
+    same grid used for F_protein makes the solvent envelope a function of every
+    parameter that grid depends on -- including B, once B is differentiable."""
+```
+
+That gives `∂F_mask/∂B = 0`, matching geometric-mask semantics and what
+refinement programs do in practice, and leaves B-refinement conditioning
+identical to the no-solvent case. Keep the fully differentiable path behind a
+flag, with the shell-thickness check above attached to it, for anyone who wants
+to experiment.
+
+The cheap version of this is free *today*: passing the shared density already
+gives coordinate gradients and no B gradient, because B is not in the graph. The
+flag is what stops that from changing behind your back.
+
+### A related trap for whoever makes B differentiable
+
+`build_atom_kernels_torch` sizes each element's offset candidate list from the
+**maximum B among that element's atoms, at setup**. Refine B upward past that
+envelope and the density is truncated at the candidate-box boundary — and
+non-smoothly, since the taper was sized for the old radius, so the very
+discontinuity the taper exists to remove comes back. Either recompute the
+offsets per B update (discrete, and not cheap) or size the envelope for a
+maximum allowed B and clamp to it. Same future change, same day.
+
+## Proposed API
+
+A new `lunus/sf/solvent_torch.py`, mirroring `structure_factor_torch.py`:
+
+```python
+def solvent_mask(density, cutoff, taper_width):
+    """(Nu,Nv,Nw) density → smooth solvent mask, differentiable in density.
+    Thin wrapper over density_torch.taper_factor(density, cutoff, taper_width).
+    Carries whatever gradients `density` carries -- see Constraint 3."""
+
+def f_solvent(mask, cell_volume, hkl, orth_matrix):
+    """Mask grid → (n_refl,) complex. Wraps compute_fcalc."""
+
+def f_total(F_protein, F_mask, inv_d2, *, k_sol=0.35, b_sol=46.0,
+            k_overall=1.0, u_aniso=None):
+    """Combine per the equation above."""
+```
+
+The pipeline should take the mask's density source as an argument
+(`mask_density=None` → detached copy of the protein grid), so that "does the
+solvent envelope depend on B" is a visible choice rather than a consequence of
+what `kernel_torch` happens to differentiate.
+
+`structure_factors_one_config` / `structure_factors_batch` grow an optional
+`solvent=` argument; `solvent=None` must leave today's numerical behaviour
+bit-for-bit unchanged.
+
+Keep `k_sol` / `b_sol` / `k_overall` as plain tensors so they can later carry
+`requires_grad` and be refined, but ship them fixed. Fixed, unrefined scales are
+what the sampleworks structure-factor reward already assumes, so the two stay
+comparable.
+
+## Validation
+
+- ~~**Parity against gemmi's solvent masking**~~ **done** —
+  `tests/test_solvent_gemmi.py`. See "What the parity test found" below.
+- ~~**R-factor against experimental amplitudes**~~ **done** —
+  `tools/fit_solvent_rfactor.py`. See **"What the R-factor found"** below: it
+  passes, but only after a change to how the mask is built, and it overturns
+  the parity test's conclusion about how close the threshold mask is to a
+  geometric one. Bulk solvent mostly affects low resolution, so a
+  shell-resolved comparison below ~5 Å is where a wrong model shows up.
+
+  **The data is now in the tree**: `examples/compare_gemmi/7FPV-sf.cif`, the
+  deposited structure factors for the crystal `7FPV.pdb` describes, with
+  `7FPV_map_coeffs.mtz` alongside (map coefficients, derived — the R-factor
+  work does not need it).
+
+  What it holds, and the reading path, verified:
+
+  ```python
+  from iotbx.reflection_file_reader import any_reflection_file
+  arrays = any_reflection_file(file_name="7FPV-sf.cif").as_miller_arrays()
+  I    = [a for a in arrays if a.is_xray_intensity_array()][0]   # 142,372, anomalous
+  free = [a for a in arrays if "r_free_flag" in a.info().label_string()][0]
+  F    = I.merge_equivalents().array().average_bijvoet_mates().french_wilson()
+  # -> 74,301 amplitudes, 1.04-41.4 A, with 3,716 free reflections (5.0%)
+  ```
+
+  The observations are **intensities, not amplitudes** — anomalous pairs with
+  sigmas — so they need merging and a French-Wilson conversion, or the
+  comparison should be done in intensities against `|F_calc|²`. French-Wilson
+  rejects 218 reflections and is chatty; `log=None` does **not** silence it,
+  so redirect stdout if the output matters.
+
+  **The R-free flags are not boolean.** They are CCP4-convention bins 0–19 and
+  the test set is bin 0 — the 3,716 above, 5.0%, matching the 5.010% in
+  REMARK 3. Treating the column as a boolean silently puts 95% of the data in
+  the test set, and the resulting R-free looks plausible.
+
+  **The nominal target**: 7FPV was refined to **R = 0.126, R-free = 0.145** at
+  1.04 Å (REMARK 3 of the PDB entry), with a 5.0% free set — which is the same
+  free set as the flags in the cif, so the comparison is like-for-like.
+
+  **The real target is 0.179 / 0.194**, and it had to be measured rather than
+  assumed — see "What the R-factor found". Running mmtbx's own bulk solvent and
+  scaling on the deposited model reproduces 0.130 / 0.151; running it on the
+  same model converted to **isotropic** ADPs, which is all `lunus.sf` can
+  represent, gives 0.179 / 0.194. That 0.049 gap is the missing anisotropic
+  kernel and nothing to do with solvent, so it is the floor this harness works
+  against.
+
+  Do not expect to reproduce the deposited numbers. They come from a refined model with
+  refined individual B-factors, anisotropic scaling and an optimised solvent;
+  the goal here is far weaker and still worth having: **R should fall
+  substantially when the solvent term is switched on**, most of it below 5 Å,
+  and the fitted `k_sol`/`b_sol` should land near the conventional 0.35 / 46
+  rather than somewhere unphysical. If they do not, the mask model is wrong in
+  a way none of the internal checks can see.
+
+  Two gotchas specific to this pipeline. `density_scale` must be 1 for a
+  single-cell model like `7FPV.pdb` and the fold factor for anything folded
+  from a supercell — getting it wrong changes `k_sol`'s meaning by that
+  factor. And `expand_symmetry=True` is correct here, because `7FPV.pdb` is one
+  asymmetric unit and the other three copies genuinely need generating; that is
+  the opposite of the trajectory's setting.
+
+  **This criterion conflicts with shipping fixed scales.** A published refined R
+  comes from refined `k_sol`, `b_sol`, `k_overall` *and* anisotropic scaling.
+  With those pinned at 0.35 / 46 / 1 and `u_aniso=None` it will not be
+  reproduced, and the gap will not distinguish a wrong mask from missing
+  scaling. Either fit those two or three parameters by least squares **in the
+  validation harness** — standard practice, and cheap, while the shipped default
+  stays fixed — or restate the acceptance criterion as "R improves by X against
+  no solvent, shell-resolved below 5 Å", which is measurable without any
+  scaling. The first is worth the ~20 lines; without it the R number does not
+  mean much.
+- **Gradient check** in the style of `tests/test_torch_pipeline.py`: autograd
+  through the mask against a finite difference.
+
+- **Mask occupancy**, asserted to be in a plausible range on the example
+  configuration, so the silent-no-op case above fails loudly in CI rather than
+  in someone's results.
+
+- ~~**Diffuse null test / convergence study.**~~ **done** —
+  `tools/study_diffuse_solvent.py`, findings below. Note the null test as
+  originally proposed does not exist: replicating one configuration gives a
+  diffuse that is zero by construction and measures nothing, and the sub-voxel
+  translation that replaces it is not a null either, because the grid pipeline
+  does not commute with translation.
+
+  **Still open**, and now better targeted: the study run so far varies the width
+  and the grid on a water-free cluster. With explicit ordered waters the density
+  in the hydration region is intermediate between protein and bulk, so where the
+  level set falls depends on how many were kept — vary the **number of explicit
+  waters** as the second axis (the width having turned out to be the weak one).
+  If the diffuse does not change smoothly in it, the cutoff is sitting inside
+  the hydration shell rather than outside it.
+
+## What the R-factor found
+
+`tools/fit_solvent_rfactor.py`, on 7FPV: 74,301 amplitudes over 41.4–1.04 Å,
+3,716 free, against the deposited coordinates as one asymmetric unit
+(`expand_symmetry=True`, `density_scale=1`, deposited occupancies, isotropic
+equivalents of the ADPs), grid 100 × 144 × 288, cutoff calibrated to gemmi's
+Refmac mask occupancy of 0.2982.
+
+**It passes — but only with a change to how the mask is built, and the reason
+is the substantive finding.**
+
+| mask | k_sol | b_sol | R-work | R-free |
+|---|---|---|---|---|
+| threshold, `mask_blur=0` (as shipped *before* this work) | 0.554 | 199 | 0.1983 | 0.2085 |
+| threshold, `mask_blur=100` — **the shipped default now** | 0.388 | 48.9 | 0.1894 | 0.2056 |
+| …and anisotropic overall scale | 0.388 | 49.1 | **0.1810** | **0.1947** |
+| gemmi's geometric mask, through the identical fit | 0.386 | 40.0 | 0.1874 | 0.1996 |
+| *mmtbx on the same isotropic model (the target)* | *0.340* | *13.3* | *0.1789* | *0.1936* |
+| conventional values | 0.35 | 46 | — | — |
+
+Read the first row against the last two. As shipped, the threshold mask fits
+`k_sol = 0.554` and `b_sol = 199` — half again the conventional solvent density
+and a B four times too large. That is the "somewhere unphysical" this criterion
+was written to catch, and nothing inside the pipeline can see it.
+
+Worth being precise about `b_sol = 199`, because the obvious dismissal is that
+the scan hit its boundary: it does not. The scan runs to 400 and the subsequent
+LBFGS moves the value freely; 199 is a genuine optimum, which makes it a
+statement about the mask rather than an artifact of the search.
+
+**The fit machinery is not what is wrong.** Handed gemmi's geometric mask and
+changed in no other way, the same code returns `k_sol = 0.386, b_sol = 40.0` —
+the conventional values, and close to what mmtbx independently fits on this
+data (0.38 / 27 on the deposited model). So the fit recovers the right answer
+when the mask is right, which is what makes the first row attributable to the
+mask.
+
+### A density threshold has no probe radius, and at 1 Å it shows
+
+Compared voxel for voxel against gemmi's mask **at matched occupancy**:
+
+| | ours vs gemmi Refmac |
+|---|---|
+| binarised voxel agreement | **0.864** |
+| `\|F_mask\|` ratio, d > 2 Å | 1.0–1.2 |
+| `\|F_mask\|` ratio, d < 2 Å | **~1.5** |
+| `\|F_mask\|` correlation, d < 2 Å | **0.02–0.10** |
+
+The threshold mask carries about half again as much high-resolution amplitude
+as the geometric one, and that excess is *uncorrelated* with it — it is
+structure, but not the geometric mask's structure. The cause is
+straightforward: a geometric mask is built from vdW radius **+ probe** and then
+**shrunk**, and those two steps exist precisely to smooth the boundary and
+close the crevices between neighbouring atoms. A density threshold has no
+equivalent and follows every one of them. The fit responds by driving `b_sol`
+to 199, which is the model doing the only thing it can to suppress content it
+cannot use.
+
+**Smoothing the density before thresholding is the missing step**, and it is
+one FFT pair on a periodic grid, exact and differentiable. Sweeping it:
+
+| blur B (Å²) | σ (Å) | k_sol | b_sol | R-work | voxel agreement | `\|F_mask\|`/gemmi, d < 2 Å |
+|---|---|---|---|---|---|---|
+| 0 | 0 | 0.554 | 199 | 0.1983 | 0.864 | 1.55 |
+| 25 | 0.56 | 0.476 | 116 | 0.1928 | 0.900 | 1.16 |
+| 50 | 0.80 | 0.439 | 79.9 | 0.1907 | 0.921 | 0.92 |
+| **100** | **1.13** | **0.388** | **48.9** | **0.1894** | **0.939** | 0.56 |
+| 200 | 1.59 | 0.366 | 37.2 | 0.1915 | 0.933 | 0.27 |
+
+Everything moves monotonically toward the geometric-mask answer and R-work
+turns over near B = 100 Å². That σ is **1.13 Å**, which is the size of a water
+probe — the parameter arrives at the right physical value without being told
+what it is, which is the strongest evidence here that the diagnosis is right
+rather than merely a fitted improvement.
+
+R-free bottoms out earlier, at B ≈ 50 (0.2042 against 0.2056 at B = 100), so
+**B = 50–100 Å²** is the defensible range and the difference between them is
+not resolved by this one structure.
+
+### Where the improvement falls, which is the other half of the criterion
+
+Solvent contribution is `|k_sol·exp(−b_sol·s²/4)·F_mask| / |F_protein|`:
+
+| d (Å) | n | R-work no/with | ΔR-work | solvent term |
+|---|---|---|---|---|
+| 41.4 – 8 | 195 | 0.7287 / 0.2959 | −0.4328 | 177% |
+| 8 – 5 | 548 | 0.2921 / 0.1938 | −0.0984 | 60% |
+| 5 – 4 | 674 | 0.2331 / 0.1375 | −0.0956 | 17% |
+| 4 – 3 | 1,805 | 0.2370 / 0.1590 | −0.0780 | 9.5% |
+| 3 – 2 | 7,245 | 0.1787 / 0.1595 | −0.0192 | 3.0% |
+
+The improvement tracks the size of the solvent term over nearly two orders of
+magnitude, which is what says the term is doing solvent's job rather than
+absorbing some other error. (The 177% is an amplitude ratio and legitimately
+exceeds 100%: at very low resolution the solvent term is larger than
+`F_protein` and largely cancels it. That cancellation is the effect the model
+exists to represent, not a runaway scale.)
+
+**A trap in reading the per-shell table.** Equal-count shells over a 1.04 Å
+dataset show the *largest* ΔR in the highest-resolution shells — −0.38 at
+1.04 Å, where the solvent term is 0.0% of `F_protein` and `exp(−b_sol·s²/4)` is
+about 10⁻²¹. Bulk solvent is not working at 1 Å. The no-solvent column is not a
+clean baseline: with no solvent term to absorb the low-resolution deficit, the
+overall B compensates (it refines to −5.0 Å²) and throws off every shell,
+including those solvent never reaches. What the solvent restores there is the
+*scaling*. This is why the tool prints the solvent-contribution column next to
+ΔR, and why the fixed low-resolution bands above are the ones to read.
+
+### What this changes upstream
+
+**The parity test's conclusion does not transfer, and should not be relied on
+for a real structure.** It reports 0.995 voxel agreement and `|F_mask|`
+correlating at 0.9998, which reads as "the mask model barely matters". Both
+numbers were measured on 200 clustered carbons in a 30 Å cell and, for the
+transform, over low-resolution reflections only. The same comparison on a real
+crystal at 1.04 Å gives **0.864** and a correlation of **0.02** beyond 2 Å. The
+earlier numbers are not wrong; they are a sparse fixture at low resolution, and
+the discrepancy is the same "sparse model has genuine vacuum, a real one has
+only overlapping tails" effect that already overturned the fixed-fraction
+cutoff recommendation. Two conclusions from that fixture have now been reversed
+by a real structure, which is worth treating as a pattern rather than as two
+accidents.
+
+### `mask_blur`, and why it is a constant when the cutoff is not
+
+**Implemented**: `SolventModel(mask_blur=...)`, defaulting to
+`MASK_BLUR_DEFAULT = 100 Å²`, applied to the density before `solvent_mask`.
+`mask_blur=0.0` restores the unsmoothed threshold and every number measured
+before it existed. The shipped model is now the second row of the table above,
+not the first.
+
+The cutoff is a calibration and this is not, which is worth being precise
+about because the two look alike. The cutoff is a **density**, so it moves with
+the B convention, the grid and how tightly the model packs — hence
+`calibrate_cutoff`. `mask_blur` is a **length** expressed as a B factor, so the
+same value means the same physical smoothing on any grid, of any structure, at
+any resolution. That is what makes it shippable.
+
+Three independent lines say 100 Å² (σ = 1.13 Å) is the right value, and none of
+them was told the answer:
+
+| | |
+|---|---|
+| R-work on 7FPV against deposited amplitudes | turns over at B = 100 |
+| voxel agreement with gemmi's mask, 7FPV | 0.864 → **0.939**, peak at B = 100 |
+| voxel agreement with gemmi's mask, 4WOR (P4₁, unrelated crystal) | 0.912 → **0.952**, peak at B = 100 |
+
+Both crystals peak at the same value and fall away by σ = 1.4 Å, and σ = 1.13 Å
+is essentially Phenix's `solvent_radius` of 1.11 Å. A probe radius is a
+property of the solvent rather than of the crystal, so agreement between two
+unrelated structures is what should be expected if the interpretation is right
+— and it is the check that stops this from being a default calibrated on one
+dataset, which is the mistake this note has already recorded twice.
+
+R-free on 7FPV bottoms out slightly earlier (B ≈ 50), so 50–100 is the
+defensible band and the default sits at the end of it that two structures and
+the R-work curve agree on.
+
+**Cost: it is not free, and on CPU it is not cheap.** The blur is an FFT pair
+on the full grid. Measured on 7FPV, 100 × 144 × 288, float32, CPU:
+
+| | mask_blur = 0 | mask_blur = 100 |
+|---|---|---|
+| build the mask | 2.0 ms | 53.8 ms |
+| whole `apply()` | 22.5 ms | 61.6 ms |
+| whole configuration | 84.8 ms | 124.2 ms |
+
+So the solvent path costs about 2.7× what it did on CPU. On CUDA it is 1.6×
+and ~0.4 ms per configuration, measured — see "At production scale" below,
+where the finding is that the blur's real cost on GPU is peak memory (+113 MB,
+~1.5×) rather than time.
+
+**One optimization is available and not taken.** `compute_fcalc` already
+computes `ifftn(density)` for `F_protein`, and for real input
+`fftn(d) = N·conj(ifftn(d))`, so the blur's forward transform is recoverable
+from work already done — one FFT instead of two. It needs `compute_fcalc` to
+hand back its grid, which complicates the checkpointing contract, so it is
+recorded rather than done.
+
+## The FFT-artifact blur is the same operation as `mask_blur`
+
+Atoms can be splatted with an extra B and the spread removed afterwards with
+`exp(+blur·s²/4)` — `compute_fcalc`'s `blur=`, which gemmi does by default.
+In exact arithmetic it cancels; what it buys is that a sharp Gaussian sampled
+on a finite grid is badly represented and a spread one is not.
+
+**It is literally the same operation as `mask_blur`.** Adding B to an atomic
+form factor convolves that atom with a Gaussian, density is a linear sum of
+atoms, and convolution is linear — so splatting with `blur=B` is exactly
+convolving the grid by B. Verified to 1e-4 of peak, the residual being the
+real-space taper truncation.
+
+Two consequences, and they point in opposite directions.
+
+**Do not un-blur `F_mask`.** `f_solvent` passes `blur=0.0` and that is correct:
+the mask is a 0/1 function, not a blurred density, so multiplying it by
+`exp(+blur·s²/4)` would amplify its high-resolution content for no reason. It
+has no B to undo.
+
+**But do subtract the pipeline blur from `mask_blur`,** because the density the
+mask is thresholded from *does* carry it, and the two smoothings add. A run
+with `blur=40` and the default `mask_blur=100` would hand the mask 140 Å² —
+1.4× the probe radius calibrated against two crystals, varying with a knob
+that is supposed to cancel out of the answer entirely. `mask_blur` is therefore
+a **total**: `SolventModel.build_mask(..., pipeline_blur=B)` applies only the
+remainder, `structure_factors_one_config` passes its own `blur` through
+automatically, and the mask a structure gets is invariant to the trick. A
+pipeline blur exceeding `mask_blur` warns, since nothing downstream can sharpen
+a density back.
+
+### How much blur, and why not "always the same amount"
+
+Measured against **exact direct summation** (cctbx, no grid), 7FPV, 0.633 Å
+voxels, `d_min` 2.0, R over all reflections:
+
+| B_iso | blur 0 | 10 | 20 | 40 | 80 |
+|---|---|---|---|---|---|
+| **2** | **0.186** | 0.0045 | 0.0004 | 0.0002 | 0.0006 |
+| 10 | 0.0078 | 0.0005 | 0.0002 | 0.0002 | 0.0007 |
+| 30 | 0.0002 | 0.0002 | 0.0002 | 0.0003 | **0.0012** |
+
+The top-left number is the case that matters: **R = 0.186 at B = 2 with no
+blur**, which is 37× this pipeline's entire disagreement with gemmi, and
+per-atom B from a topology file routinely goes that low. Without the trick,
+`use_top_bfacs=True` on a low-B model is not slightly degraded, it is wrong.
+
+The bottom-right number is why "always blur generously" is also wrong. The
+un-blur multiplies by `exp(+blur·s²/4)` — at `d_min` 2 Å and blur 80 that is a
+factor of 148 — applied to whatever error is present, so at B = 30 an 80 Å²
+blur is **5× worse than none**.
+
+`cell_utils.recommended_blur(b_min, grid_shape, orth_matrix)` returns the
+smallest blur that reaches the floor and no more. The target comes from
+sampling: σ = √(B/8π²) must be resolved by the voxel, the floor above is
+reached at σ ≈ 0.85 voxels, so `B_target ≈ 57 h²` with `h` the largest voxel
+dimension. It returns **0** whenever the model's own B already clears it —
+which is the case for the published compare_gemmi configuration and for 7FPV at
+`d_min` 1.04, so nothing already measured moves. `xtraj.py`'s torch engine
+takes `torch_blur=auto` (default), a number, or 0.
+
+## What detaching the mask costs, and why freezing it is the better answer
+
+`detach_mask` cuts the autograd edge from the mask back to the density. It
+changes no forward value — `detach()` is an identity on data — so it can only
+change what `backward()` returns.
+
+**The default is now `False`.** The forward pass rebuilds the mask from the
+current density on every call, so a backward pass that treats it as constant is
+the gradient of a *different model* than the one being evaluated. Measured on
+7FPV, 3,341 atoms, 11,011 reflections to 2.0 Å, coordinates displaced 0.296 Å
+and refined against a known target with Adam (learning rate swept for each, so
+neither is penalised for gradient magnitude):
+
+| | best loss / start | mean displacement |
+|---|---|---|
+| `detach_mask=True` | 0.00787 | 0.265 Å |
+| `detach_mask=False` | **0.00163** | **0.213 Å** |
+
+4.8× lower loss, and 2.5× more of the displacement recovered. The live gradient
+costs ~25% more per step, since the mask FFT joins the backward graph.
+
+**A synthetic fixture got this badly wrong, and the way it did is the useful
+part.** On 100 random carbons in a 25 Å cell the same measurement gives
+`cos(detached, live) = −0.5`, and refinement *diverges* with the detached
+gradient — the loss ends 169× worse. On 7FPV the cosine is **+0.77** and both
+settings converge. The mechanism: a sparse model's calibrated cutoff sits far
+down the density tail, so the taper shell is thin, and `∂mask/∂ρ ∝ 1/w`
+amplifies the solvent term until it dominates and reverses the sign. A packed
+crystal never enters that regime. This is the fifth conclusion in this note
+that a sparse fixture got wrong — see also the fixed-fraction cutoff, the
+parity voxel agreement, `mask_blur`'s benefit, and the saturated-mask gradient
+test.
+
+### Why the long-term answer is a frozen mask, not a live one
+
+`detach_mask=True` is not simply a worse gradient. It is the *correct* gradient
+of the model in which the mask is **held fixed** — which is what Phenix and
+REFMAC actually do, recomputing the mask once per macro-cycle and holding it
+constant while gradients flow. Today's pipeline implements neither cleanly: it
+has the forward of the live model and the backward of the frozen one. Both
+alternatives are coherent; freezing is the better one, for four reasons.
+
+**It removes the worst-conditioned term from the gradient.**
+`∂mask/∂ρ = (π/2w)·sin(πx)` is nonzero *only* inside the taper shell, so the
+gradient is carried by a thin set of voxels whose membership changes discretely
+as atoms move. That makes `∂F/∂x` depend partly on grid alignment rather than
+on the structure — Constraint 1's argument, and the same discretization
+sensitivity the diffuse study measured. Freezing keeps the mask in the forward
+model and takes it out of the derivative.
+
+**It generalises to B, where per-quantity detachment is only a patch.** With
+B differentiable, a live mask grows into the protein as B rises — backwards,
+since the envelope is a property of the molecular boundary, not of thermal
+motion (Constraint 3). A frozen mask gives `∂mask/∂B = 0` *by construction*,
+which is exactly geometric-mask semantics, with no need to detach quantities
+selectively.
+
+**It is cheaper where cost actually binds.** A pinned mask is not rebuilt each
+step: no taper evaluation, no `mask_blur` FFT pair, and no mask transform in
+the backward graph. On CUDA that is ~0.4 ms and, more importantly, the +113 MB
+of peak memory the blur costs — amortised over a whole macro-cycle instead of
+paid per step, against a constraint the ensemble path is already bounded by.
+
+**It makes the inner problem consistent.** Within a macro-cycle, forward and
+backward agree on one fixed mask, so the optimizer descends a genuine
+objective; the mask update becomes an outer fixed-point iteration. That is a
+cleaner object than one non-convex objective with a moving level set inside it.
+
+**One thing freezing must not do: share a mask across ensemble members.** A mask
+held fixed across configurations has zero variance and contributes *exactly
+nothing* to `⟨|F|²⟩ − |⟨F⟩|²`. Freezing is across optimizer steps, per member —
+never across the ensemble. See "The diffuse observable" above.
+
+**Not implemented**, because nothing can pin a mask across calls today:
+`SolventModel` rebuilds it inside `apply()`. It needs a way to compute a mask,
+hold it, use it for both forward and backward, and refresh on demand — at which
+point `detach_mask` stops being a choice between a right and a wrong gradient
+and becomes a choice between two models.
+
+## What the parity test found
+
+`tests/test_solvent_gemmi.py`, on 200 carbons clustered in a 30 Å cell at 0.625 Å
+grid spacing, cutoff calibrated so both models call the same fraction of the
+cell solvent (0.886).
+
+**The convention matches.** gemmi's mask is 1 in solvent and 0 in the molecule,
+same as `solvent_mask`. Asserted by sampling at atom centres, since a flipped
+mask is the easiest catastrophic error to make here and would otherwise show up
+only as a strange `F_mask`.
+
+**Agreement is inside the spread of gemmi's own conventions**, which is the
+only defensible yardstick for comparing two different models:
+
+| | binarised voxel agreement |
+|---|---|
+| ours vs gemmi `Cctbx` | **0.995** |
+| gemmi `Refmac` vs `Cctbx` | 0.987 |
+| gemmi `VanDerWaals` vs `Cctbx` | 0.985 |
+
+`|F_mask|` correlates at 0.9998 with R = 0.036 over the low-resolution
+reflections where bulk solvent contributes at all. So the threshold mask is a
+defensible stand-in — the model difference is smaller than the disagreement the
+field already tolerates between radii sets.
+
+### But matching gemmi exactly forces a nearly hard threshold
+
+This is the substantive finding, and it changes how the cutoff should be
+chosen. Matching gemmi's boundary puts the cutoff far out in the density tail
+(1.45e-3 of peak here), where the density falls through the taper's range in
+well under a voxel. The taper width cannot rescue it: `mask = 1` requires
+`ρ ≤ cutoff − width`, so a width approaching the cutoff eliminates the fully
+solvent region altogether (measured: width = 4× cutoff drops occupancy from
+0.83 to 0.12).
+
+The result is a mask that is smooth in principle and a hard threshold in
+practice — 31 shell voxels out of 110,592 — which is precisely what the
+gradients and the diffuse variance depend on.
+
+The curve, on the same fixture, with width = ½ cutoff throughout:
+
+| cutoff / peak ρ | solvent fraction | agreement vs gemmi | shell voxels |
+|---|---|---|---|
+| 1e-5 | 0.828 | 0.995 | 13 |
+| 1e-3 | 0.830 | 0.995 | 93 |
+| **1e-2** | **0.835** | **0.994** | **1,464** |
+| 3e-2 | 0.850 | 0.978 | 2,331 |
+| 1e-1 | 0.874 | 0.954 | 3,746 |
+| 3e-1 | 0.920 | 0.908 | 8,701 |
+
+(rows measured on the larger 400-atom fixture; the test's own numbers differ in
+magnitude and not in shape)
+
+**Recommendation, superseded — see "A real case" below.** The reasoning here
+("put the cutoff near 1% of peak") was drawn from this sparse fixture and does
+not transfer to a real structure, where the same calibration lands near 11% of
+peak. Calibrate on occupancy, with `calibrate_cutoff()`; do not use a fixed
+fraction of peak.
+
+Note what this means for the diffuse work: a 2–3 voxel shell, which is what the
+variance-bias argument asks for, is at the expensive end of this curve on a
+0.625 Å grid and will be more expensive on the finer grids real `d_min` values
+imply. The width, the grid and the diffuse bias have to be chosen together —
+the convergence study in Validation is where that gets settled, not here.
+
+### The cutoff is a calibration, not a constant
+
+The matched cutoff moves by 21× between B = 20 and B = 60 on the test fixture,
+and by three orders of magnitude on a larger one. Borrowing B = 20's cutoff for
+a B = 60 structure costs real agreement (0.996 → 0.974). A geometric mask does
+not move with B and a density threshold does — so the cutoff must be calibrated
+for the system, B convention and grid in use. The test asserts this rather than
+describing it, so that a future hard-coded default fails loudly.
+
+## What the diffuse study found
+
+`tools/study_diffuse_solvent.py`, on a 200-atom cluster in a 30 Å cell, 8
+configurations displaced by σ = 0.3 Å, low-resolution reflections only, cutoff
+at 1% of peak density per the parity recommendation.
+
+**The instrument, and what it is not.** Displace every configuration by the
+same sub-voxel vector. For the underlying model this multiplies every `F(h)` by
+one common phase, so `⟨|F|²⟩` and `|⟨F⟩|²` are both unchanged and diffuse is
+exactly invariant. The grid pipeline does not reproduce that: `splat_density`
+samples each atom at fixed voxel centres, so a displaced structure is
+*resampled* rather than shifted, and recovering the true shift would require
+interpolation. The residual is therefore **not a null test** and not a bound on
+the error against the truth — it measures how far the discretized calculation
+is from a translation-invariant one. Grid refinement is the complementary
+measurement: it is closer to the continuum limit but moves the sampling of the
+density and the mask together, so it cannot separate them. Differencing with
+and without solvent is what isolates the mask's share.
+
+**The mask multiplies the pipeline's grid sensitivity by about seven.** At
+0.625 Å voxels, translation non-commutation is 3.6e-3 of the diffuse signal
+without solvent and 2.0e-2 with it. The reason is not subtle: the mask is
+nearly a step function, so it is far less bandlimited than the smooth atomic
+density and correspondingly worse sampled.
+
+**The solvent's contribution to diffuse is real and large** — 16% of the
+protein-only diffuse in this system, and stable across grids (0.166, 0.161,
+0.166 at three spacings). It is signal, not an artifact.
+
+**Grid spacing is the lever; the taper width is not.**
+
+| voxel | solvent signal | translation noise | refinement | signal / noise |
+|---|---|---|---|---|
+| 0.833 Å | 0.166 | 4.3e-2 | 2.8e-2 | 3.8 |
+| 0.625 Å | 0.161 | 2.0e-2 | 1.5e-2 | 8.1 |
+| 0.417 Å | 0.166 | 8.9e-3 | 5.7e-3 | 18.6 |
+
+The noise falls roughly as the **square of the voxel spacing** while the signal
+stays put. Against that, widening the taper barely helps: over a 16× change in
+shell voxels (width 0.05 → 0.9 × cutoff) the noise moves only ~25%, because
+what dominates is *where the sampled density crosses the cutoff*, not how
+smoothly it crosses. That is worth stating plainly because the earlier reasoning
+in this note — "diffuse wants a wider taper than Bragg" — is directionally right
+and quantitatively almost irrelevant.
+
+**Superseded: `mask_blur` is a cheaper lever than the grid.** The paragraph
+that stood here recommended oversampling — raising `rate` to 2–3 to buy the h²
+improvement at the cost of one FFT on a larger grid. That still works, but the
+probe-radius blur added for the R-factor work buys more of the same thing for
+less, which is unsurprising in hindsight: the mechanism the study identifies is
+that *the mask is nearly a step function and therefore badly bandlimited*, and
+the blur attacks that directly where a finer grid only samples it better.
+
+Re-measured, same study, occupancy held fixed, taper width 0.5 × cutoff:
+
+| voxel | translation noise, `mask_blur=0` | `mask_blur=100` | signal/noise |
+|---|---|---|---|
+| 0.833 Å | 4.31e-2 | **1.64e-2** | 3.8 → 6.5 |
+| 0.625 Å | 1.99e-2 | **7.34e-3** | 8.1 → 14.3 |
+| 0.417 Å | 8.94e-3 | **1.43e-3** | 18.6 → **74.4** |
+
+The `mask_blur=0` column reproduces the published table above exactly, so this
+is like-for-like and the anchoring change below did not move the baseline.
+
+**The blur on a 0.833 Å grid beats refining to 0.625 Å without it** (1.64e-2
+against 1.99e-2) — one FFT pair rather than a 2.4× larger grid, and the two
+compose: at 0.417 Å the blur is worth a further 6.3×.
+
+Two honest qualifications. The **solvent signal itself falls**, 0.166 → 0.105,
+because a smoother mask genuinely fluctuates less; the noise falls faster, so
+signal/noise improves everywhere, but this is not a free lunch and the blurred
+mask is a weaker diffuse contributor. And the blur delivers the **2–3 voxel
+shell** the taper-width argument wanted without widening the taper — 967 → 2,720
+shell voxels at 0.625 Å — so `taper_width` can stay where it is.
+
+**Recommendation: take the blur first, then oversample if the required
+signal/noise is still not met.** The default `rate=1.5` gives `d_min/3`, so a
+diffuse study at `d_min` 2 Å lands at 0.67 Å and, with the blur on, a
+signal/noise near 14 rather than 8. Re-run this study when the system changes;
+the numbers are one cluster in one cell and the *scaling* is the transferable
+part, not the values.
+
+**Note on the anchoring.** This study used to fix the cutoff at 1% of peak on
+every grid — the recommendation this note has since superseded, and one that
+cannot survive `mask_blur` at all, since blurring changes both the peak and the
+shape of the density distribution, so the same fraction of peak carves out a
+different fraction of the cell. It now holds the *occupancy* fixed instead, at
+whatever the old rule produced, across blur values and across both grids. The
+coarse/fine refinement comparison gains from that too: it previously used 1% of
+each grid's own peak, which was already slightly inconsistent between them.
+
+A cheap regression guard lives in `tests/test_solvent.py`
+(`test_solvent_diffuse_signal_dominates_grid_alignment_noise`), pinned at a
+factor of three on a 0.62 Å grid where the measured ratio is ~5.
+
+## At production scale
+
+`tools/bench_solvent.py`, float32, one configuration.
+
+**Measured on CUDA**, 7FPV in its own cell (P2₁2₁2₁, 120 × 160 × 360, waters
+excluded), whole pipeline warmed before timing:
+
+| phase | ms, `mask_blur=0` | ms, `mask_blur=100` |
+|---|---|---|
+| splat (3,165 atoms) | 5.3 | 5.4 |
+| symmetrize | 0.6 | 0.6 |
+| fft+extract (protein) | 0.3 | 0.3 |
+| **solvent (whole `apply`)** | **0.9** | **1.1** |
+| solvent, repeated block (steady state) | 0.7 | 1.1 |
+| **per configuration** | **7.1** | **7.4** |
+
+The last row is protein + solvent, not the tool's `total`. `total` sums the
+phase rows and two of those OVERLAP — the mask build is inside `apply()`, not
+additional to it — so it overstates the blurred configuration by the mask
+build. Harmless before `mask_blur` (0.1 ms) and worth 1.5 ms after.
+
+**Solvent costs ~1 ms per configuration either way.** The blur adds ~0.4 ms —
+**1.6× on the solvent path, against 2.7× on CPU** — because a GPU FFT on this
+grid is 0.3 ms where the CPU's is 20. On the 135,834-atom trajectory frame
+(≈70 ms) that is ~1.6% of a frame. The cost is **per-grid, not per-atom**: the
+mask, the blur and their FFTs scale with voxels while the splat scales with
+atoms.
+
+**On GPU the blur's real cost is memory, not time.** Peak device memory goes
+229 MB without it to **342 MB** with — about +113 MB, which is the cached
+frequency grid (27 MB), the `complex64` forward transform (55 MB) and its
+inverse. That is a ~1.5× increase in the quantity `docs/performance.md` names
+as the binding constraint for ensembles, so it is the number to check before
+raising N, not the milliseconds. The cached grid is per `SolventModel` and
+therefore shared across configurations, so it amortizes; the transform
+intermediates do not.
+
+Two measurement traps found in taking these, both worth keeping:
+
+- **Warm the model, not just the pipeline.** `mask_blur` caches a grid-sized
+  frequency array on first use *per `SolventModel` instance*. Timing a freshly
+  constructed one charges that construction to the mask, which on CUDA read as
+  a 1.5 ms mask build inside a 1.1 ms `apply()` — impossible, and how it was
+  caught. `bench_solvent.py` now warms the instance too.
+- **A fixed fraction of peak is not comparable across `mask_blur` values.**
+  Blurring moves the peak and reshapes the distribution, so `--cutoff-frac
+  0.01` gave occupancy 0.5516 unblurred and 0.2772 blurred — different masks,
+  and `|F_total|/|F_protein|` of 0.9275 against 0.9758 comparing nothing. At a
+  matched occupancy of 0.5516 the blurred mask gives 0.9394. Use
+  `--occupancy`, which the tool now takes and warns about.
+
+Two earlier figures for this were wrong and are worth recording as traps. A
+"3.9% on compare_gemmi" number came from forcing a mask onto an all-atom MD
+model by selecting the peptide — a configuration nobody should run, since that
+model carries its solvent explicitly. And an "85.9% of the frame" number was
+one-time CUDA library initialisation, `torch.linalg.inv` loading cuSOLVER on
+first use, landing in the timed row: the same block repeated measured 0.7 ms.
+Both benchmarks now warm the whole pipeline before timing.
+
+### Fold last: the mask belongs in the model's own frame
+
+Folding a model into a smaller cell destroys the boundary the mask needs.
+Measured on the compare_gemmi topology, protein only, cutoff 1% of peak:
+
+| frame | median ρ | occupancy |
+|---|---|---|
+| the model's own P1 box | 0.076 | **0.344** |
+| folded into the crystallographic cell | 0.578 | 0.010 |
+
+So a mask thresholded from the folded density describes a cell with no empty
+space left in it. The order has to be: build the density in the model's frame,
+**build the mask there**, then fold.
+
+`supercell=(na, nb, nc)` on both entry points does that. The atoms are splatted
+onto the larger grid, the mask is built on it, and density and mask are folded
+into the target cell separately — which is exact, because folding is linear, and
+which keeps `exp(−B_sol·s²/4)` in reciprocal space where it belongs rather than
+forcing the mask to be blurred in real space before it is added.
+
+**Commensurate or refuse.** `symmetry_torch.supercell_factors()` derives the
+factors from the two cells and raises unless each axis ratio is an integer,
+because folding a density *grid* is only exact when the target tiles the source.
+(Folding *atoms* is always well defined — the modulo in the splat's scatter —
+which is why the constraint only appears once masks are folded.) A model
+spanning several cells already contains its symmetry copies, so `supercell=`
+refuses `grid_ops=` as well: expanding again would double-count, and summing a
+mask over the symmetry orbit does not give a mask.
+
+Without solvent, `supercell=` changes nothing observable, and there is a test
+asserting exactly that against the direct path — if the two foldings ever
+disagree, every supercell result is suspect.
+
+### Retracted: "the compare_gemmi system cannot exercise this model"
+
+An earlier version of this section said that, on the strength of a mask that
+came out empty with any selection or cutoff. The measurement was real; the
+explanation was wrong, and so was the conclusion.
+
+The example was being run with `unit_cell=88.451,88.451,39.823` and
+`space_group=P43`, carried over from a different example. The crystal is **PDB
+7FPV, 34.196 × 45.558 × 99.044, P2₁2₁2₁**, and the simulation box is exactly a
+2×2×2 supercell of it. Folding into the correct cell stacks the eight images
+coherently and the boundary survives; folding into a cell with no integer
+relationship to the box scatters 32 protein copies at unrelated positions and
+fills it solid.
+
+| configuration | atoms | occupancy in the box | occupancy after folding |
+|---|---|---|---|
+| wrong cell, 88.451 / P4₃, protein only | 77,056 | — | **0.0100** |
+| **7FPV cell, P2₁2₁2₁, 2×2×2, protein only** | 77,056 | 0.3443 | **0.3122** |
+| 7FPV cell, all atoms (explicit water) | 135,834 | 0.0022 | 0.0000 |
+
+So the system exercises the model perfectly well, and the all-atom row is still
+the degenerate case this note warns about — explicit bulk water leaves nothing
+for a mask to find, which is a property of the model, not of the cell.
+
+`calibrate_cutoff(density, 0.50)` on the folded protein-only density lands at
+**1.1e-01 of peak**, the same ~11% found independently on 4WOR. Two unrelated
+real crystals agreeing on the calibration is worth more than either alone.
+
+**The lesson worth keeping** is about the diagnosis, not the cell: an empty
+mask says the density has no empty space in it, and that has at least two
+causes — a model that genuinely fills the cell (explicit solvent), and a model
+folded into the wrong cell. `mask_occupancy()` detects the symptom; it cannot
+distinguish the causes. Check that the box is a supercell of the cell before
+concluding anything about the solvent, which is what
+`symmetry_torch.supercell_factors()` is now for.
+
+### The right input is a crystallographic model
+
+One asymmetric unit in its own cell, with solvent channels. Two of them,
+independently:
+
+| structure | occupancy | shell voxels | `\|F_total\|/\|F_protein\|` |
+|---|---|---|---|
+| 4WOR, P4₁ | 0.5097 | 258,256 | 0.9176 |
+| 7FPV, P2₁2₁2₁ | 0.5516 | 672,888 | 0.9275 |
+
+— textbook solvent contents, and a 7–8% low-resolution contrast cancellation,
+which is what this model exists to represent.
+
+Both rows predate `mask_blur` and were taken at `mask_blur=0`, cutoff 1% of
+peak. At the same occupancy with the blur on, 7FPV gives 0.9394 rather than
+0.9275; the shell voxel counts roughly double, which is the blur delivering the
+2–3 voxel shell without widening the taper. The conclusion — a real
+crystallographic model exercises this and an MD box does not — is unaffected.
+
+This also sharpens the scope statement at the top. Bulk solvent belongs with
+crystallographic models and ensembles built from them; an all-atom MD box in
+its own P1 frame already contains its solvent explicitly and needs no mask.
+
+## A real case: 4WOR
+
+P4₁, 48.499 × 48.499 × 63.430, waters excluded, 160 × 160 × 208 grid, d_min 2.0,
+9,988 reflections. `F_total` built two ways — our threshold mask, and gemmi's
+geometric mask through the same FFT and the same `f_total` — so the comparison
+isolates the mask model in the quantity that would actually be fitted.
+
+| cutoff | occupancy | shell voxels | R vs gemmi-mask `F_total` |
+|---|---|---|---|
+| 1% of peak (the sparse-fixture recommendation) | 0.3817 | 57,076 | 0.0528 |
+| 0.3% of peak | 0.3752 | 5,932 | 0.0549 |
+| **occupancy-matched, = 11% of peak** | 0.5085 | 377,216 | **0.0246** |
+
+**The fixed-fraction recommendation was wrong for real structures.** Matching
+gemmi's solvent content on 4WOR needs a cutoff two orders of magnitude higher
+than the sparse fixture implied, and it is simultaneously twice as accurate
+(R 0.025 against 0.053) and an order of magnitude smoother (377k shell voxels
+against 57k). The earlier tension — "matching gemmi forces a nearly hard
+threshold" — was an artifact of a model with genuine vacuum between its atoms.
+A real structure has no vacuum, only overlapping tails, so carving out the same
+volume takes a much higher threshold, and that threshold sits where the density
+is varying quickly and the shell is thick.
+
+Hence `calibrate_cutoff(density, target_occupancy)`: bisection to a requested
+solvent content, run once at setup. It also refuses targets outside the
+reachable range, which is **not** (0, 1) — a model with vacuum has an occupancy
+floor at the vacuum fraction, and asking for less than that used to return a
+meaningless cutoff without complaint.
+
+**How large is the model difference, in context?** At the calibrated cutoff,
+`F_total` from the two masks agrees to R = 0.025 overall and 0.036 in the worst
+shell (> 6 Å). The solvent contribution itself — `F_protein` against `F_total` —
+is R = 0.066 overall and **0.267 beyond 10 Å**. So the choice of mask model is
+roughly a third of the size of the effect it models at low resolution: real, and
+subdominant.
+
+## float32 is not the limiting precision
+
+Everything in the tests runs float64 for exact comparisons; production runs
+float32 on a GPU, and the mask is the part of the pipeline most likely to care,
+since its level set sits in the density tail and its taper shell can be a few
+tens of voxels wide.
+
+Measured, same structure through both precisions:
+
+| cutoff | shell voxels (f32 / f64) | mean rel. error on F_total | max |
+|---|---|---|---|
+| 1% of peak | 1134 / 1134 | 1.3e-6 | 3.1e-5 |
+| 1e-5 of peak | 9 / 9 | 1.2e-5 | 1.6e-4 |
+
+The thin-shell case — the one a geometric-mask match forces — costs about 9×,
+which is the expected direction and still small. **The shell voxel count is
+identical in the two precisions in both cases**, so the level set does not move;
+what differs is only the taper value within it.
+
+For the diffuse observable, the cancellation-sensitive one, float32 against
+float64 is **1.6e-6 with solvent and 3.0e-6 without** — the mask does not make
+it worse.
+
+Against `docs/performance.md`'s reproducibility floor for this pipeline — GPU
+non-determinism of 4e-5 on Icalc and 2e-4 on diffuse — float32 sits one to two
+orders of magnitude below the noise already present. It is not worth switching
+the solvent path to float64.
+
+## Cost
+
+One extra FFT per configuration, plus the mask evaluation over the grid.
+
+**Measured, not assumed** — CUDA, the corrected 120 × 160 × 360 grid
+(`docs/performance.md`): `fft+extract` is **0.3 ms/frame** median and
+`symmetrize`, a comparable grid-wide pass, is 0.6 ms, in a frame whose
+per-frame work is ~70 ms. Directly measured on 7FPV, the solvent path costs
+**~1 ms** — one more FFT plus a pointwise taper. The earlier note here — "at
+300³ the FFT is not the cheap part" — was wrong; the splat is ~94% of the
+per-frame work and everything else together is under 5 ms.
+
+Two caveats that survive the measurement. Under guidance the cost lands per
+configuration per guided step, so it multiplies with the ensemble. And it
+interacts with `use_checkpoint`: the mask FFT must happen **inside** the
+checkpointed region, or the density grid is retained for all N configurations
+simultaneously and the peak memory that checkpointing exists to control comes
+back.
+
+## Why this matters outside lunus
+
+sampleworks' `StructureFactorRewardFunction` (SFC_Torch-backed) is memory bound
+on its ASU-grid batch and does not reach large systems. A lunus path with bulk
+solvent is what would let it be replaced there. Until then, lunus can generate
+`F_protein` only, and any synthetic MTZ it writes will lack the `Ftotal` set that
+the SFC-based generator produces.
