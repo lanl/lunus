@@ -33,7 +33,9 @@ import subprocess
 import pickle
 import h5py
 import math
-from scipy.interpolate import CubicSpline
+# lunus.sf imports are deferred to the point of use throughout this file, so
+# that running it as a script works without the repository root on sys.path
+# until something actually needs one of them. See to_aniso().
 import gemmi
 
 def mpi_enabled():
@@ -143,65 +145,22 @@ def to_aniso(miller_array, apply_symmetry_str="P1", mask_value=np.nan):
 
     # Convert to numpy for vectorized binning
     d_star_np = d_star_flex.as_numpy_array()
-    
+
     # Use .copy() to ensure we don't accidentally mutate the bound C++ memory block
     data_np = miller_array.data().as_numpy_array().copy()
 
-    # 1. Normalize the distances against the shell thickness (rscale equivalent)
-    normalized_d_star = d_star_np / shell_thickness
+    # The shell binning, spline fit and subtraction now live in lunus/sf/aniso.py,
+    # which needs no crystallography library and so can be shared with callers
+    # that have no cctbx -- sampleworks scores the anisotropic component as a
+    # guidance target through the same code. What stays here is the part that
+    # is genuinely cctbx-shaped: unpacking the miller_array above, and the Laue
+    # merge below. Behaviour is unchanged, bit for bit; lunus/sf/tests/test_aniso.py
+    # pins that against a copy of the original loop.
+    from lunus.sf.aniso import subtract_isotropic
 
-    # 2. Replicate the C rounding logic: (size_t)(val + 0.5)
-    bin_indices = np.floor(normalized_d_star + 0.5).astype(int)
+    data_np = subtract_isotropic(data_np, d_star_np, shell_thickness,
+                                 mask_value=mask_value)
 
-    bin_centers = []
-    bin_averages = []
-
-    # Get all unique 'r' values generated
-    unique_r_bins = np.unique(bin_indices)
-
-    # 3. Average the data
-    for r in unique_r_bins:
-        # Find all reflections assigned to this radius 'r'
-        mask = (bin_indices == r)
-        bin_data = data_np[mask]
-
-        # Filter out the mask value (handles both NaN and specific floats)
-        if np.isnan(mask_value):
-            valid_data = bin_data[~np.isnan(bin_data)]
-        else:
-            valid_data = bin_data[bin_data != mask_value]
-
-        # Only process shells that contain valid data
-        if len(valid_data) > 0:
-            mean_val = np.mean(valid_data)
-            
-            # The center of the bin is exactly r * shell_thickness
-            center = r * shell_thickness
-            bin_centers.append(center)
-            bin_averages.append(mean_val)
-
-    if len(bin_centers) < 4:
-        raise ValueError(
-            f"Only found {len(bin_centers)} populated shells. "
-            "A minimum of 4 is required for cubic spline interpolation."
-        )
-
-    # 4. Fit the interpolating function
-    spline = CubicSpline(bin_centers, bin_averages, bc_type='not-a-knot', extrapolate=True)
-
-    # 5. Evaluate the background
-    isotropic_bg_np = spline(d_star_np)
-
-    # 6. Safe Subtraction: Create a boolean mask of valid data points
-    # This prevents the mask_value flag itself from being subtracted from
-    if np.isnan(mask_value):
-        valid_mask = ~np.isnan(data_np)
-    else:
-        valid_mask = (data_np != mask_value)
-
-    # Apply the subtraction exclusively to valid reflections
-    data_np[valid_mask] -= isotropic_bg_np[valid_mask]
-    
     # 7. Convert back to flex and assign
     data_flex = flex.double(data_np)
     miller_array = miller_array.customized_copy(data=data_flex)
@@ -374,7 +333,7 @@ if __name__=="__main__":
 # fcalc
 
   try:
-    idx = [a.find("fcalc")==0 for a in args].index(True)
+    idx = [a.find("fcalc=")==0 for a in args].index(True)
   except ValueError:
     fcalc_file = "fcalc.mtz"
   else:
@@ -383,7 +342,7 @@ if __name__=="__main__":
 # icalc
 
   try:
-    idx = [a.find("icalc")==0 for a in args].index(True)
+    idx = [a.find("icalc=")==0 for a in args].index(True)
   except ValueError:
     icalc_file = "icalc.mtz"
   else:
@@ -543,6 +502,13 @@ if __name__=="__main__":
 # Use topology file B factoris in structure calculations
 
   try:
+    idx = [a.find("torch_blur")==0 for a in args].index(True)
+  except ValueError:
+    torch_blur = "auto"
+  else:
+    torch_blur = args.pop(idx).split("=")[1]
+
+  try:
     idx = [a.find("use_top_bfacs")==0 for a in args].index(True)
   except ValueError:
     use_top_bfacs = False
@@ -571,6 +537,250 @@ if __name__=="__main__":
     engine = "cctbx"
   else:
     engine = args.pop(idx).split("=")[1]
+
+# Device for the torch engine (e.g. "cpu", "cuda", "cuda:0")
+
+  try:
+    idx = [a.find("torch_device")==0 for a in args].index(True)
+  except ValueError:
+    torch_device_str = "cpu"
+  else:
+    torch_device_str = args.pop(idx).split("=")[1]
+
+# Max atoms processed at once per element group, for the torch engine.
+# Lower this if you're still running out of memory; raise it if you have
+# memory to spare and want fewer, larger batched calls.
+
+  try:
+    idx = [a.find("torch_max_atoms_per_batch")==0 for a in args].index(True)
+  except ValueError:
+    torch_max_atoms_per_batch = 10000
+  else:
+    torch_max_atoms_per_batch = int(args.pop(idx).split("=")[1])
+
+# Density taper width (Angstrom) for the torch engine, spanning the last
+# taper_width of the cutoff radius, replacing gemmi's hard cutoff (see
+# lunus/sf/density_torch.py for why: hard cutoffs make autograd gradients
+# essentially grid-noise-dominated near the boundary). Leave unset for
+# the default of 0.1 A (kernel_torch.py).
+
+  try:
+    idx = [a.find("torch_taper_width")==0 for a in args].index(True)
+  except ValueError:
+    torch_taper_width_override = None
+  else:
+    torch_taper_width_override = float(args.pop(idx).split("=")[1])
+
+# torch.compile the density splat's inner blocks (default True). Fusing them
+# is worth ~2.9x on the splat -- the per-voxel work is memory-bound, so run
+# eagerly it costs one pass over an (n_atoms, n_voxels) array per elementary
+# operation, roughly twenty of them, where fused it is a couple. Costs a
+# one-off compile of ~1s on the first frame, so set torch_compile=False for a
+# single-frame run, if your torch has no working compiler backend, or to
+# isolate a suspected compile-related numerical difference.
+
+  try:
+    idx = [a.find("torch_compile")==0 for a in args].index(True)
+  except ValueError:
+    torch_compile = True
+  else:
+    torch_compile = args.pop(idx).split("=")[1] == "True"
+
+# float32 matmul precision, passed to torch.set_float32_matmul_precision().
+#
+#   highest  full float32 (torch's default, and ours)
+#   high     TF32 on NVIDIA tensor cores: ~10 bits of mantissa instead of 24
+#   medium   bfloat16: ~8 bits of mantissa
+#
+# The splat's inner product is a matmul, so this can matter on a GPU with
+# tensor cores -- newer CUDA torch prints a startup hint recommending "high".
+#
+# It is OFF by default because it is a NUMERICS change, not a free speedup:
+# TF32 keeps float32's exponent range but truncates the mantissa, so it is a
+# deliberate accuracy-for-speed trade rather than something to enable silently
+# in a program whose output is compared against a reference to six figures.
+# Try it, measure both the time and the agreement, then decide.
+
+# Run under cProfile and print the hot functions at the end (default False).
+# Worth reaching for when the wall time is not where you expect: on a GPU the
+# splat can drop to a few percent of per-frame time, leaving the cost in
+# host-side work that no torch tuning will touch.
+
+  try:
+    idx = [a.find("profile")==0 for a in args].index(True)
+  except ValueError:
+    profile = False
+  else:
+    profile = args.pop(idx).split("=")[1] == "True"
+
+# Time the frame loop by phase and report per-frame averages at the end
+# (default False). Two halves:
+#
+#   host    trajectory read, coords->numpy, set_sites_cart, xrs.select,
+#           sites_frac+occ, element idx, accumulate
+#   device  splat, symmetrize, fft+extract, the transfers, into cctbx
+#
+# plus the loop's wall time and the residual the phases do not account for.
+# The device half only applies to engine=torch; the host half is the same
+# code for every engine, so the report is printed whatever the engine.
+#
+# This exists because cProfile cannot answer the question. It charges per
+# PYTHON call, so the splat's ~90 batches/frame of eager torch ops look
+# enormous while the FFT, one call doing heavy GPU work, looks free. Worse,
+# CUDA kernels are asynchronous: without an explicit synchronize, a timer
+# measures queue submission rather than execution, and the cost lands on
+# whichever later call happens to block. The device timers synchronize on both
+# sides of each phase, so they measure the phase; the host timers need no
+# synchronize, since they queue no device work and every device phase has
+# already synchronized on exit.
+
+  try:
+    idx = [a.find("torch_timing")==0 for a in args].index(True)
+  except ValueError:
+    torch_timing = False
+  else:
+    torch_timing = args.pop(idx).split("=")[1] == "True"
+
+# Diagnostics for the splat's in-situ cost, which is ~4.6x what the same call
+# costs repeated back-to-back on the same tensors (see lunus/sf/docs/performance.md).
+# The two differ in more than one way, so these separate them:
+#
+#   torch_splat_stats=True   count the work per frame -- atoms, chunks, and
+#                            atom-voxel pairs both ideal and as actually
+#                            batched. Answers "more work or slower work?"
+#                            against lunus/sf/tools/bench_splat.py's pair count. Free.
+#   torch_reuse_grid=True    splat into ONE preallocated grid buffer for every
+#                            frame instead of allocating a fresh one per call,
+#                            which is what the back-to-back repeat does.
+#   torch_free_early=True    drop the previous frame's density and F tensors
+#                            before the next splat, so the allocator is not
+#                            holding two grids while it runs.
+#
+# The last two are probes, so both default to False: the point is to compare
+# runs with and without, not to change the pipeline before the measurement.
+# Whether to APPLY the space group's operations to the model density
+# (default False).
+#
+# space_group= does two jobs that are usually the same job and here are not:
+# it names the crystal's symmetry -- which the output reflection files should
+# carry -- and it decides whether the density gets expanded by that symmetry.
+# Those come apart for a model that ALREADY contains the full cell contents,
+# which is the normal case for this program: an MD box that is an integer
+# supercell of the crystal cell folds into a complete unit cell all by itself.
+#
+# Applying the operations to a complete model does not add the missing copies,
+# because none are missing. It symmetry-AVERAGES the ones that are there --
+# symmetrize_sum over the orbit is `order` times the mean over the orbit -- and
+# that averaging removes exactly the deviations from crystallographic symmetry
+# that the diffuse signal is made of. Measured on the 7FPV trajectory, 4
+# frames: applying P2(1)2(1)2(1) raises mean Icalc 15.1x (~ order^2, the Bragg
+# term adding coherently) while diffuse rises only 4.4x, so diffuse/Icalc falls
+# from 0.0387 to 0.0113 -- a 3.4x suppression of the observable this program
+# exists to compute.
+#
+# Hence the default: do not expand. Set expand_symmetry=True when the model is
+# ONE asymmetric unit and the other copies genuinely need generating, or when
+# symmetry averaging is what you want.
+  try:
+    idx = [a.find("expand_symmetry")==0 for a in args].index(True)
+  except ValueError:
+    expand_symmetry = False
+  else:
+    expand_symmetry = args.pop(idx).split("=")[1] == "True"
+
+  try:
+    idx = [a.find("torch_splat_stats")==0 for a in args].index(True)
+  except ValueError:
+    torch_splat_stats = False
+  else:
+    torch_splat_stats = args.pop(idx).split("=")[1] == "True"
+
+  try:
+    idx = [a.find("torch_reuse_grid")==0 for a in args].index(True)
+  except ValueError:
+    torch_reuse_grid = False
+  else:
+    torch_reuse_grid = args.pop(idx).split("=")[1] == "True"
+
+  try:
+    idx = [a.find("torch_free_early")==0 for a in args].index(True)
+  except ValueError:
+    torch_free_early = False
+  else:
+    torch_free_early = args.pop(idx).split("=")[1] == "True"
+
+#   torch_profile_frames=N   record N frames with torch.profiler (CPU + CUDA
+#                            activities), write a Chrome trace and print the
+#                            per-operator table. Frame 0 is skipped and frame
+#                            1 is a profiler warmup, so recording starts at
+#                            frame 2 and N=3 is usually enough. Rank 0 only.
+#
+# This is the instrument for the splat's rate, once work volume has been ruled
+# out: it separates one kernel running slower from the same kernels with gaps
+# between them from more kernels being launched, which no wall-clock timer can.
+# It perturbs what it measures, so the phase table from a profiled run is not a
+# performance measurement -- take timings from an unprofiled run.
+  try:
+    idx = [a.find("torch_profile_frames")==0 for a in args].index(True)
+  except ValueError:
+    torch_profile_frames = 0
+  else:
+    torch_profile_frames = int(args.pop(idx).split("=")[1])
+
+  try:
+    idx = [a.find("torch_matmul_precision")==0 for a in args].index(True)
+  except ValueError:
+    torch_matmul_precision = "highest"
+  else:
+    torch_matmul_precision = args.pop(idx).split("=")[1]
+    if torch_matmul_precision not in ("highest", "high", "medium"):
+      raise ValueError(
+        "torch_matmul_precision must be highest, high or medium; got {0!r}"
+        .format(torch_matmul_precision)
+      )
+
+# Dump the first frame's real-space density grid to density_gemmi.npy /
+# density_torch.npy for lunus/sf/tools/compare_density.py (default False). Off by
+# default because it is a whole uncompressed float32 grid -- 28 MB for the
+# example's 120x160x360, 221 MB at 300x300x144 -- written on every invocation.
+# Turn it on only for an actual density comparison.
+
+  try:
+    idx = [a.find("save_density")==0 for a in args].index(True)
+  except ValueError:
+    save_density = False
+  else:
+    save_density = args.pop(idx).split("=")[1] == "True"
+
+# Max atom-voxel PAIRS per batch for the torch engine -- the quantity that
+# actually sets intermediate tensor size, and the main tuning knob now that
+# batching is budgeted by pairs rather than by atom count. It is a speed knob
+# as much as a memory one: the default keeps each working buffer around 16 MB
+# so it stays cache-resident, which measured faster than both larger and
+# smaller values. Re-tune with lunus/sf/tools/bench_splat.py on a different machine.
+# Leave unset to use density_torch.splat_density's default.
+
+  try:
+    idx = [a.find("torch_max_pairs_per_batch")==0 for a in args].index(True)
+  except ValueError:
+    torch_max_pairs_per_batch = None
+  else:
+    torch_max_pairs_per_batch = int(args.pop(idx).split("=")[1])
+
+# torch threads per MPI rank on CPU (default 1, only applied when mpi_size > 1).
+# This is the single most important setting for multi-rank CPU throughput with
+# engine=torch: gemmi's density calculator is single-threaded and beats the
+# torch splat ~2.3x per core, so torch only wins by spreading over cores. Aim
+# for mpi_size * torch_num_threads ~= physical cores -- e.g. 3 ranks x 6
+# threads rather than 18 ranks x 1 thread. Ignored for a single rank (torch
+# then uses its own default) and on GPU.
+
+  try:
+    idx = [a.find("torch_num_threads")==0 for a in args].index(True)
+  except ValueError:
+    torch_num_threads = None
+  else:
+    torch_num_threads = int(args.pop(idx).split("=")[1])
 
 # CCTBX Method for calculating structure factors
 
@@ -644,6 +854,8 @@ if __name__=="__main__":
 # If in diff_mode, read the reference .mtz files
 
   profiler = cProfile.Profile()
+  if profile:
+    profiler.enable()
   #profiler.enable()
 
   if diff_mode:
@@ -668,7 +880,9 @@ if __name__=="__main__":
         diffuse_expt = to_aniso(diffuse_expt,apply_symmetry_str)
     else:
       diffuse_expt = None
-    diffuse_expt = mpi_comm.bcast(diffuse_expt,root=0)
+    # Serial runs have no communicator, and rank 0 already holds the value.
+    if mpi_enabled():
+      diffuse_expt = mpi_comm.bcast(diffuse_expt,root=0)
 
 # read .pdb file. It's used as a template, so don't sort it.
 
@@ -709,6 +923,569 @@ if __name__=="__main__":
   xrs.set_occupancies(1.0)
   xrs_sel = xrs.select(selection)
   xrs_sel.scattering_type_registry(table=scattering_table)
+
+  # ---- phase timing (torch_timing=True) --------------------------------
+  #
+  # Wall-clock accounting for the per-frame pipeline, shared by the host-side
+  # phases below and the device phases in the engine == "torch" branch. The
+  # two differ only in whether they synchronize the device before reading the
+  # clock: host phases queue no device work, so they do not need to, and
+  # every device phase synchronizes on exit, so nothing is left pending when
+  # a host phase starts.
+  #
+  # The timers are engine-independent -- everything from the trajectory read
+  # to the running sums is the same code for gemmi and cctbx -- so the report
+  # is printed whenever torch_timing is on, whatever the engine.
+
+  import collections
+  import contextlib
+
+  _phase_totals = collections.OrderedDict()
+  _phase_calls = collections.Counter()
+  _phase_series = {}
+
+  def _record_phase(name, dt):
+    _phase_totals[name] = _phase_totals.get(name, 0.0) + dt
+    _phase_calls[name] += 1
+    # Per-call durations, not just the total. A one-time cost paid on frame 0
+    # and a genuine per-frame cost are indistinguishable in an average, and
+    # differ by the frame count -- which is how a 10-frame comparison can show
+    # an effect a 251-frame one cannot see.
+    #
+    # ALWAYS recorded, where this used to be gated behind torch_splat_stats.
+    # It costs one float per phase per frame -- a few thousand for a long run
+    # -- and without it the table reports only a mean, which is how a run whose
+    # steady-state splat was ~20 ms/frame reported 67.8: torch.compile spends
+    # ~12 s on frame 0 and the mean spreads it over all 251. That is the very
+    # failure this series exists to expose, so it should not need a flag.
+    _phase_series.setdefault(name, []).append(dt)
+
+  @contextlib.contextmanager
+  def host_phase(name):
+    if not torch_timing:
+      yield
+      return
+    t0 = time.time()
+    try:
+      yield
+    finally:
+      _record_phase(name, time.time() - t0)
+
+  # Set by the torch setup below. Every other engine reads xrs frame by frame.
+  torch_bypass_xrs = False
+  # Per-frame splat work counters, filled when torch_splat_stats=True.
+  torch_splat_stats_log = []
+  # torch.profiler handle, set by the torch setup when torch_profile_frames>0.
+  torch_profiler = None
+
+  def report_phases(n_frames, loop_wall=None):
+    if not torch_timing or not _phase_totals:
+      return
+    total = sum(_phase_totals.values())
+    print("\n=== {0} engine phase timing (rank 0), {1} frames ===".format(
+      engine, n_frames))
+    # The call count matters for reading the table: most phases run once per
+    # frame, but the trajectory read runs once per CHUNK, so its ms/frame
+    # figure moves with chunk= and is not comparable to the others without it.
+    # The median column excludes frame 0, and exists because the mean does not
+    # separate steady state from one-time cost. cuFFT builds its plan on the
+    # first transform and the splat carries its own warmup, so over few frames
+    # the mean is inflated by roughly (one-time cost)/n_frames -- an effect
+    # that shrinks as the run lengthens, which makes short and long runs of
+    # the same configuration look like different machines. Measured on 10
+    # frames: splat mean 79.9 against median 66.9.
+    have_series = bool(_phase_series)
+    header = "  {0:<22} {1:>10} {2:>12} {3:>8} {4:>7}"
+    if have_series:
+      header += " {5:>11}"
+    print(header.format("phase", "total s", "ms/frame", "share", "calls",
+                        "median ms"))
+    for name, secs in _phase_totals.items():
+      row = "  {0:<22} {1:>10.2f} {2:>12.1f} {3:>7.1f}% {4:>7d}".format(
+        name, secs, 1e3 * secs / max(n_frames, 1), 100.0 * secs / total,
+        _phase_calls[name])
+      series = _phase_series.get(name)
+      if have_series:
+        if series and len(series) > 1:
+          rest = sorted(series[1:])
+          row += " {0:>11.1f}".format(1e3 * rest[len(rest) // 2])
+        else:
+          row += " {0:>11}".format("-")      # one call: nothing to take a median of
+      print(row)
+    print("  {0:<22} {1:>10.2f} {2:>12.1f}".format(
+      "TOTAL (timed)", total, 1e3 * total / max(n_frames, 1)))
+    if loop_wall is not None:
+      # What the timers did not catch. A large residual here means the frame
+      # loop is spending time somewhere still unbracketed -- which is exactly
+      # the condition these timers exist to detect, so report it rather than
+      # leaving it to be inferred from the run's total wall time.
+      resid = loop_wall - total
+      print("  {0:<22} {1:>10.2f} {2:>12.1f}".format(
+        "frame loop wall", loop_wall, 1e3 * loop_wall / max(n_frames, 1)))
+      print("  {0:<22} {1:>10.2f} {2:>12.1f} {3:>7.1f}%".format(
+        "unaccounted", resid, 1e3 * resid / max(n_frames, 1),
+        100.0 * resid / loop_wall if loop_wall > 0 else 0.0))
+    print("  Timers cover the frame loop only: setup, the MPI reduction and "
+          "the output files are outside them.")
+
+    if torch_splat_stats_log:
+      # Compare pairs_actual against lunus/sf/tools/bench_splat.py's pair count on the same
+      # structure and grid. If they agree, the splat's in-situ cost is not
+      # extra work and the difference is execution rate. pairs_actual /
+      # pairs_ideal is the chunk padding, which is the one part of the work
+      # volume that the coordinates can move.
+      ideal = [s["pairs_ideal"] for s in torch_splat_stats_log]
+      actual = [s["pairs_actual"] for s in torch_splat_stats_log]
+      chunks = [s["chunks"] for s in torch_splat_stats_log]
+      print("\n  splat work over {0} frames ({1:,} atoms):".format(
+        len(actual), torch_splat_stats_log[0]["atoms"]))
+      print("    {0:<16} {1:>18} {2:>18}".format("", "min", "max"))
+      for name, vals in (("pairs ideal", ideal), ("pairs actual", actual),
+                         ("chunks", chunks)):
+        print("    {0:<16} {1:>18,} {2:>18,}".format(name, min(vals), max(vals)))
+      print("    padding (actual/ideal): {0:.4f} - {1:.4f}".format(
+        min(a / i for a, i in zip(actual, ideal)),
+        max(a / i for a, i in zip(actual, ideal))))
+
+    series = _phase_series.get("splat")
+    if series and len(series) >= 4:
+      # Frame 0 separately: it carries the one-time warmup, and any cost that
+      # a setup-time change moves OUT of the loop shows up here and nowhere
+      # else. Then the first and last tenth of the remainder, for the trend --
+      # a run that speeds up as it goes is not throttling.
+      first = series[0]
+      rest = sorted(series[1:])
+      chron = series[1:]
+      k = max(1, len(chron) // 10)
+      print("\n  splat per frame (ms): frame 0 {0:.1f}, then min {1:.1f}, "
+            "median {2:.1f}, max {3:.1f}".format(
+              1e3 * first, 1e3 * rest[0], 1e3 * rest[len(rest) // 2],
+              1e3 * rest[-1]))
+      print("    first {0} of the rest {1:.1f}, last {0} {2:.1f}".format(
+        k, 1e3 * sum(chron[:k]) / k, 1e3 * sum(chron[-k:]) / k))
+
+  if engine == "torch":
+    import torch
+
+    # Before any tensor work, so every matmul in the run sees the same setting.
+    if torch_matmul_precision != "highest":
+      torch.set_float32_matmul_precision(torch_matmul_precision)
+
+    def _torch_sync(dev):
+      """Block until queued device work has finished.
+
+      CUDA and MPS kernels are launched asynchronously, so an unsynchronized
+      timer measures how long it took to ENQUEUE the work, not to do it.
+      """
+      dev = str(dev)
+      if dev.startswith("cuda"):
+        torch.cuda.synchronize()
+      elif dev.startswith("mps"):
+        torch.mps.synchronize()
+
+    @contextlib.contextmanager
+    def torch_phase(name, device):
+      if not torch_timing:
+        yield
+        return
+      _torch_sync(device)
+      t0 = time.time()
+      try:
+        yield
+      finally:
+        _torch_sync(device)
+        _record_phase(name, time.time() - t0)
+
+    from lunus.sf.elements import it92_coefficients
+    from lunus.sf.cell_utils import orth_matrix, grid_shape_for_resolution, recommended_blur
+    from lunus.sf.kernel_torch import build_element_kernels_torch, build_atom_kernels_torch
+    from lunus.sf.structure_factor_torch import structure_factors_one_config, compute_fcalc
+    from lunus.sf.density_torch import splat_density
+    from lunus.sf.symmetry_torch import (
+      build_grid_ops_from_cctbx, adjust_grid_for_symmetry, symmetrize_sum,
+    )
+
+    # left empty when unset so splat_density's own (measured) default applies
+    torch_pairs_kwarg = ({} if torch_max_pairs_per_batch is None
+                         else {"max_pairs_per_batch": torch_max_pairs_per_batch})
+
+    torch_b_iso = 20.0 * d_min * d_min if apply_bfac else 0.0
+    torch_dtype = torch.float32  # confirmed via the resolution-shell comparison that float64
+                                  # wasn't the fix -- also required for MPS (Apple GPU), which
+                                  # doesn't support float64 at all
+    torch_device = torch_device_str
+
+    # How many CPUs this process may ACTUALLY use, which in a container is not
+    # what the machine reports. torch sizes its thread pool from the host's
+    # core count, so a pod limited to 3 CPUs gets 104 threads; they spin-wait,
+    # exhaust the cgroup's CPU quota within ~12 ms of every 100 ms period, and
+    # the kernel then freezes the whole process until the period boundary.
+    #
+    # Measured here, 10 frames, CUDA, 104 threads on 3 CPUs: splat 287.9
+    # ms/frame median. With OMP_NUM_THREADS=2: 66.3 -- against 62.6 ms for the
+    # same work in lunus/sf/tools/bench_splat.py. The 4.6x "the splat is slow in the
+    # loop" mystery was this, start to finish. See lunus/sf/docs/performance.md.
+    # The CFS QUOTA is the only thing that knows. nproc, os.cpu_count() and
+    # os.sched_getaffinity() all report the host's cores -- 104 on the pod
+    # this was diagnosed on -- because a CPU limit is enforced by accounting,
+    # not by restricting which cores the process may run on. Affinity is used
+    # here only as an additional cap, never as the answer.
+    def _cpu_quota():
+      try:
+        with open("/sys/fs/cgroup/cpu.max") as fh:      # cgroup v2
+          quota, period = fh.read().split()
+          if quota != "max":
+            return max(1, int(float(quota) / float(period)))
+      except (OSError, ValueError):
+        pass
+      try:                                              # cgroup v1
+        with open("/sys/fs/cgroup/cpu/cpu.cfs_quota_us") as fh:
+          quota = int(fh.read())
+        with open("/sys/fs/cgroup/cpu/cpu.cfs_period_us") as fh:
+          period = int(fh.read())
+        if quota > 0:
+          return max(1, quota // period)
+      except (OSError, ValueError):
+        pass
+      return None                                       # no limit, or unreadable
+
+    # Leave the CPU multi-rank case to the more specific logic below.
+    if not (torch_device == "cpu" and mpi_size > 1):
+      _quota = _cpu_quota()
+      try:
+        _affinity = len(os.sched_getaffinity(0))        # Linux only
+      except AttributeError:
+        _affinity = None
+
+      if torch_num_threads is not None:
+        _target, _why = torch_num_threads, "torch_num_threads"
+      elif _quota is not None:
+        # NEVER RAISE. The quota is a ceiling, not a target: OMP_NUM_THREADS=3
+        # under a 12-CPU quota is someone deliberately asking for 3, and this
+        # code was overriding them up to 12 -- the exact opposite of what a
+        # guard against oversubscription is for. Observed on the pod:
+        # "torch.set_num_threads(12), was 3".
+        _target = _quota if _affinity is None else min(_quota, _affinity)
+        _target = min(_target, torch.get_num_threads())
+        _why = "cgroup CPU quota"
+      elif torch_device != "cpu":
+        # No discoverable quota, and the host only dispatches on a device run
+        # -- there is no torch CPU work in the frame loop to spread. One
+        # thread cannot oversubscribe a limit we cannot see.
+        _target, _why = 1, "device run with no discoverable CPU quota"
+      else:
+        _target, _why = None, None                      # real CPU work: leave it
+
+      if _target is not None and _target != torch.get_num_threads():
+        _was = torch.get_num_threads()
+        torch.set_num_threads(_target)
+        if mpi_rank == 0:
+          print("torch engine: torch.set_num_threads({0}), was {1} ({2})"
+                .format(_target, _was, _why))
+          if _quota is not None and _was > _target:
+            print("  Threads beyond the quota spin-wait, spend it faster than "
+                  "useful work does, and get the whole process throttled -- "
+                  "measured 4.3x on the splat. This does NOT cover numpy/BLAS, "
+                  "which reads the environment before this program starts: "
+                  "export OMP_NUM_THREADS={0} as well.".format(_target))
+          elif _quota is None:
+            print("  The host only dispatches on a device run, so there is no "
+                  "torch CPU work to spread. torch_num_threads=N to override.")
+
+    if torch_device == "cpu" and mpi_size > 1:
+      # Without this, EVERY rank's PyTorch process independently tries to
+      # use all available cores for its own internal threading (the
+      # splat's elementwise math, index_add_, FFT) -- with mpi_size ranks
+      # doing that simultaneously, the result is severe CPU oversubscription
+      # and contention, often making a multi-rank CPU run much SLOWER than
+      # a single process, especially on CPU-limited/shared/containerized
+      # nodes.
+      #
+      # Note on what to expect from multi-rank CPU runs with this engine:
+      # gemmi's DensityCalculatorX is single-threaded (measured: 1.00 cores
+      # busy) and about 2.3x faster than the torch splat PER CORE -- 1.44 s
+      # against 3.37 s on the 135k-atom case. torch only wins on wall time by
+      # spreading over cores (0.87 s on 6 threads), which one-thread-per-rank
+      # denies it. Rebalancing does NOT rescue this: measured over 10 frames,
+      # 10 ranks x 1 thread gave 7.4 s, 6 x 3 gave 7.2 s, 3 x 6 gave 8.0 s, and
+      # 2 x 9 gave 21.4 s (too few ranks and each one serializes several
+      # frames), against gemmi at 3.1 s. Expect gemmi to win multi-rank CPU
+      # runs; the torch engine earns its keep through differentiability, and on
+      # GPU or in a single multi-threaded process.
+      torch_threads = torch_num_threads if torch_num_threads is not None else 1
+      torch.set_num_threads(torch_threads)
+      if mpi_rank == 0:
+        print("torch engine: mpi_size =", mpi_size, "on CPU, set torch.set_num_threads(",
+              torch_threads, ") per rank to avoid oversubscription (torch_num_threads=N "
+              "to change; keep mpi_size*N near the physical core count)")
+
+    torch_elements_present = sorted(set(s.scattering_type for s in xrs_sel.scatterers()))
+    # Read the scattering coefficients for exactly the elements in this
+    # structure. They come from gemmi or cctbx at run time rather than from a
+    # table stored here, so any element those libraries know is supported
+    # without editing anything.
+    try:
+      IT92_COEFFS = it92_coefficients(torch_elements_present)
+    except (KeyError, ImportError) as e:
+      raise type(e)("engine=torch: {0}".format(e))
+
+    torch_a, torch_b_uc, torch_c, torch_alpha, torch_beta, torch_gamma = xrs_sel.unit_cell().parameters()
+    torch_M_np = orth_matrix(torch_a, torch_b_uc, torch_c, torch_alpha, torch_beta, torch_gamma)
+    torch_orth_matrix = torch.tensor(torch_M_np, dtype=torch_dtype, device=torch_device)
+    torch_cell_volume = xrs_sel.unit_cell().volume()
+    torch_grid_shape = grid_shape_for_resolution(torch_a, torch_b_uc, torch_c, d_min, rate=1.5)
+
+    # SYMMETRY: match gemmi exactly -- splat only the atoms we were given,
+    # then symmetry-expand the DENSITY GRID (gemmi's
+    # put_model_density_on_grid() = add_model_density_to_grid() +
+    # symmetrize_sum()). Expanding the density is far cheaper than expanding
+    # the ATOMS and re-splatting every symmetry copy, which is
+    # O(n_atoms * box_volume) Gaussian evaluations per copy; symmetrizing the
+    # finished grid is O(n_grid) integer index arithmetic per operation, and
+    # for signed-permutation operations (which is all of them for most space
+    # groups) it reduces to axis permutes/flips/rolls with no index tensors
+    # materialized at all. It is also fully differentiable -- see
+    # lunus/sf/symmetry_torch.py and lunus/sf/tests/test_symmetry.py, whose
+      # test_gemmi_parity checks parity against
+    # gemmi's own symmetrize_sum() rather than against a reading of its source.
+    #
+    # For a P1 space group build_grid_ops_from_cctbx returns an empty list and
+    # nothing is applied, which is again what gemmi does (its symmetrize()
+    # returns immediately for P1).
+    #
+    # The grid may need adjusting first: grid_shape_for_resolution() rounds
+    # each axis up independently, which does not guarantee that a symmetry
+    # operation maps the grid onto itself (a 4-fold in the ab plane needs
+    # Nu == Nv; a 3/4 screw translation needs Nw divisible by 4). gemmi
+    # applies the equivalent constraints when sizing its own grid.
+    torch_grid_shape_raw = torch_grid_shape
+    torch_sym_rots = [np.array(op.r().as_double()).reshape(3, 3) for op in xrs_sel.space_group()]
+    torch_sym_trans = [np.array(op.t().as_double()) for op in xrs_sel.space_group()]
+    torch_grid_shape = adjust_grid_for_symmetry(
+      torch_grid_shape_raw, torch_sym_rots, torch_sym_trans
+    )
+    torch_grid_ops = (
+      build_grid_ops_from_cctbx(xrs_sel.space_group(), torch_grid_shape)
+      if expand_symmetry else [])
+
+    if mpi_rank == 0:
+      if torch_grid_shape != torch_grid_shape_raw:
+        print("torch engine: grid adjusted for symmetry compatibility,",
+              torch_grid_shape_raw, "->", torch_grid_shape)
+      print("torch engine: space group =", xrs_sel.space_group().type().lookup_symbol(),
+            ", order =", xrs_sel.space_group().order_z(),
+            ", density symmetry ops applied (excl. identity) =", len(torch_grid_ops),
+            "" if expand_symmetry else
+            "(expand_symmetry=False: the model is taken to hold the full cell "
+            "contents already; set True to expand an asymmetric unit, or to "
+            "symmetry-average)")
+      if not torch_grid_ops:
+        print("torch engine: P1 (or no non-identity ops) -- density used as splatted, "
+              "no symmetry expansion, matching gemmi")
+
+    if use_top_bfacs:
+      # extract_u_iso_or_u_equiv() must be called on the xray_structure, NOT on
+      # xrs_sel.scatterers(): the scatterer-array overload requires a unit_cell
+      # argument (to convert u_star -> u_equiv) and raises Boost.Python
+      # ArgumentError without one. This matches the gemmi branch's working call.
+      torch_u_isos_setup = np.array(xrs_sel.extract_u_iso_or_u_equiv())
+      torch_b_per_atom_setup = torch_u_isos_setup * (8.0 * np.pi ** 2)  # U -> B, same as the gemmi branch
+      torch_elements_per_atom_setup = [s.scattering_type for s in xrs_sel.scatterers()]
+
+      # THE FFT-ARTIFACT BLUR. Splatting a sharp atom onto a finite grid
+      # samples it badly; splatting a spread one and removing the spread in
+      # reciprocal space does not. Measured against exact direct summation at
+      # 0.633 A spacing, B_iso = 2 with no blur gives R = 0.186 -- 37x this
+      # pipeline's entire disagreement with gemmi -- and blur = 20 gives
+      # 0.0004. Per-atom B from a topology file routinely goes that low, which
+      # is exactly the case this branch handles.
+      #
+      # "auto" asks for the smallest blur that reaches adequate sampling and
+      # no more, because the un-blur multiplies by exp(+blur*s^2/4) and
+      # amplifies whatever error is present: at B_iso = 30 an 80 A^2 blur is 5x
+      # WORSE than none. It returns 0 whenever the model's own B already
+      # clears the bar, so well-sampled configurations are untouched.
+      torch_blur_value = (
+        recommended_blur(float(torch_b_per_atom_setup.min()), torch_grid_shape,
+                         torch_M_np, d_min=d_min)
+        if torch_blur == "auto" else float(torch_blur))
+      torch_atom_A, torch_atom_lam, torch_elem_offsets, torch_atom_radius_ang, torch_taper_width, torch_element_to_idx = build_atom_kernels_torch(
+        torch_elements_per_atom_setup, torch_elements_present, IT92_COEFFS, torch_b_per_atom_setup, blur=torch_blur_value,
+        grid_shape=torch_grid_shape, orth_matrix_np=torch_M_np,
+        cutoff=gemmi_cutoff, taper_width=torch_taper_width_override,
+        device=torch_device, dtype=torch_dtype,
+      )
+      if mpi_rank == 0:
+        print("torch engine: use_top_bfacs=True, per-atom B range =",
+              torch_b_per_atom_setup.min(), "-", torch_b_per_atom_setup.max(),
+              ", n_atoms (as splatted, before density symmetry expansion) =",
+              len(torch_elements_per_atom_setup),
+              ", blur =", torch_blur_value)
+    else:
+      torch_blur_value = (
+        recommended_blur(float(torch_b_iso), torch_grid_shape, torch_M_np,
+                         d_min=d_min)
+        if torch_blur == "auto" else float(torch_blur))
+      torch_elem_A, torch_elem_lam, torch_elem_offsets, torch_elem_radius_ang, torch_taper_width, torch_element_to_idx = build_element_kernels_torch(
+        torch_elements_present, IT92_COEFFS, torch_b_iso, blur=torch_blur_value,
+        grid_shape=torch_grid_shape, orth_matrix_np=torch_M_np,
+        cutoff=gemmi_cutoff, taper_width=torch_taper_width_override,
+        device=torch_device, dtype=torch_dtype,
+      )
+
+    torch_miller_set = miller.build_set(
+      crystal_symmetry=xrs_sel.crystal_symmetry(),
+      anomalous_flag=False,
+      d_min=d_min,
+    )
+    torch_hkl_np = np.array(torch_miller_set.indices())
+    torch_hkl = torch.tensor(torch_hkl_np, dtype=torch.long, device=torch_device)
+
+    # ---- frame-invariant inputs, hoisted out of the frame loop -----------
+    #
+    # The per-frame cctbx round trip -- push the frame's coordinates into the
+    # xray.structure with set_sites_cart, select, then read sites_frac,
+    # occupancies and scattering types straight back out -- measured ~97
+    # ms/frame beyond the flex conversion, for information that either does not
+    # change between frames (selection, occupancies, elements) or is one 3x3
+    # matmul from what mdtraj already handed over (fractional coordinates).
+    # The torch path needs nothing else from xrs, so it skips the round trip.
+    #
+    # translational_fit is the exception: it fits against xrs.sites_frac() and
+    # writes the result back with set_sites_frac(), so it needs the structure
+    # maintained frame by frame.
+    torch_bypass_xrs = not translational_fit
+
+    if torch_bypass_xrs:
+      # cctbx computes frac = M_frac * cart on column vectors; these are rows.
+      torch_frac_matrix_np = np.array(
+        xrs_sel.unit_cell().fractionalization_matrix()).reshape((3, 3))
+
+      # A bypass that disagreed with cctbx would move every atom and change
+      # every structure factor, quietly. Check the matrix against sites_frac()
+      # itself, on the topology coordinates xrs is holding right now.
+      _chk_cart = xrs_sel.sites_cart().as_double().as_numpy_array().reshape((-1, 3))
+      _chk_ref = xrs_sel.sites_frac().as_double().as_numpy_array().reshape((-1, 3))
+      _chk_dev = np.max(np.abs(_chk_cart @ torch_frac_matrix_np.T - _chk_ref))
+      assert _chk_dev < 1e-12, (
+        "fractionalization matrix disagrees with cctbx sites_frac() by %g; "
+        "the frame-loop bypass would change the answer" % _chk_dev)
+
+      # The selection as row indices into the trajectory's atom axis. None
+      # means "all atoms", which lets the frame loop skip the gather entirely.
+      _sel_np = selection.as_numpy_array()
+      torch_sel_idx = None if _sel_np.all() else np.nonzero(_sel_np)[0]
+
+      torch_occ_np = np.array(xrs_sel.scatterers().extract_occupancies())
+      torch_element_idx_np = np.array(
+        [torch_element_to_idx[s.scattering_type] for s in xrs_sel.scatterers()],
+        dtype=np.int64,
+      )
+
+      if mpi_rank == 0:
+        print("torch engine: bypassing the per-frame xray.structure round trip"
+              " (%d of %d atoms selected, fractionalization agrees with cctbx "
+              "to %.2g)" % (len(torch_occ_np), len(_sel_np), _chk_dev))
+    elif mpi_rank == 0:
+      print("torch engine: translational_fit=True, so the per-frame "
+            "xray.structure round trip is kept")
+
+    # ---- splat probes (see the flag comments near the top) ---------------
+    #
+    # Bound before the loop so the free-early probe has something to drop on
+    # frame 0 and the reuse probe has a buffer to splat into.
+    torch_density = None
+    F_t = None
+    torch_grid_buf = None
+    if torch_reuse_grid:
+      torch_grid_buf = torch.zeros(
+        torch_grid_shape[0] * torch_grid_shape[1] * torch_grid_shape[2],
+        device=torch_device, dtype=torch_dtype,
+      )
+      if mpi_rank == 0:
+        print("torch engine: splatting into one reused %.1f MB grid buffer "
+              "rather than a fresh allocation per frame"
+              % (torch_grid_buf.numel() * torch_grid_buf.element_size() / 1e6))
+    if torch_free_early and mpi_rank == 0:
+      print("torch engine: dropping the previous frame's density and F before "
+            "each splat")
+
+    if torch_profile_frames > 0 and mpi_rank == 0:
+      if profile:
+        raise ValueError(
+          "torch_profile_frames and profile=True cannot be combined: cProfile "
+          "charges per Python call and would misattribute the torch work it is "
+          "wrapped around. Run one or the other.")
+
+      from torch.profiler import ProfilerActivity, schedule as _profiler_schedule
+
+      _trace_path = "torch_trace_rank{0}.json".format(mpi_rank)
+
+      def _on_trace_ready(prof):
+        prof.export_chrome_trace(_trace_path)
+        # Sort by device self time where the build reports it -- the name
+        # changed across torch versions, and CPU-only runs have neither.
+        for key in ("self_device_time_total", "self_cuda_time_total",
+                    "self_cpu_time_total"):
+          try:
+            table = prof.key_averages().table(sort_by=key, row_limit=25)
+          except (AssertionError, KeyError, ValueError, RuntimeError):
+            continue
+          print("\n=== torch.profiler, sorted by {0} ===".format(key))
+          print(table)
+          break
+        print("torch profiler: Chrome trace written to", _trace_path,
+              "-- load it in chrome://tracing or https://ui.perfetto.dev to see "
+              "kernel timings and the gaps between them")
+
+      _activities = [ProfilerActivity.CPU]
+      if str(torch_device).startswith("cuda"):
+        _activities.append(ProfilerActivity.CUDA)
+
+      torch_profiler = torch.profiler.profile(
+        activities=_activities,
+        # Frame 0 carries one-time warmup and frame 1 warms the profiler
+        # itself, so recording starts at frame 2.
+        schedule=_profiler_schedule(
+          wait=1, warmup=1, active=torch_profile_frames, repeat=1),
+        on_trace_ready=_on_trace_ready,
+        record_shapes=True,
+      )
+      print("torch engine: profiling {0} frames (from frame 2); the phase "
+            "table from this run is NOT a performance measurement"
+            .format(torch_profile_frames))
+
+    # Compile ONCE on rank 0, then let the others start. Without this every
+    # rank compiles the same kernels itself, and N concurrent compilations
+    # saturate the machine: measured on 10 ranks with a cold cache, frame times
+    # staggered in ~1 s steps up to 17.0 s (total 17.5 s), against 7.4 s with
+    # no stagger once rank 0 warms the cache first. It is not file-lock
+    # contention -- per-rank TORCHINDUCTOR_CACHE_DIRs reproduce the stagger
+    # exactly. The penalty only shows up on a COLD cache, which is why it looks
+    # intermittent: a second run of the same job reuses the on-disk cache.
+    if torch_compile and mpi_size > 1:
+      from lunus.sf.density_torch import warmup_compile
+      if mpi_rank == 0:
+        _t_warm = time.time()
+        warmup_compile(
+          torch_elem_offsets, torch_grid_shape, torch_orth_matrix, torch_taper_width,
+          max_atoms_per_batch=torch_max_atoms_per_batch, **torch_pairs_kwarg,
+        )
+        print("torch engine: populated the torch.compile cache on rank 0 in "
+              "%.1f s before releasing the other %d ranks (each would otherwise "
+              "compile the same kernels itself)" % (time.time() - _t_warm, mpi_size - 1))
+      mpi_comm.Barrier()
+
+    if mpi_rank == 0:
+      print("torch engine: elements =", torch_elements_present,
+            ", grid =", torch_grid_shape,
+            ", b_iso =", ("per-atom (use_top_bfacs)" if use_top_bfacs else torch_b_iso),
+            ", device =", torch_device, ", max_atoms_per_batch =", torch_max_atoms_per_batch,
+            ", max_pairs_per_batch =",
+            ("default" if torch_max_pairs_per_batch is None else torch_max_pairs_per_batch),
+            ", taper_width =", torch_taper_width, ", torch.compile =", torch_compile,
+            ", matmul_precision =", torch_matmul_precision)
+
   if (mpi_rank == 0):
 #    pdbtmp = xrs_sel.as_pdb_file()
 #    with open("reference.pdb","w") as fo:
@@ -774,41 +1551,65 @@ EOF
       if extra_chunks > mpi_size:
         chunks_per_rank = chunks_per_rank + int(extra_chunks/mpi_size)
         extra_chunks = extra_chunks - int(extra_chunks/mpi_size)*mpi_size
-  if nchunks != mpi_size and extra_frames != 0:
-    chunks_per_rank = int(nchunks/(mpi_size-1))
-    extra_chunks = nchunks % (mpi_size - 1)
-  ct = 0
-  if mpi_rank == 0:
-    print("nchunks = {0}, extra_chunks = {1}, chunks_per_rank = {2}, extra_frames = {3}".format(nchunks,extra_chunks,chunks_per_rank,extra_frames))
-  for i in range(mpi_size):
-    if (i == 0):
-      skiplist[i] = first
-    else:
-      skiplist[i] = skiplist[i-1] + chunklist[i-1]*nchunklist[i-1]
-    if extra_frames == 0:
-      chunklist[i] = chunksize
-      nchunklist[i] = chunks_per_rank
-      if i < extra_chunks:
-        nchunklist[i] = nchunklist[i] + 1
-    else:
-      if nchunks == mpi_size:
-        chunklist[i] = chunksize
-        if i < extra_frames:
-          chunklist[i] = chunklist[i] + 1
-        nchunklist[i] = 1
+  # The scheme below reserves the LAST rank to mop up the frames that do not
+  # divide evenly, spreading the whole chunks over the other mpi_size - 1
+  # ranks. That has no meaning on a single rank -- and divided by zero -- so
+  # single-rank runs get their own, simpler assignment.
+  #
+  # Chunking still matters with one rank: it is what bounds peak memory, which
+  # is the reason to pass chunk= in the first place. So rank 0 runs every
+  # chunk itself rather than being handed one chunk of every frame.
+  if mpi_size == 1:
+    n_full_chunks = nsteps // chunksize
+    chunks_per_rank = n_full_chunks + (1 if nsteps % chunksize else 0)
+    extra_chunks = 0
+    extra_frames = 0          # consumed below by the final, shorter chunk
+    chunklist[0] = chunksize
+    nchunklist[0] = chunks_per_rank
+    skiplist[0] = first
+    if mpi_rank == 0:
+      print("nchunks = {0}, chunks_per_rank = {1}, chunksize = {2}, frames = {3}"
+            .format(chunks_per_rank, chunks_per_rank, chunksize, nsteps))
+      print("Will use ", nsteps, " frames on a single worker in ",
+            chunks_per_rank, " chunks of at most ", chunksize, " frames")
+    ct = nsteps
+  else:
+    if nchunks != mpi_size and extra_frames != 0:
+      chunks_per_rank = int(nchunks/(mpi_size-1))
+      extra_chunks = nchunks % (mpi_size - 1)
+    ct = 0
+    if mpi_rank == 0:
+      print("nchunks = {0}, extra_chunks = {1}, chunks_per_rank = {2}, extra_frames = {3}".format(nchunks,extra_chunks,chunks_per_rank,extra_frames))
+    for i in range(mpi_size):
+      if (i == 0):
+        skiplist[i] = first
       else:
-        if i == mpi_size-1:
-          chunklist[i] = nsteps-ct
-          nchunklist[i] = 1
-        else:
-          chunklist[i] = chunksize
-          nchunklist[i] = chunks_per_rank
+        skiplist[i] = skiplist[i-1] + chunklist[i-1]*nchunklist[i-1]
+      if extra_frames == 0:
+        chunklist[i] = chunksize
+        nchunklist[i] = chunks_per_rank
         if i < extra_chunks:
           nchunklist[i] = nchunklist[i] + 1
-    ct = ct + chunklist[i]*nchunklist[i]
+      else:
+        if nchunks == mpi_size:
+          chunklist[i] = chunksize
+          if i < extra_frames:
+            chunklist[i] = chunklist[i] + 1
+          nchunklist[i] = 1
+        else:
+          if i == mpi_size-1:
+            chunklist[i] = nsteps-ct
+            nchunklist[i] = 1
+          else:
+            chunklist[i] = chunksize
+            nchunklist[i] = chunks_per_rank
+          if i < extra_chunks:
+            nchunklist[i] = nchunklist[i] + 1
+      ct = ct + chunklist[i]*nchunklist[i]
 
-  if (mpi_rank == 0):               
+  if (mpi_rank == 0):
     stime = time.time()
+  if (mpi_rank == 0 and mpi_size > 1):
     print("Will use ",ct," frames distributed over ",mpi_size," workers")
     if (mpi_size == nchunks):
       print("Each worker will handle ",chunks_per_rank," chunks of ",chunksize," frames with one extra frame in the first ",extra_frames," workers")
@@ -820,6 +1621,9 @@ EOF
   ct = 0
   sig_fcalc = None
   sig_icalc = None
+  sig_fcalc_acc = None      # numpy running sums; see the accumulation below
+  sig_icalc_acc = None
+  sig_indices_ref = None
 
   if (skiplist[mpi_rank] <= last):
     skip_calc = False
@@ -840,9 +1644,24 @@ EOF
   
   itime = time.time()
 
-  
-  for tt in ti:
-    
+  if torch_profiler is not None:
+    torch_profiler.start()
+
+  # Driven with next() rather than `for tt in ti:` so that the time spent
+  # inside mdtraj's iterload generator -- the actual file read and unit
+  # conversion -- lands in a timer of its own. Under `for`, that work is
+  # charged to the loop header, where neither cProfile (one call, all chunks)
+  # nor a phase timer can see it. Semantics are otherwise unchanged.
+  while True:
+
+    _t_read = time.time()
+    try:
+      tt = next(ti)
+    except StopIteration:
+      break
+    if torch_timing:
+      _record_phase("traj read", time.time() - _t_read)
+
     mtime = time.time()
       
     t = tt
@@ -857,7 +1676,8 @@ EOF
   #   of 10 is needed as the units from the trajectory are nm, whereas cctbx
   #   needs Angstrom units.
 
-    tsites = np.around(np.array(t.xyz*10.,dtype=np.float64),3)
+    with host_phase("coords->numpy"):
+      tsites = np.around(np.array(t.xyz*10.,dtype=np.float64),3)
 
   # ***The following code needs modification to prevent the bcast here, as
   #   it will create a barrier that prevents execution when the number
@@ -911,8 +1731,23 @@ EOF
 
         # overwrite crystal structure coords with trajectory coords
 
-        tmp = flex.vec3_double(tsites[i,:,:])
-        xrs.set_sites_cart(tmp)
+        # Skipped entirely under the torch bypass, which reads the frame's
+        # coordinates from tsites directly and never touches xrs.
+        #
+        # Split rather than timed as one phase: these are the two largest
+        # host costs in the frame, and they have different fixes. The flex
+        # conversion is numpy->cctbx marshalling that every engine pays; the
+        # setter is cctbx's per-scatterer cartesian->fractional pass.
+        if not torch_bypass_xrs:
+          with host_phase("coords->flex"):
+            # flex.vec3_double(ndarray) converts row by row: 85 ms for 135,834
+            # atoms, measured, which made this the largest host cost in the
+            # frame. Handing it a flex.double built from the flattened array
+            # instead hits the buffer path -- 0.5 ms, bit-identical output.
+            # tsites is C-contiguous, so ravel() is a view.
+            tmp = flex.vec3_double(flex.double(tsites[i].ravel()))
+          with host_phase("set_sites_cart"):
+            xrs.set_sites_cart(tmp)
 
     # perform translational fit with respect to the alpha carbons in the topology file
 
@@ -925,12 +1760,17 @@ EOF
           for j in range(3):
             sites_frac[:,j] +=res.x[j]        
             otime2 = time.time()
-            xrs.set_sites_frac(flex.vec3_double(sites_frac))
+            # Same per-row conversion as above; sites_frac is (na, 3) C-contiguous.
+            xrs.set_sites_frac(flex.vec3_double(flex.double(sites_frac.ravel())))
     #        print ("Time to optimize = ",otime2-otime1)
 
     # select the atoms for the structure factor calculation
-        xrs_sel = xrs.select(selection)
+    #   (under the torch bypass the selection was applied once, at setup)
+        if not torch_bypass_xrs:
+          with host_phase("xrs.select"):
+            xrs_sel = xrs.select(selection)
         if engine == "sfall":
+          _t_engine = time.time()
           pdbtmp = xrs_sel.as_pdb_file()
           pdbnam_tmp = "tmp_{rank:03d}.pdb".format(rank=mpi_rank)
           fcalcnam_tmp = "tmp_{rank:03d}.mtz".format(rank=mpi_rank)
@@ -943,10 +1783,22 @@ EOF
           hkl_in = any_reflection_file(file_name=fcalcnam_tmp)
           miller_arrays = hkl_in.as_miller_arrays()
           fcalc = miller_arrays[1]
+          if torch_timing:
+            _record_phase("sfall calc", time.time() - _t_engine)
         elif engine == "gemmi":
+          # One timestamp pair rather than a `with` around the whole branch,
+          # which would reindent it for no gain. The branch is a single phase
+          # from the report's point of view either way.
+          _t_engine = time.time()
           st = gemmi.Structure()
           st.cell = gemmi.UnitCell(*xrs_sel.unit_cell().parameters())
-          st.spacegroup_hm = xrs_sel.space_group().type().lookup_symbol()
+          # gemmi expands the model by whatever symmetry the structure
+          # declares, so expand_symmetry=False is expressed by declaring P1.
+          # The reflection files still carry the true space group, which comes
+          # from the miller set rather than from here.
+          st.spacegroup_hm = (
+            xrs_sel.space_group().type().lookup_symbol()
+            if expand_symmetry else "P 1")
           
           model = gemmi.Model("1")
           chain = gemmi.Chain("A")
@@ -961,6 +1813,17 @@ EOF
           elements = [s.scattering_type for s in xrs_sel.scatterers()]
           
           u_to_b = 8.0 * np.pi**2
+
+          if mpi_rank == 0 and chunk_ct == 0 and i == 0:
+            cctbx_frac0 = np.array(xrs_sel.sites_frac()[0])
+            gemmi_frac0 = st.cell.fractionalize(gemmi.Position(*coords[0]))
+            gemmi_frac0 = np.array([gemmi_frac0.x, gemmi_frac0.y, gemmi_frac0.z])
+            print("DIAGNOSTIC atom 0: element =", elements[0], ", occ =", occs[0],
+                  ", u_iso =", u_isos[0], ", cartesian =", tuple(coords[0]))
+            print("  cctbx sites_frac()      =", cctbx_frac0)
+            print("  gemmi cell.fractionalize=", gemmi_frac0)
+            print("  max abs diff            =", np.max(np.abs(cctbx_frac0 - gemmi_frac0)))
+
     
           # zip() executes in C, minimizing Python loop overhead
           for (x, y, z), u, occ, el in zip(coords, u_isos, occs, elements):
@@ -983,6 +1846,13 @@ EOF
           calc.grid.spacegroup = st.find_spacegroup()
           calc.put_model_density_on_grid(st[0])
           real_space_array = np.array(calc.grid, copy=False)
+          if mpi_rank == 0 and chunk_ct == 0 and i == 0:
+            print("DIAGNOSTIC gemmi grid dtype =", real_space_array.dtype,
+                  ", shape =", real_space_array.shape,
+                  ", sum =", real_space_array.sum())
+            if save_density:
+              np.save("density_gemmi.npy", np.asarray(real_space_array))
+              print("DIAGNOSTIC saved density_gemmi.npy")
         
           # 2. Use SciPy's Inverse FFT to compute the positive exponent (+2pi i h x)
           # Setting workers=-1 tells SciPy to use all available CPU cores.
@@ -996,6 +1866,9 @@ EOF
 
           # Get the integer grid dimensions before the FFT transforms it
           Nu, Nv, Nw = grid.nu, grid.nv, grid.nw
+          if mpi_rank == 0 and chunk_ct == 0 and i == 0:
+            print("gemmi engine: grid =", (Nu, Nv, Nw), ", cutoff =", gemmi_cutoff,
+                  ", blur =", calc.blur, ", d_min =", d_min)
 
           # --- 6. Generate Miller Indices (HKL) up to d_min ---
           # We use cctbx here just to easily get the mathematically correct list of HKLs 
@@ -1050,11 +1923,153 @@ EOF
           # Optional: Attach labels so CCTBX knows what this data represents
           fcalc.set_info(miller.array_info(labels=["FWT", "PHIFWT"]))
           fcalc = fcalc.resolution_filter(d_min=d_min,d_max=d_max)
-        else:
-          xrs_sel.scattering_type_registry(table=scattering_table)
+          if torch_timing:
+            _record_phase("gemmi calc", time.time() - _t_engine)
+        elif engine == "torch":
+          if torch_bypass_xrs:
+            # Everything cctbx was being asked for, without cctbx: the frame's
+            # coordinates fractionalized in one matmul, and the occupancies and
+            # element indices computed once at setup.
+            with host_phase("frac coords"):
+              cart_np = tsites[i] if torch_sel_idx is None else tsites[i][torch_sel_idx]
+              coords_frac_np = cart_np @ torch_frac_matrix_np.T
+            occ_np = torch_occ_np
+            element_idx_np = torch_element_idx_np
+          else:
+            with host_phase("sites_frac+occ"):
+              coords_frac_np = xrs_sel.sites_frac().as_double().as_numpy_array().reshape((-1, 3))
+              occ_np = np.array(xrs_sel.scatterers().extract_occupancies())
+            # Timed separately from the coordinates because, unlike them, this is
+            # a Python-level pass over every scatterer twice -- and unlike them it
+            # does not change from frame to frame.
+            with host_phase("element idx"):
+              elements_this_frame = [s.scattering_type for s in xrs_sel.scatterers()]
+              element_idx_np = np.array(
+                [torch_element_to_idx[e] for e in elements_this_frame], dtype=np.int64
+              )
 
-          fcalc = xrs_sel.structure_factors(d_min=d_min,algorithm=cctbx_method).f_calc()
-          fcalc = fcalc.resolution_filter(d_min=d_min,d_max=d_max)
+          with torch_phase("host->device", torch_device):
+            frac_t = torch.tensor(coords_frac_np, dtype=torch_dtype, device=torch_device)
+            occ_t = torch.tensor(occ_np, dtype=torch_dtype, device=torch_device)
+            element_idx_t = torch.tensor(element_idx_np, dtype=torch.long, device=torch_device)
+
+          if use_top_bfacs:
+            assert torch_atom_A.shape[0] == frac_t.shape[0], (
+              f"per-frame atom count ({frac_t.shape[0]}) doesn't match the "
+              f"setup-time count ({torch_atom_A.shape[0]}) that the per-atom B-factor "
+              "kernels were built from -- the selection/atom count should be stable "
+              "frame to frame; do not trust results until this is resolved."
+            )
+            atom_A_t = torch_atom_A
+            atom_lam_t = torch_atom_lam
+            atom_radius_ang_t = torch_atom_radius_ang
+          else:
+            atom_A_t = torch_elem_A[element_idx_t]
+            atom_lam_t = torch_elem_lam[element_idx_t]
+            atom_radius_ang_t = torch_elem_radius_ang[element_idx_t]
+
+          # No gradients needed here -- xtraj.py is a forward-only diffuse
+          # calculation, not a training loop. The same structure_factors_one_config
+          # call works with requires_grad=True instead, outside no_grad(), in a
+          # script that actually backpropagates (see lunus/sf/examples/example_usage.py).
+          with torch.no_grad():
+            # Probe: with the previous frame's grid and F still alive, the
+            # allocator cannot hand the splat back the block it just used --
+            # unlike the back-to-back repeat it is being compared against.
+            if torch_free_early:
+              torch_density = None
+              F_t = None
+            _splat_stats = {} if torch_splat_stats else None
+            with torch_phase("splat", torch_device):
+              torch_density = splat_density(
+                frac_t, element_idx_t, occ_t,
+                atom_A_t, atom_lam_t, torch_elem_offsets, atom_radius_ang_t,
+                torch_grid_shape, torch_orth_matrix, torch_taper_width,
+                max_atoms_per_batch=torch_max_atoms_per_batch,
+                compile_core=torch_compile,
+                out=torch_grid_buf, stats=_splat_stats,
+                **torch_pairs_kwarg,
+              )
+            if _splat_stats is not None:
+              torch_splat_stats_log.append(_splat_stats)
+
+
+            # Symmetry-expand the density grid, exactly as gemmi's
+            # put_model_density_on_grid() does via symmetrize_sum(). No-op
+            # (empty torch_grid_ops) for P1.
+            with torch_phase("symmetrize", torch_device):
+              torch_density = symmetrize_sum(torch_density, torch_grid_ops)
+            if mpi_rank == 0 and chunk_ct == 0 and i == 0:
+              print("DIAGNOSTIC torch_density.device =", torch_density.device,
+                    ", dtype =", torch_density.dtype)
+              dev_type = torch_density.device.type
+              if dev_type == "mps":
+                print("DIAGNOSTIC MPS current_allocated_memory =",
+                      torch.mps.current_allocated_memory(), "bytes")
+              elif dev_type == "cuda":
+                print("DIAGNOSTIC CUDA memory_allocated =",
+                      torch.cuda.memory_allocated(torch_density.device), "bytes")
+              else:
+                print("DIAGNOSTIC running on CPU (device.type =", dev_type, ")")
+              print("DIAGNOSTIC torch grid shape =", tuple(torch_density.shape),
+                    ", dtype =", torch_density.dtype, ", sum =", torch_density.sum().item())
+
+              if save_density:
+                np.save("density_torch.npy", torch_density.cpu().numpy())
+                print("DIAGNOSTIC saved density_torch.npy")
+            with torch_phase("fft+extract", torch_device):
+              F_t = compute_fcalc(
+                torch_density, torch_cell_volume, torch_hkl, torch_orth_matrix,
+                blur=torch_blur_value,
+              )
+
+          with torch_phase("device->host", torch_device):
+            extracted_sf = F_t.cpu().numpy().astype(np.complex128)
+          with torch_phase("into cctbx", torch_device):
+            sf_flex = flex.complex_double(np.ascontiguousarray(extracted_sf, dtype=np.complex128))
+            fcalc = miller.array(miller_set=torch_miller_set, data=sf_flex)
+            fcalc.set_info(miller.array_info(labels=["FWT", "PHIFWT"]))
+            fcalc = fcalc.resolution_filter(d_min=d_min,d_max=d_max)
+        else:
+          with host_phase("cctbx calc"):
+            # Same distinction as the other two engines: cctbx generates the
+            # symmetry copies from the structure's own space group, so a model
+            # that already holds them is calculated in P1.
+            #
+            # The reflections must still be the CRYSTAL's, though. Left to
+            # itself, structure_factors() on a P1 structure returns P1's
+            # indices -- 11,965 rather than 3,388 here, labelled P1 -- so the
+            # Miller set is built at the true symmetry and the P1 structure is
+            # sampled at exactly those indices. That is what the torch and
+            # gemmi branches do, and it is NOT the same as merging equivalents
+            # afterwards, which would average the symmetry-related reflections
+            # and reintroduce the averaging expand_symmetry=False exists to
+            # avoid.
+            if expand_symmetry:
+              xrs_sel.scattering_type_registry(table=scattering_table)
+              fcalc = xrs_sel.structure_factors(d_min=d_min,algorithm=cctbx_method).f_calc()
+            else:
+              p1_symmetry = crystal.symmetry(
+                unit_cell=xrs_sel.unit_cell(),
+                space_group_info=cctbx.sgtbx.space_group_info(symbol="P 1"))
+              xrs_calc = xrs_sel.customized_copy(crystal_symmetry=p1_symmetry)
+              xrs_calc.scattering_type_registry(table=scattering_table)
+              # structure_factors_from_scatterers asserts that the structure
+              # and the Miller set share a space group, so the set is built at
+              # the crystal's symmetry -- which fixes WHICH reflections -- and
+              # then relabelled P1 to satisfy that assertion. The result is
+              # relabelled back. Only the labels move; no index is merged,
+              # mapped or averaged.
+              cctbx_ms = miller.build_set(
+                crystal_symmetry=xrs_sel.crystal_symmetry(),
+                anomalous_flag=False, d_min=d_min)
+              fcalc = cctbx_ms.customized_copy(
+                crystal_symmetry=p1_symmetry
+              ).structure_factors_from_scatterers(
+                xray_structure=xrs_calc, algorithm=cctbx_method).f_calc()
+              fcalc = fcalc.customized_copy(
+                crystal_symmetry=xrs_sel.crystal_symmetry())
+            fcalc = fcalc.resolution_filter(d_min=d_min,d_max=d_max)
 
         if do_opt:
           diffuse_expt_common,fcalc_common = diffuse_expt.common_sets(fcalc.as_non_anomalous_array())
@@ -1074,13 +2089,43 @@ EOF
     #      real_map_np = this_map.real_map_unpadded().as_numpy_array()
     #      map_data.append(real_map_np)
         else:
-          if sig_fcalc is None:
-            sig_fcalc = fcalc
-            sig_icalc = abs(fcalc).set_observation_type_xray_amplitude().f_as_f_sq()
-          else:
-            sig_fcalc = sig_fcalc + fcalc
-            sig_icalc = sig_icalc + abs(fcalc).set_observation_type_xray_amplitude().f_as_f_sq()
+          # Running sums are accumulated as numpy arrays rather than by adding
+          # miller arrays frame by frame.
+          #
+          # Every frame shares one Miller set -- same cell, same d_min -- so
+          # miller.__add__ repeats identical index matching on every frame.
+          # Measured at 53 ms per call, twice per frame: 26 s of a 251-frame
+          # run, about 15% of it, against ~8% for the actual GPU calculation.
+          # |F|^2 is likewise formed directly instead of going through
+          # abs() -> set_observation_type -> f_as_f_sq(), which agrees to
+          # 2e-18 relative (pure float rounding).
+          #
+          # sig_fcalc/sig_icalc are still kept as the FIRST frame's miller
+          # arrays: downstream code uses them as containers, overwriting
+          # .data() with the reduced totals, so the objects are needed even
+          # though their values are not.
+          with host_phase("accumulate"):
+            fcalc_np = fcalc.data().as_numpy_array()
+            if sig_fcalc is None:
+              sig_fcalc = fcalc
+              sig_icalc = abs(fcalc).set_observation_type_xray_amplitude().f_as_f_sq()
+              sig_fcalc_acc = fcalc_np.copy()
+              sig_icalc_acc = sig_icalc.data().as_numpy_array().copy()
+              sig_indices_ref = fcalc.indices()
+            else:
+              # Adding the data arrays elementwise is only equivalent to adding
+              # the miller arrays if the Miller sets agree; check rather than
+              # assume, since a silent mismatch would misalign every reflection.
+              assert fcalc.indices().all_eq(sig_indices_ref), (
+                "Miller indices changed between frames; the running sums assume "
+                "a single fixed Miller set")
+              sig_fcalc_acc += fcalc_np
+              sig_icalc_acc += fcalc_np.real**2 + fcalc_np.imag**2
         ct = ct + 1
+        # One profiler step per FRAME, not per chunk: the schedule's
+        # wait/warmup/active counts are frames.
+        if torch_profiler is not None:
+          torch_profiler.step()
 
     chunk_ct = chunk_ct + 1
 
@@ -1088,6 +2133,31 @@ EOF
 
     if (chunk_ct >= nchunklist[work_rank]):
       break
+
+  loop_wall = time.time() - itime
+
+  if torch_profiler is not None:
+    # on_trace_ready has normally already fired, at the end of the active
+    # window; this releases the profiler for the (shorter) case where the run
+    # ended first.
+    torch_profiler.stop()
+
+# Frames this rank actually processed. It can be fewer than the PLANNED
+# chunklist*nchunklist: a final short chunk when chunk= does not divide the
+# frame count, or a trajectory that ends before the plan says it should.
+#
+# fcalc_list/icalc_list were sized from the planned count with np.empty(), so
+# any row that was never written holds uninitialised memory. They are consumed
+# with np.sum(..., axis=0) and `for x in range(len(fcalc_list))`, which would
+# fold that garbage straight into the result -- silently, since np.empty gives
+# plausible-looking floats. Trim to what was filled.
+
+  n_frames_this = ct
+  if mpi_rank == 0:
+    report_phases(n_frames_this, loop_wall)
+  if fcalc_list is not None and n_frames_this < len(fcalc_list):
+    fcalc_list = fcalc_list[:n_frames_this]
+    icalc_list = icalc_list[:n_frames_this]
 
 
     
@@ -1099,6 +2169,13 @@ EOF
 #    Nk = map_data[0].shape[2]
 #    map_grid_3D = np.reshape(map_grid,(len(tsites),Ni,Nj,Nk))
 #    np.save(dens_file,map_grid_3D)
+
+  if profile and mpi_rank == 0:
+    profiler.disable()
+    print("\n=== cProfile: top 30 by cumulative time (rank 0) ===")
+    pstats.Stats(profiler).sort_stats('cumtime').print_stats(30)
+    print("\n=== cProfile: top 30 by total time in the function itself ===")
+    pstats.Stats(profiler).sort_stats('tottime').print_stats(30)
 
   #profiler.disable()
 
@@ -1133,8 +2210,14 @@ EOF
     sig_fcalc_np = np.sum(fcalc_list,axis=0)
     sig_icalc_np = np.sum(icalc_list,axis=0)
   else:
-    sig_fcalc_np = sig_fcalc.data().as_numpy_array()
-    sig_icalc_np = sig_icalc.data().as_numpy_array()
+    # Accumulated above as numpy, so no conversion is needed here. Fall back to
+    # the miller arrays for the case where no frame was processed on this rank.
+    if sig_fcalc_acc is not None:
+      sig_fcalc_np = sig_fcalc_acc
+      sig_icalc_np = sig_icalc_acc
+    else:
+      sig_fcalc_np = sig_fcalc.data().as_numpy_array()
+      sig_icalc_np = sig_icalc.data().as_numpy_array()
     
 # perform reduction of sig_fcalc, sig_icalc, and ct
 
@@ -1267,13 +2350,18 @@ EOF
     else:
       diffuse_array_common = None
 
-    diffuse_array_common = mpi_comm.bcast(diffuse_array_common,root=0)
+    # Serial runs have no communicator; rank 0 set diffuse_array_common above.
+    if mpi_enabled():
+      diffuse_array_common = mpi_comm.bcast(diffuse_array_common,root=0)
 
     #Initialize correlations array
     w = np.ones(ct)
     ct_nonzero = ct
     first_this = (skiplist[work_rank]-first)
-    last_this = first_this + chunklist[work_rank]*nchunklist[work_rank]-1
+    # Frames actually processed, not the planned chunklist*nchunklist, so the
+    # slices below line up with fcalc_list/icalc_list when the final chunk was
+    # short.
+    last_this = first_this + n_frames_this - 1
     #Get the slice for the section handled by this rank
     C_all_this = np.zeros(ct)
     C_this = C_all_this[first_this:last_this+1]
@@ -1297,7 +2385,8 @@ EOF
           write_nexus_metadata(f, diffuse_expt_common)
             
       # Wait for Rank 0 to finish metadata definitions
-      mpi_comm.Barrier()
+      if mpi_enabled():
+        mpi_comm.Barrier()
       # --- Parallel Numpy Writing (All Ranks) ---
       if h5_mpi:
         with h5py.File("checkpoint.nxs", "a", driver="mpio", comm=mpi_comm) as f:
@@ -1325,7 +2414,8 @@ EOF
               dset[first_this:last_this+1, :, :] = np.stack((np.real(fcalc_list),np.imag(fcalc_list)),axis=-1).astype(np.float32)
               dset = f["entry/data/weights"]
               dset[first_this:last_this+1] = w_this.astype(np.float32)
-          mpi_comm.Barrier()
+          if mpi_enabled():
+            mpi_comm.Barrier()
       if mpi_rank == 0:
         print("Nexus file successfully written with cctbx metadata and parallel arrays.")          
 
@@ -1388,7 +2478,11 @@ EOF
             diffuse_this = np.array(diffuse_array_common.data())
           C_this[x] = np.corrcoef(np.array([diffuse_expt_np,diffuse_this]))[0,1]
       C_all = np.zeros(ct)
-      mpi_comm.Allreduce(C_all_this,C_all,op=MPI.SUM)
+      if mpi_enabled():
+        mpi_comm.Allreduce(C_all_this,C_all,op=MPI.SUM)
+      else:
+        # One rank owns every frame, so its partial array IS the total.
+        C_all = C_all_this
       if np.max(C_all) > C_ref:
         C_ref = np.max(C_all)
         maxind = np.argmax(C_all)
@@ -1397,7 +2491,8 @@ EOF
           which_rank = mpi_rank
         else:
           which_rank = 0
-        which_rank = mpi_comm.allreduce(which_rank,MPI.SUM)
+        if mpi_enabled():
+          which_rank = mpi_comm.allreduce(which_rank,MPI.SUM)
 #        print("which_rank = ",which_rank)
         if which_rank == mpi_rank:          
           tot_sig_fcalc_np = tot_sig_fcalc_np - fcalc_list[maxind - first_this]
@@ -1405,8 +2500,11 @@ EOF
         else:
           tot_sig_fcalc_np = None
           tot_sig_icalc_np = None
-        tot_sig_fcalc_np = mpi_comm.bcast(tot_sig_fcalc_np,root=which_rank)
-        tot_sig_icalc_np = mpi_comm.bcast(tot_sig_icalc_np,root=which_rank)
+        # Serial: which_rank == mpi_rank == 0, so the branch above already
+        # subtracted the frame and both arrays are current.
+        if mpi_enabled():
+          tot_sig_fcalc_np = mpi_comm.bcast(tot_sig_fcalc_np,root=which_rank)
+          tot_sig_icalc_np = mpi_comm.bcast(tot_sig_icalc_np,root=which_rank)
         w[maxind] = 0
         if mpi_rank == 0:
           print("Max correlation, index = ",C_ref,maxind)
