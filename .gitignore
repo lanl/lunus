@@ -2,10 +2,50 @@
 *.o
 .DS_Store
 *.pyc
+__pycache__/
+.pytest_cache/
 .adxv_beam_center
+
+# Python build artifacts (pyproject.toml / pip wheel / pixi)
+build/
+dist/
+*.egg-info/
+.pixi/
 tmp*
 !tmpdir_common
 \#SConscript\#
 c/src/.\#*
 examples/xtraj/*.hkl
 examples/xtraj/*.mtz
+
+# lunus/sf/examples/compare_gemmi/ runs in place, so its OUTPUTS are ignored
+# while its inputs are tracked. Tracked: run_xtraj.sh, top_bfac.pdb.gz and
+# traj.xtc (the 135,834-atom system every table in lunus/sf/docs/performance.md
+# was measured on -- kept in the repo so those numbers stay reproducible).
+# Ignored below: the reflection files each run produces, the optional density
+# dump (save_density=True, ~221 MB), and any UNCOMPRESSED .pdb, which is only
+# ever a regenerated intermediate.
+lunus/sf/examples/compare_gemmi/*.pdb
+# ...except the crystal structure the trajectory was simulated from, which
+# is an INPUT: run_xtraj.sh takes its cell and space group from here.
+!lunus/sf/examples/compare_gemmi/7FPV.pdb
+lunus/sf/examples/compare_gemmi/*.mtz
+# ...except 7FPV's experimental data, which are INPUTS for the bulk-solvent
+# validation. 7FPV-sf.cif carries the observations (anomalous intensities,
+# sigmas and R-free flags); the .mtz carries map coefficients derived from
+# them, which the cif also has as pdbx_FWT/PHWT.
+!lunus/sf/examples/compare_gemmi/7FPV_map_coeffs.mtz
+lunus/sf/examples/compare_gemmi/*.hkl
+lunus/sf/examples/compare_gemmi/*.npy
+lunus/sf/examples/compare_gemmi/*.ndx
+lunus/sf/examples/compare_gemmi/deleted_frames.txt
+lunus/sf/examples/compare_gemmi/*.log
+lunus/sf/examples/compare_gemmi/time_*.txt
+# tools/remeasure.sh writes a timestamped directory of logs and
+# reflection files per run; the numbers land in docs/, not in git.
+lunus/sf/examples/compare_gemmi/remeasure-*/
+lunus/sf/examples/compare_gemmi/baseline-*/
+# torch.profiler traces (torch_profile_frames=N), written to the CWD of
+# whatever directory the run happens in. Several MB for a few frames.
+torch_trace_rank*.json
+lunus/sf/*-PROGRESS.md
