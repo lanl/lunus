@@ -44,10 +44,10 @@ requires_gemmi = pytest.mark.skipif(not HAVE_GEMMI, reason="gemmi not installed"
 requires_mpi4py = pytest.mark.skipif(not HAVE_MPI4PY, reason="mpi4py not installed")
 
 
-# Path to the scratch area holding the MD topology/trajectory used by the
-# end-to-end comparison. It is not checked in (see .gitignore); regenerate its
-# inputs with examples/compare_gemmi/run_xtraj.sh, which derives them from the
-# tracked examples/xtraj/ reference data.
+# Path to the scratch area holding the OUTPUTS of the end-to-end comparison.
+# Those are gitignored; the inputs it runs on (top_bfac.pdb.gz, traj.xtc, the
+# 7FPV files) are tracked in examples/compare_gemmi/. Produce the outputs with
+# examples/compare_gemmi/run_xtraj.sh.
 COMPARE_DATA_ENV = "LUNUS_SF_COMPARE_DATA"
 
 

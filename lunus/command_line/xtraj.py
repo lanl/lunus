@@ -35,7 +35,7 @@ import h5py
 import math
 # lunus.sf imports are deferred to the point of use throughout this file, so
 # that running it as a script works without the repository root on sys.path
-# until something actually needs a sibling module. See to_aniso().
+# until something actually needs one of them. See to_aniso().
 import gemmi
 
 def mpi_enabled():
@@ -149,12 +149,12 @@ def to_aniso(miller_array, apply_symmetry_str="P1", mask_value=np.nan):
     # Use .copy() to ensure we don't accidentally mutate the bound C++ memory block
     data_np = miller_array.data().as_numpy_array().copy()
 
-    # The shell binning, spline fit and subtraction now live in sf/aniso.py,
+    # The shell binning, spline fit and subtraction now live in lunus/sf/aniso.py,
     # which needs no crystallography library and so can be shared with callers
     # that have no cctbx -- sampleworks scores the anisotropic component as a
     # guidance target through the same code. What stays here is the part that
     # is genuinely cctbx-shaped: unpacking the miller_array above, and the Laue
-    # merge below. Behaviour is unchanged, bit for bit; tests/test_aniso.py
+    # merge below. Behaviour is unchanged, bit for bit; lunus/sf/tests/test_aniso.py
     # pins that against a copy of the original loop.
     from lunus.sf.aniso import subtract_isotropic
 
@@ -333,7 +333,7 @@ if __name__=="__main__":
 # fcalc
 
   try:
-    idx = [a.find("fcalc")==0 for a in args].index(True)
+    idx = [a.find("fcalc=")==0 for a in args].index(True)
   except ValueError:
     fcalc_file = "fcalc.mtz"
   else:
@@ -342,7 +342,7 @@ if __name__=="__main__":
 # icalc
 
   try:
-    idx = [a.find("icalc")==0 for a in args].index(True)
+    idx = [a.find("icalc=")==0 for a in args].index(True)
   except ValueError:
     icalc_file = "icalc.mtz"
   else:
@@ -560,9 +560,9 @@ if __name__=="__main__":
 
 # Density taper width (Angstrom) for the torch engine, spanning the last
 # taper_width of the cutoff radius, replacing gemmi's hard cutoff (see
-# density_torch.py for why: hard cutoffs make autograd gradients
+# lunus/sf/density_torch.py for why: hard cutoffs make autograd gradients
 # essentially grid-noise-dominated near the boundary). Leave unset for
-# an automatic default of ~2x the average grid spacing.
+# the default of 0.1 A (kernel_torch.py).
 
   try:
     idx = [a.find("torch_taper_width")==0 for a in args].index(True)
@@ -642,13 +642,13 @@ if __name__=="__main__":
     torch_timing = args.pop(idx).split("=")[1] == "True"
 
 # Diagnostics for the splat's in-situ cost, which is ~4.6x what the same call
-# costs repeated back-to-back on the same tensors (see docs/performance.md).
+# costs repeated back-to-back on the same tensors (see lunus/sf/docs/performance.md).
 # The two differ in more than one way, so these separate them:
 #
 #   torch_splat_stats=True   count the work per frame -- atoms, chunks, and
 #                            atom-voxel pairs both ideal and as actually
 #                            batched. Answers "more work or slower work?"
-#                            against bench_splat.py's pair count. Free.
+#                            against lunus/sf/tools/bench_splat.py's pair count. Free.
 #   torch_reuse_grid=True    splat into ONE preallocated grid buffer for every
 #                            frame instead of allocating a fresh one per call,
 #                            which is what the back-to-back repeat does.
@@ -740,7 +740,7 @@ if __name__=="__main__":
       )
 
 # Dump the first frame's real-space density grid to density_gemmi.npy /
-# density_torch.npy for tools/compare_density.py (default False). Off by
+# density_torch.npy for lunus/sf/tools/compare_density.py (default False). Off by
 # default because it is a whole uncompressed float32 grid -- 28 MB for the
 # example's 120x160x360, 221 MB at 300x300x144 -- written on every invocation.
 # Turn it on only for an actual density comparison.
@@ -757,7 +757,7 @@ if __name__=="__main__":
 # batching is budgeted by pairs rather than by atom count. It is a speed knob
 # as much as a memory one: the default keeps each working buffer around 16 MB
 # so it stays cache-resident, which measured faster than both larger and
-# smaller values. Re-tune with bench_splat.py on a different machine.
+# smaller values. Re-tune with lunus/sf/tools/bench_splat.py on a different machine.
 # Leave unset to use density_torch.splat_density's default.
 
   try:
@@ -1029,7 +1029,7 @@ if __name__=="__main__":
           "the output files are outside them.")
 
     if torch_splat_stats_log:
-      # Compare pairs_actual against bench_splat.py's pair count on the same
+      # Compare pairs_actual against lunus/sf/tools/bench_splat.py's pair count on the same
       # structure and grid. If they agree, the splat's in-situ cost is not
       # extra work and the difference is execution rate. pairs_actual /
       # pairs_ideal is the chunk padding, which is the one part of the work
@@ -1123,8 +1123,8 @@ if __name__=="__main__":
     #
     # Measured here, 10 frames, CUDA, 104 threads on 3 CPUs: splat 287.9
     # ms/frame median. With OMP_NUM_THREADS=2: 66.3 -- against 62.6 ms for the
-    # same work in tools/bench_splat.py. The 4.6x "the splat is slow in the
-    # loop" mystery was this, start to finish. See docs/performance.md.
+    # same work in lunus/sf/tools/bench_splat.py. The 4.6x "the splat is slow in the
+    # loop" mystery was this, start to finish. See lunus/sf/docs/performance.md.
     # The CFS QUOTA is the only thing that knows. nproc, os.cpu_count() and
     # os.sched_getaffinity() all report the host's cores -- 104 on the pod
     # this was diagnosed on -- because a CPU limit is enforced by accounting,
@@ -1245,7 +1245,8 @@ if __name__=="__main__":
     # for signed-permutation operations (which is all of them for most space
     # groups) it reduces to axis permutes/flips/rolls with no index tensors
     # materialized at all. It is also fully differentiable -- see
-    # symmetry_torch.py and validate_symmetry.py, which checks parity against
+    # lunus/sf/symmetry_torch.py and lunus/sf/tests/test_symmetry.py, whose
+      # test_gemmi_parity checks parity against
     # gemmi's own symmetrize_sum() rather than against a reading of its source.
     #
     # For a P1 space group build_grid_ops_from_cctbx returns an empty list and
@@ -1970,7 +1971,7 @@ EOF
           # No gradients needed here -- xtraj.py is a forward-only diffuse
           # calculation, not a training loop. The same structure_factors_one_config
           # call works with requires_grad=True instead, outside no_grad(), in a
-          # script that actually backpropagates (see example_usage.py).
+          # script that actually backpropagates (see lunus/sf/examples/example_usage.py).
           with torch.no_grad():
             # Probe: with the previous frame's grid and F still alive, the
             # allocator cannot hand the splat back the block it just used --

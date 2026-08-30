@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 LUNUS is a toolkit for analyzing and modeling **diffuse X-ray scattering** from protein crystals (LANL, BSD-licensed). It has three layers that can be used independently:
 
-1. A **C library + ~280 small command-line tools** (`c/`) for image and reciprocal-lattice processing.
+1. A **C library + ~130 small command-line tools** (`c/`) for image and reciprocal-lattice processing.
 2. A **Boost.Python extension** (`lunus/lunus_ext.cpp`) that exposes the C processing pipeline to Python as a cctbx/libtbx module.
 3. **Python command-line programs** (`lunus/command_line/`) built on cctbx/DIALS/mdtraj for integration, MD-trajectory structure-factor calculation, and simulation.
 
@@ -73,22 +73,23 @@ DIALS/DXTBX experiment JSON files supply per-image geometry; the deck points at 
 
 ## Python layer
 
-`lunus/__init__.py` imports the Boost extension (`lunus_ext`) into the package namespace. The extension wraps two classes:
+`lunus/__init__.py` imports the Boost extension (`lunus_ext`) into the package namespace. The extension wraps three classes:
 
 - `Process` — the image→lattice integration pipeline (`set_image`, `set_amatrix`, `set_xvectors`, `LunusProcimlt`, `get_lattice`, `write_as_vtk`/`_hkl`/`_cube`/`_lat`, `divide_by_counts`).
 - `LunusDIFFIMAGE` — single-image filters (`LunusPunchim`, `LunusWindim`, `LunusThrshim`, `LunusPolarim`, …).
+- `LunusLAT3D` — the 3D reciprocal-lattice container.
 
 Python code that imports `lunus` therefore requires the cctbx-module build, not the standalone one.
 
 ### Dispatchers
 
-Each `lunus/command_line/*.py` carries a `# LIBTBX_SET_DISPATCHER_NAME lunus.<name>` comment; libtbx generates the corresponding `bin/lunus.<name>` wrapper at configure time. Current set: `lunus.process`, `lunus.integrate`, `lunus.xtraj`, `lunus.md`, `lunus.filter_peaks`, `lunus.stills_process`, `lunus.simulate_diffraction_image`.
+Each `lunus/command_line/*.py` that libtbx dispatches carries a `# LIBTBX_SET_DISPATCHER_NAME lunus.<name>` comment; libtbx generates the corresponding `bin/lunus.<name>` wrapper at configure time. Current set: `lunus.process`, `lunus.integrate`, `lunus.xtraj`, `lunus.md`, `lunus.filter_peaks`, `lunus.stills_process`, `lunus.simulate_diffraction_image`.
 
 Most of these detect MPI by checking `'OMPI_COMM_WORLD_SIZE' in os.environ` and degrade to serial otherwise, so they are launched as `mpirun -np N python <script> ...` (usually with `OMP_NUM_THREADS=1` to avoid oversubscription).
 
 ### `xtraj` — MD trajectory → diffuse scattering
 
-`lunus/command_line/xtraj.py` reads an MD trajectory (mdtraj) plus topology and computes ensemble structure-factor statistics: `<F>` (Bragg) and `<|F|²> − |<F>|²` (diffuse). Arguments are `key=value` on the command line, parsed positionally out of `sys.argv`. Key options: `top=`, `traj=`, `d_min=`, `first=`, `last=`, `nproc=`, `chunk=`, `engine=` (`cctbx` default | `sfall` | `gemmi`), `gemmi_cutoff=`, `cctbx_method=` (`fft` | `direct`). Output filenames are set with `fcalc=`, `icalc=`, `diffuse=`. `examples/xtraj/run.sh` is a working smoke test. Note that its reference outputs (`*.ref.mtz`, `*.ref.hkl`) are **not** in git — they are caught by the blanket `examples/xtraj/*.mtz` / `*.hkl` patterns in `.gitignore`, so a fresh clone has only `run.sh`, `top_ref.pdb` and `traj_ref.xtc`.
+`lunus/command_line/xtraj.py` reads an MD trajectory (mdtraj) plus topology and computes ensemble structure-factor statistics: `<F>` (Bragg) and `<|F|²> − |<F>|²` (diffuse). Arguments are `key=value` on the command line, parsed positionally out of `sys.argv`. Key options: `top=`, `traj=`, `d_min=`, `first=`, `last=`, `chunk=`, `engine=` (`cctbx` default | `sfall` | `gemmi`), `gemmi_cutoff=`, `cctbx_method=` (`fft` | `direct`). Output filenames are set with `fcalc=`, `icalc=`, `diffuse=`. `examples/xtraj/run.sh` is a working smoke test. Note that its reference outputs (`*.ref.mtz`, `*.ref.hkl`) are **not** in git — they are caught by the blanket `examples/xtraj/*.mtz` / `*.hkl` patterns in `.gitignore`, so a fresh clone has only `run.sh`, `top_ref.pdb` and `traj_ref.xtc`.
 
 **There is one xtraj.** The torch-engine development variant that lived in `lunus/sf/xtraj.py` replaced the shipped dispatcher, so `lunus/command_line/xtraj.py` now carries every engine. Beyond the dispatcher's `cctbx`/`sfall`/`gemmi` it has `engine=torch`, plus `torch_device=`, `torch_compile=`, `torch_max_pairs_per_batch=`, `torch_num_threads=`, `torch_taper_width=`, `torch_blur=` (`auto` by default: the FFT-artifact blur, sized from the grid and the model's minimum B — it matters a lot at low B, see `docs/solvent-design.md`), `save_density=` and `use_top_bfacs=`.
 

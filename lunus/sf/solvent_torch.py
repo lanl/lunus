@@ -124,8 +124,8 @@ def blur_density(density, orth_matrix, blur_b, inv_d2_grid=None):
     Done in reciprocal space because on a periodic grid that is exact and
     costs one FFT pair, where a real-space convolution would need a truncated
     kernel and would reintroduce exactly the boundary artifacts this is here to
-    remove. It is differentiable, though the default detach_mask means it does
-    not normally carry gradients.
+    remove. It is differentiable, and carries gradients under the default
+    detach_mask=False; detach_mask=True suppresses them.
 
     IT MUST BE A GAUSSIAN, NOT A LOW-PASS, and that is not a matter of taste.
     Truncate the filter and it RINGS: a hard low-pass at 3 A gives a minimum of

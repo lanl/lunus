@@ -188,11 +188,11 @@ def structure_factors_batch(
     Gradients flow to ALL N coordinate sets AND to occ, so a single backward()
     on a loss built from the ensemble observables reaches every member. Note
     what the occupancy gradient does and does not include: the solvent mask is
-    built from a detached density by default (SolventModel.detach_mask), so
-    d(F_total)/d(occ) carries the protein term but not the bulk term that
-    replaces it as an occupancy falls. Forward, the two stay continuous;
-    in the gradient they do not, unless detach_mask=False. See
-    docs/solvent-design.md, "What the occupancy gradient leaves out".
+    built from a detached density when SolventModel.detach_mask is True (it
+    defaults to False), so d(F_total)/d(occ) then carries the protein term but
+    not the bulk term that replaces it as an occupancy falls. Forward, the two
+    stay continuous; in the gradient they do not. See docs/solvent-design.md,
+    "Per-configuration occupancies, and what their gradient leaves out".
 
     use_checkpoint (default False) recomputes each configuration's splat
     during backward instead of retaining its intermediates. This is usually

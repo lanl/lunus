@@ -327,22 +327,24 @@ gradient existed the whole time; only the shape stood in the way. Verified
 against a finite difference to 7e-11, identical with and without
 checkpointing, and with no leakage between members.
 
-**But the occupancy gradient is incomplete by default, and not slightly.**
+**But the occupancy gradient is incomplete when the mask is detached, and
+not slightly.** `detach_mask` now defaults to `False`, so the default path is
+the complete one; what follows describes what `detach_mask=True` costs.
 
 The forward model is continuous across a water dissolving — its density falls,
 the threshold hands that region back to the bulk, and `F_mask` grows to replace
 what `F_protein` lost. That continuity is one of the reasons a density
 threshold was chosen over a geometric mask. The *gradient* is not continuous in
 the same way, because `detach_mask=True` builds the mask from a detached
-density: `d(F_total)/d(occ)` carries the protein term and not the bulk term
+density (it is not the default; see above): `d(F_total)/d(occ)` carries the protein term and not the bulk term
 that cancels part of it.
 
 Measured, 300 atoms, mask calibrated to 0.5 occupancy with a live taper shell:
 
 | | Σ\|d\|F\|²/d occ\| |
 |---|---|
-| `detach_mask=True` (default), `mask_blur=0` | 3.80e5 |
-| `detach_mask=False` | **2.18e5** |
+| `detach_mask=True`, `mask_blur=0` | 3.80e5 |
+| `detach_mask=False` (default) | **2.18e5** |
 | `detach_mask=True`, `mask_blur=100` | 7.78e5 |
 | `detach_mask=False` | **6.81e5** |
 
@@ -368,8 +370,9 @@ the other today. Splitting it — per-quantity control, or a mask built from a
 density in which B is detached and occupancy is not — is the real fix and has
 not been done.
 
-**Until then: pass `detach_mask=False` when occupancies are being refined**, and
-read Constraint 3 before doing it if B is differentiable by that point.
+**Until then: keep the default `detach_mask=False` when occupancies are being
+refined**, and read Constraint 3 before overriding it if B is differentiable by
+that point.
 `tests/test_solvent.py` pins the size of the effect so it cannot change
 silently.
 

@@ -10,12 +10,12 @@ be run in the sandbox that produced everything else in this package.
 
 Usage: python compare_icalc_mtz.py icalc_gemmi.mtz icalc_torch.mtz
 
-Note: xtraj.py's default icalc_file="icalc.mtz" is the SAME for both
+Note: xtraj.py's default icalc="icalc.mtz" is the SAME for both
 engines, so the second run will silently overwrite the first run's
-output unless you pass distinct icalc_file= values (or rename the file
+output unless you pass distinct icalc= values (or rename the file
 between runs) -- e.g.:
-    python xtraj.py ... engine=gemmi icalc_file=icalc_gemmi.mtz ...
-    python xtraj.py ... engine=torch icalc_file=icalc_torch.mtz ...
+    python xtraj.py ... engine=gemmi icalc=icalc_gemmi.mtz ...
+    python xtraj.py ... engine=torch icalc=icalc_torch.mtz ...
 """
 
 import sys

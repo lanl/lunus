@@ -420,7 +420,8 @@ doing real work, which is how `miller.__add__` was correctly identified at 53 ms
 per call.
 
 **Never run `profile=True` and `torch_timing=True` together.** cProfile's
-overhead lands inside the timed regions. `xtraj.py` warns if you do.
+overhead lands inside the timed regions. Nothing stops you -- the only
+combination `xtraj.py` rejects is `torch_profile_frames` with `profile`.
 
 **GPU kernels are asynchronous.** An unsynchronized timer measures how long it
 took to *enqueue* work, and the cost surfaces on whichever later call happens
@@ -572,10 +573,8 @@ at N=16 on a device with room for 8, half the penalty at the same peak. A
 to pick an extreme.
 
 Calibrate against measurement rather than arithmetic when doing this. The
-per-member cost is dominated by the splat, and the splat's in-loop cost on CUDA
-is not yet understood (see the unresolved discrepancy above), so the 2.4x
-recompute penalty measured at one N on one device should not be assumed to hold
-generally.
+per-member cost is dominated by the splat, so the 2.4x recompute penalty
+measured at one N on one device should not be assumed to hold generally.
 
 ## Compiling under MPI
 
@@ -609,11 +608,11 @@ to `torch._dynamo.utils.counters["stats"]["unique_graphs"]`.
 | `torch_device=cpu\|mps\|cuda` | where the splat, symmetrization and FFT run |
 | `torch_compile=False` | skip the one-off compile; worth it for single-frame runs, or on MPS where it cannot succeed |
 | `torch_max_pairs_per_batch=N` | atom-voxel pair budget, the knob that actually sets intermediate tensor size. The default keeps each working buffer cache-resident, which measured faster than both larger and smaller values. Re-tune on a new machine with `bench_splat.py`. |
-| `torch_num_threads=N` | threads per rank. Defaults to the cgroup CPU quota, or to 1 on a device run when no quota is discoverable. Set `OMP_NUM_THREADS` too — see "Resolved: the container was CPU-throttled". |
+| `torch_num_threads=N` | threads per rank. Defaults to the cgroup CPU quota, or to 1 on a device run when no quota is discoverable. Set `OMP_NUM_THREADS` too — see "The container was CPU-throttled, which was worth more than the code". |
 | `torch_taper_width=W` | taper width in Å; narrower is closer to gemmi but harsher on gradients |
 
-The old `torch_max_atoms_per_batch` is deliberately gone: batching is budgeted
-by pairs now, and the atom cap almost never bound.
+`torch_max_atoms_per_batch` still exists but is now secondary: batching is
+budgeted by pairs, and the atom cap almost never binds.
 
 ### Diagnostics
 

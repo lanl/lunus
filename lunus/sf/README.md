@@ -74,7 +74,7 @@ on `sys.path` — which a cctbx module build arranges for you, and which
 
 ```bash
 cd lunus/sf
-python -m pytest tests/ -q                     # 44 passed, 2 skipped
+python -m pytest tests/ -q                     # 222 passed, 4 skipped
 
 PYTHONPATH=<repo root> python examples/example_usage.py       # forward + backward
 mpirun -n 4 python examples/example_mpi_training.py           # MPI training step
@@ -97,7 +97,7 @@ python ../../tools/compare_icalc_mtz.py icalc_gemmi.mtz icalc_torch.mtz
 | `density_torch.py` | The differentiable splat. Grouped by element, batched by atom-voxel PAIRS, restricted to the cutoff sphere rather than its bounding cube, with the hot blocks factored for `torch.compile` fusion. |
 | `kernel_torch.py` | Builds per-element or per-atom (A, lam, radius) as torch tensors. Not differentiated — B and blur are fixed hyperparameters. |
 | `symmetry_torch.py` | Space group → validated integer **grid** operations, applied differentiably. Also `adjust_grid_for_symmetry()` for the grid-size constraints those operations impose. |
-| `structure_factor_torch.py` | FFT + Miller-index extraction, matching xtraj.py's `ifftn(...) * volume` then `conjugate(...)` convention including the optional blur-undo. `structure_factors_batch()` runs N configurations in one call with gradients to all N (optionally gradient-checkpointed, so memory stays flat in N), and `mean_and_diffuse()` does the `<F>` / `<\|F\|²> − \|<F>\|²` ensemble reduction. `occ` may be `(n_atoms,)` or `(N, n_atoms)` for per-configuration occupancies, differentiable either way — see docs/solvent-design.md for what the occupancy gradient omits under the default `detach_mask`. |
+| `structure_factor_torch.py` | FFT + Miller-index extraction, matching xtraj.py's `ifftn(...) * volume` then `conjugate(...)` convention including the optional blur-undo. `structure_factors_batch()` runs N configurations in one call with gradients to all N (optionally gradient-checkpointed, so memory stays flat in N), and `mean_and_diffuse()` does the `<F>` / `<\|F\|²> − \|<F>\|²` ensemble reduction. `occ` may be `(n_atoms,)` or `(N, n_atoms)` for per-configuration occupancies, differentiable either way — see docs/solvent-design.md for what the occupancy gradient omits when `detach_mask=True`. |
 | `aniso.py` | Isotropic-background removal — the anisotropic component of a diffuse map. Shell-averages in reciprocal space, fits a not-a-knot cubic spline through the shell means and subtracts it. `subtract_isotropic()` is the one-shot (masked data supported); `spline_basis()` exposes the operation as the fixed linear map it is, for callers evaluating it repeatedly on one reflection list. No crystallography library needed — `xtraj.py`'s `to_aniso()` is now a cctbx-shaped wrapper around this. |
 | `aniso_torch.py` | `IsotropicBackground`, the differentiable form of the above: builds the linear operator once, then each evaluation is a scatter-add and one small matmul. Gradients reach the intensities, which is what lets the anisotropic component be scored as a guidance target. |
 | `solvent_torch.py` | Flat/mask bulk solvent: a smooth density-threshold mask smoothed by a probe-radius blur (`mask_blur`, on by default), its transform, and `F_total = k_overall·exp(−h·U·h)·[F_protein + k_sol·exp(−b_sol·s²/4)·F_mask]`. Opt in with `solvent=SolventModel(...)` on either entry point above; `solvent=None`, the default, runs none of it. `mask_occupancy()` is the check that the model is doing anything at all. See `docs/solvent-design.md`. |
@@ -153,7 +153,8 @@ repo so those numbers stay reproducible. Both `iotbx.pdb` and `mdtraj` read
   expansion, and measured agreement with gemmi.
 - **[docs/performance.md](docs/performance.md)** — benchmarks (all labelled with
   the configuration they were measured on), Apple MPS and NVIDIA CUDA, where
-  the per-frame time actually goes, an unresolved splat discrepancy, how to
+  the per-frame time actually goes, how the in-loop splat discrepancy turned
+  out to be CPU throttling, how to
   measure this pipeline without fooling yourself, and the tuning knobs.
 - **[docs/bugfixes.md](docs/bugfixes.md)** — bugs found and fixed, several of
   which produced wrong numbers rather than a traceback. Kept because the
@@ -175,10 +176,9 @@ repo so those numbers stay reproducible. Both `iotbx.pdb` and `mdtraj` read
   `torch.cuda.mem_get_info()`) would let it pick automatically instead of
   making the caller choose between two extremes.
 
-  Worth measuring first: the per-member cost is dominated by the splat, and on
-  CUDA the splat's in-loop cost is not yet understood (see
-  docs/performance.md), so calibrate against real timings rather than assuming
-  the recompute penalty is a clean 2.4x at every N.
+  Worth measuring first: the per-member cost is dominated by the splat, and the
+  2.4x recompute penalty was measured at one N on one device, so calibrate
+  against real timings rather than assuming it holds generally.
 - **Fuse the batched splat into a single kernel.** `structure_factors_batch()`
   currently shares setup across members and loops the splat; fusing the N
   splats into one launch would help GPU throughput for small systems, where
