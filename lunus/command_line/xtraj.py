@@ -2193,6 +2193,14 @@ EOF
           # derived once and every frame after that is a gather.
           if opt_calc_sel is None:
             diffuse_expt_common,sig_fcalc,opt_calc_sel = common_set_selection(fcalc.as_non_anomalous_array(),diffuse_expt)
+            if mpi_rank == 0:
+              # The one intermediate between reading the data and the first
+              # correlation. A mapping that went wrong shows up here as a
+              # count, at the point it happened, rather than downstream as a
+              # correlation that is merely disappointing.
+              print("do_opt: common set =",opt_calc_sel.size,"reflections (",
+                    fcalc.indices().size(),"calculated,",
+                    diffuse_expt.indices().size(),"experimental )")
             sig_icalc = abs(sig_fcalc).set_observation_type_xray_amplitude().f_as_f_sq()
             sig_indices_ref = fcalc.indices()
           else:
