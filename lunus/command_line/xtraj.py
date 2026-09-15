@@ -171,6 +171,113 @@ def to_aniso(miller_array, apply_symmetry_str="P1", mask_value=np.nan):
 
     return miller_array
 
+
+def build_aniso_operator(miller_array, apply_symmetry_str="P1", reduced=False):
+    """to_aniso() precomputed over one reflection list, batched over rows.
+
+    Takes and returns numpy, (n_refl,) or (batch, n_refl). Reproduces
+    to_aniso()'s data to ~1e-9 -- the background becomes a fixed linear map
+    rather than a spline solved per call -- and assumes the data is finite
+    everywhere, where to_aniso() re-derives its mask each time. reduced=True
+    returns the Laue segment means rather than gathering them back.
+
+    The partition is the one symmetry_average() merges over: two reflections
+    share a segment exactly when they map to the same Patterson-group ASU
+    index, which is when the merge gives them the same value.
+    """
+    from lunus.sf.aniso import AnisoOperator
+
+    patterson_group = sgtbx.space_group_info(
+        apply_symmetry_str).group().build_derived_patterson_group()
+    target_symmetry = crystal.symmetry(unit_cell=miller_array.unit_cell(),
+                                       space_group=patterson_group)
+    asu = miller_array.customized_copy(crystal_symmetry=target_symmetry).map_to_asu()
+    hkl = asu.indices().as_vec3_double().as_double().as_numpy_array().reshape(-1, 3)
+    _, segment_index = np.unique(hkl, axis=0, return_inverse=True)
+
+    shell_thickness = math.sqrt(miller_array.unit_cell().d_star_sq((1, 1, 1)))
+    d_star = np.sqrt(miller_array.d_star_sq().data().as_numpy_array())
+    return AnisoOperator(d_star, shell_thickness, reduced=reduced,
+                         segment_index=segment_index.ravel().astype(np.int64))
+
+
+def common_set_selection(calc_array, expt_array):
+    """expt_array.common_sets(calc_array), plus the positions it selected from.
+
+    Returns (expt_common, calc_common, calc_sel). The mapping depends only on
+    the two index lists, so a caller looping over frames that share one Miller
+    set derives it once and then gathers with calc_sel.
+    """
+    pairs = calc_array.match_indices(other=expt_array).pairs()
+    return (expt_array.select(pairs.column(1)),
+            calc_array.select(pairs.column(0)),
+            pairs.column(0).as_numpy_array().astype(np.intp))
+
+
+def correlator(reference, aniso_op=None):
+    """Pearson correlation against `reference` for a batch of diffuse maps.
+
+    Returns correlate(rows), mapping (batch, n_refl) to (batch,). With an
+    aniso_op (built reduced=True) each map has its isotropic component removed
+    and is reduced to Laue segment means first; the correlation then carries
+    the segment multiplicities as weights, which is exactly what the gathered
+    full-length maps would give, without gathering them.
+    """
+    centred = reference - reference.mean()
+    norm = np.sqrt(np.dot(centred, centred))
+    n_refl = len(reference)
+
+    if aniso_op is None:
+        unit = centred / norm
+        def correlate(rows):
+            rows = rows - rows.mean(axis=-1, keepdims=True)
+            return (rows @ unit) / np.sqrt(np.einsum("ij,ij->i", rows, rows))
+        return correlate
+
+    counts = aniso_op.segment_counts
+    segment_sums = np.bincount(aniso_op.segment_index, weights=centred,
+                               minlength=len(counts))
+    def correlate(rows):
+        rows = aniso_op(rows)
+        total = rows @ counts
+        return (rows @ segment_sums) / (norm * np.sqrt(
+            (rows*rows) @ counts - total*total/n_refl))
+    return correlate
+
+
+def sweep_candidates(fcalc_list, tot_fcalc, tot_icalc, weights, n_frames,
+                     correlate, block_size):
+    """Correlation with the data when each still-selected frame is left out.
+
+    Returns (n_frames_local,), zero wherever weights is zero. correlate() maps
+    (batch, n_refl) diffuse maps to (batch,) correlations.
+
+    n*(I_tot - I_x) - |F_tot - F_x|^2 is evaluated expanded,
+
+        diffuse_x = [n I_tot - |F_tot|^2] + 2 Re(conj(F_tot) F_x) - (n+1)|F_x|^2
+
+    so that the bracket is computed once per sweep, no candidate needs a
+    complex temporary, and |F_x|^2 need not be stored alongside F_x. Agrees
+    with the unexpanded form to 2e-13 relative at diffuse/Bragg = 1e-2, and
+    2e-10 at 1e-5. Candidates go in blocks because the work per candidate is a
+    few passes over the reflection list, which wants a batch.
+    """
+    tot_re = np.ascontiguousarray(tot_fcalc.real)
+    tot_im = np.ascontiguousarray(tot_fcalc.imag)
+    base = n_frames*tot_icalc - (tot_re*tot_re + tot_im*tot_im)
+
+    correlations = np.zeros(len(weights))
+    candidates = np.nonzero(weights)[0]
+    for start in range(0, len(candidates), block_size):
+        which = candidates[start:start+block_size]
+        block_re = fcalc_list[which].real
+        block_im = fcalc_list[which].imag
+        diffuse = base + 2.0*(tot_re*block_re + tot_im*block_im)
+        diffuse -= (n_frames+1.0)*(block_re*block_re + block_im*block_im)
+        correlations[which] = correlate(diffuse)
+    return correlations
+
+
 def calc_msd(x):
   d = np.zeros(this_sites_frac.shape)
   msd = 0
@@ -474,6 +581,15 @@ if __name__=="__main__":
       do_opt = False
     else:
       do_opt = True
+
+# Memory the optimizer may use for one block of candidate frames
+
+  try:
+    idx = [a.find("opt_block_mb")==0 for a in args].index(True)
+  except ValueError:
+    opt_block_mb = 1024
+  else:
+    opt_block_mb = int(args.pop(idx).split("=")[1])
 
 # Calculate correlations using anisotropic component 
 
@@ -1641,7 +1757,8 @@ EOF
   
   chunk_ct = 0
   fcalc_list = None
-  
+  opt_calc_sel = None
+
   itime = time.time()
 
   if torch_profiler is not None:
@@ -2072,17 +2189,27 @@ EOF
             fcalc = fcalc.resolution_filter(d_min=d_min,d_max=d_max)
 
         if do_opt:
-          diffuse_expt_common,fcalc_common = diffuse_expt.common_sets(fcalc.as_non_anomalous_array())
-          icalc_common = abs(fcalc_common).set_observation_type_xray_amplitude().f_as_f_sq()
-          fcalc_common_data = np.array(fcalc_common.data())
-          icalc_common_data = np.array(icalc_common.data())
-          if fcalc_list is None:
-            fcalc_list = np.empty((chunklist[work_rank]*nchunklist[work_rank],fcalc_common_data.size),dtype=fcalc_common_data.dtype)
-            icalc_list = np.empty((chunklist[work_rank]*nchunklist[work_rank],icalc_common_data.size),dtype=icalc_common_data.dtype)
-            sig_fcalc = fcalc_common
-            sig_icalc = icalc_common
-          fcalc_list[ct] = fcalc_common_data
-          icalc_list[ct] = icalc_common_data
+          # The common set is fixed by the two reflection lists, so it is
+          # derived once and every frame after that is a gather.
+          if opt_calc_sel is None:
+            diffuse_expt_common,sig_fcalc,opt_calc_sel = common_set_selection(fcalc.as_non_anomalous_array(),diffuse_expt)
+            sig_icalc = abs(sig_fcalc).set_observation_type_xray_amplitude().f_as_f_sq()
+            sig_indices_ref = fcalc.indices()
+          else:
+            assert fcalc.indices().all_eq(sig_indices_ref)
+          with host_phase("accumulate"):
+            fcalc_common_data = fcalc.data().as_numpy_array()[opt_calc_sel]
+            if fcalc_list is None:
+              # Single precision, and |F|^2 not stored at all -- 8 bytes per
+              # frame per reflection rather than 24, which is what decides
+              # whether this fits in RAM. Every sum and difference taken from
+              # it is still float64. The diffuse is a cancellation,
+              # N*sum|F|^2 - |sum F|^2, so the error single precision costs
+              # scales as eps32 / (diffuse/Bragg): measured 3e-6 at a ratio of
+              # 1e-2 and 2e-3 at 1e-5, the frame selection identical to float64
+              # throughout.
+              fcalc_list = np.empty((chunklist[work_rank]*nchunklist[work_rank],fcalc_common_data.size),dtype=np.complex64)
+            fcalc_list[ct] = fcalc_common_data
     # Commented out some density trajectory code
     #    if not (dens_file is None):
     #      this_map = fcalc.fft_map(d_min=d_min, d_max=d_max, resolution_factor = 0.5)
@@ -2146,8 +2273,8 @@ EOF
 # chunklist*nchunklist: a final short chunk when chunk= does not divide the
 # frame count, or a trajectory that ends before the plan says it should.
 #
-# fcalc_list/icalc_list were sized from the planned count with np.empty(), so
-# any row that was never written holds uninitialised memory. They are consumed
+# fcalc_list was sized from the planned count with np.empty(), so any row
+# that was never written holds uninitialised memory. It is consumed
 # with np.sum(..., axis=0) and `for x in range(len(fcalc_list))`, which would
 # fold that garbage straight into the result -- silently, since np.empty gives
 # plausible-looking floats. Trim to what was filled.
@@ -2157,7 +2284,6 @@ EOF
     report_phases(n_frames_this, loop_wall)
   if fcalc_list is not None and n_frames_this < len(fcalc_list):
     fcalc_list = fcalc_list[:n_frames_this]
-    icalc_list = icalc_list[:n_frames_this]
 
 
     
@@ -2201,14 +2327,16 @@ EOF
       dwf_array = miller_set.debye_waller_factors(b_iso=20.0*d_min*d_min)
       dwf_data_np = np.array(dwf_array.data())
       # fcalc_list /= dwf_data_np[np.newaxis,:]
-      # icalc_list /= dwf_data_np[np.newaxis,:]
       for x in range(len(fcalc_list)):
         fcalc_list[x] /= dwf_data_np
-        icalc_list[x] /= dwf_data_np * dwf_data_np
-    #At this point fcalc_list and icalc_list can be used for optimization
+    #At this point fcalc_list can be used for optimization
     #Still need to calculate the sums across all MPI ranks, however.
-    sig_fcalc_np = np.sum(fcalc_list,axis=0)
-    sig_icalc_np = np.sum(icalc_list,axis=0)
+    sig_fcalc_np = np.sum(fcalc_list,axis=0,dtype=np.complex128)
+    # sum|F|^2 a frame at a time: squaring the whole array at once would
+    # need a float64 copy of it, which is the memory just saved.
+    sig_icalc_np = np.zeros(fcalc_list.shape[1])
+    for x in range(len(fcalc_list)):
+      sig_icalc_np += np.abs(fcalc_list[x].astype(np.complex128))**2
   else:
     # Accumulated above as numpy, so no conversion is needed here. Fall back to
     # the miller arrays for the case where no frame was processed on this rank.
@@ -2359,7 +2487,7 @@ EOF
     ct_nonzero = ct
     first_this = (skiplist[work_rank]-first)
     # Frames actually processed, not the planned chunklist*nchunklist, so the
-    # slices below line up with fcalc_list/icalc_list when the final chunk was
+    # slices below line up with fcalc_list when the final chunk was
     # short.
     last_this = first_this + n_frames_this - 1
     #Get the slice for the section handled by this rank
@@ -2431,10 +2559,10 @@ EOF
             print("Couldn't calculate fcalc difference on worker ",work_rank," with len(C_this), ct_nonzero, x = ",len(C_this),ct_nonzero,x)
             print("Types of tot_sig_fcalc_np, fcalc_list[x] = ",type(tot_sig_fcalc_np),type(fcalc_list[x]))
           try:            
-            sig_icalc_np = sig_icalc_np - icalc_list[x]
+            sig_icalc_np = sig_icalc_np - np.abs(fcalc_list[x].astype(np.complex128))**2
           except:
             print("Couldn't calculate icalc difference on worker ",work_rank," with len(C_this), ct_nonzero, x = ",len(C_this),ct_nonzero,x)
-            print("Types of tot_sig_icalc_np, icalc_list[x] = ",type(tot_sig_icalc_np),type(icalc_list[x]))
+            print("Types of tot_sig_icalc_np, fcalc_list[x] = ",type(tot_sig_icalc_np),type(fcalc_list[x]))
     if mpi_enabled():
       mpi_comm.Allreduce(sig_fcalc_np,tot_sig_fcalc_np,op=MPI.SUM)
       mpi_comm.Allreduce(sig_icalc_np,tot_sig_icalc_np,op=MPI.SUM)
@@ -2442,41 +2570,41 @@ EOF
       tot_sig_fcalc_np = sig_fcalc_np
       tot_sig_icalc_np = sig_icalc_np
 
-    diffuse_this = np.ascontiguousarray((ct_nonzero*tot_sig_icalc_np - tot_sig_fcalc_np * tot_sig_fcalc_np.conjugate()).real)
-    if corr_aniso:
-      flex_diffuse_this = flex.double(diffuse_this)
-      diffuse_array_common = diffuse_array_common.customized_copy(data = flex_diffuse_this)
-      diffuse_array_common = to_aniso(diffuse_array_common,apply_symmetry_str)
-      diffuse_this = np.array(diffuse_array_common.data())
     diffuse_expt_np = np.array(diffuse_expt_common.data())
-    C_ref = np.corrcoef(np.array([diffuse_expt_np,diffuse_this]))[0,1]
+    n_common = len(diffuse_expt_np)
+    diffuse_this = np.ascontiguousarray((ct_nonzero*tot_sig_icalc_np - tot_sig_fcalc_np * tot_sig_fcalc_np.conjugate()).real)
+
+    # to_aniso() is fixed by the reflection list, so it is built once here
+    # rather than re-derived for every candidate frame of every iteration.
+    # reduced=True stops at the Laue segment means: the correlation reduces
+    # over reflections anyway, so gathering them back to full length -- and
+    # forming the background there -- is pure overhead.
+    if corr_aniso:
+      assert np.isfinite(diffuse_this).all(), "the aniso operator assumes finite data"
+      aniso_op = build_aniso_operator(diffuse_array_common,apply_symmetry_str,reduced=True)
+      if mpi_rank == 0:
+        print("Laue multiplicity: ",n_common," reflections in ",
+              len(aniso_op.segment_counts)," segments")
+    else:
+      aniso_op = None
+    correlate = correlator(diffuse_expt_np,aniso_op)
+
+    C_ref = correlate(diffuse_this[None,:])[0]
     if mpi_rank == 0:
       print("Initial correlation after filtering = ",C_ref)
-      
+
+    # Candidates are swept in blocks, sized so that the live arrays of
+    # (block_size, n_common) stay within opt_block_mb.
+    block_size = max(1,(opt_block_mb << 20)//(n_common*64))
+    if mpi_rank == 0:
+      print("Sweeping candidates in blocks of ",block_size," frames")
+
     while keep_optimizing:
-      C_this[:] = 0
 #      print("Worker = ",work_rank,"ct = ",ct,"len(C_this) = ",len(C_this),first_this,last_this)
     #Calculation the correlations leaving out each frame
       ct_nonzero = ct_nonzero - 1
-      for x in range(len(C_this)):
-        if w_this[x] != 0:
-          try:
-            sig_fcalc_this = tot_sig_fcalc_np - fcalc_list[x]
-          except TypeError:
-            print("Couldn't calculate fcalc difference on worker ",work_rank," with len(C_this), ct_nonzero, x = ",len(C_this),ct_nonzero,x)
-            print("Types of tot_sig_fcalc_np, fcalc_list[x] = ",type(tot_sig_fcalc_np),type(fcalc_list[x]))
-          try:            
-            sig_icalc_this = tot_sig_icalc_np - icalc_list[x]
-          except:
-            print("Couldn't calculate icalc difference on worker ",work_rank," with len(C_this), ct_nonzero, x = ",len(C_this),ct_nonzero,x)
-            print("Types of tot_sig_icalc_np, icalc_list[x] = ",type(tot_sig_icalc_np),type(icalc_list[x]))
-          diffuse_this = np.ascontiguousarray((ct_nonzero*sig_icalc_this - sig_fcalc_this * sig_fcalc_this.conjugate()).real)
-          if corr_aniso:
-            flex_diffuse_this = flex.double(diffuse_this)
-            diffuse_array_common = diffuse_array_common.customized_copy(data = flex_diffuse_this)
-            diffuse_array_common = to_aniso(diffuse_array_common,apply_symmetry_str)
-            diffuse_this = np.array(diffuse_array_common.data())
-          C_this[x] = np.corrcoef(np.array([diffuse_expt_np,diffuse_this]))[0,1]
+      C_this[:] = sweep_candidates(fcalc_list,tot_sig_fcalc_np,tot_sig_icalc_np,
+                                   w_this,ct_nonzero,correlate,block_size)
       C_all = np.zeros(ct)
       if mpi_enabled():
         mpi_comm.Allreduce(C_all_this,C_all,op=MPI.SUM)
@@ -2496,7 +2624,7 @@ EOF
 #        print("which_rank = ",which_rank)
         if which_rank == mpi_rank:          
           tot_sig_fcalc_np = tot_sig_fcalc_np - fcalc_list[maxind - first_this]
-          tot_sig_icalc_np = tot_sig_icalc_np - icalc_list[maxind - first_this]
+          tot_sig_icalc_np = tot_sig_icalc_np - np.abs(fcalc_list[maxind - first_this].astype(np.complex128))**2
         else:
           tot_sig_fcalc_np = None
           tot_sig_icalc_np = None

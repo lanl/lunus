@@ -148,4 +148,5 @@ lunus = { path = ".", editable = true }
 
 [tool.pixi.tasks]
 test = { cmd = "pytest lunus/sf/tests -q", description = "Run the lunus.sf test suite" }
+smoke = { cmd = "pytest lunus/sf/tests/test_xtraj_smoke.py -q", description = "One two-frame xtraj run per engine, plus an optimization" }
 compare = { cmd = "bash run_xtraj.sh gemmi && bash run_xtraj.sh torch && python ../../tools/compare_icalc_mtz.py icalc_gemmi.mtz icalc_torch.mtz", cwd = "lunus/sf/examples/compare_gemmi", description = "Run both engines end to end and compare" }
