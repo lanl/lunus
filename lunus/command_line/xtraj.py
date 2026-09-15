@@ -201,19 +201,6 @@ def build_aniso_operator(miller_array, apply_symmetry_str="P1", reduced=False):
                          segment_index=segment_index.ravel().astype(np.int64))
 
 
-def common_set_selection(calc_array, expt_array):
-    """expt_array.common_sets(calc_array), plus the positions it selected from.
-
-    Returns (expt_common, calc_common, calc_sel). The mapping depends only on
-    the two index lists, so a caller looping over frames that share one Miller
-    set derives it once and then gathers with calc_sel.
-    """
-    pairs = calc_array.match_indices(other=expt_array).pairs()
-    return (expt_array.select(pairs.column(1)),
-            calc_array.select(pairs.column(0)),
-            pairs.column(0).as_numpy_array().astype(np.intp))
-
-
 def correlator(reference, aniso_op=None):
     """Pearson correlation against `reference` for a batch of diffuse maps.
 
@@ -2192,7 +2179,18 @@ EOF
           # The common set is fixed by the two reflection lists, so it is
           # derived once and every frame after that is a gather.
           if opt_calc_sel is None:
-            diffuse_expt_common,sig_fcalc,opt_calc_sel = common_set_selection(fcalc.as_non_anomalous_array(),diffuse_expt)
+            # expt.common_sets(calc) is calc.match_indices(expt).pairs(), then
+            # expt.select(column 1) and calc.select(column 0). Spelled out
+            # because the mapping depends only on the two index lists and every
+            # frame shares one Miller set, so it is derived here once and every
+            # frame after this is a gather. Column 0 indexes the calculated
+            # array, column 1 the experimental one; swapping them misaligns
+            # every reflection.
+            fcalc_nonanom = fcalc.as_non_anomalous_array()
+            pairs = fcalc_nonanom.match_indices(other=diffuse_expt).pairs()
+            diffuse_expt_common = diffuse_expt.select(pairs.column(1))
+            sig_fcalc = fcalc_nonanom.select(pairs.column(0))
+            opt_calc_sel = pairs.column(0).as_numpy_array().astype(np.intp)
             if mpi_rank == 0:
               # The one intermediate between reading the data and the first
               # correlation. A mapping that went wrong shows up here as a

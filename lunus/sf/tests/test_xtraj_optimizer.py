@@ -9,11 +9,13 @@ covers the expanded diffuse expression, the blocking, complex64 storage, the
 reduced AnisoOperator and the segment-weighted correlation together, which is
 why the unit tests for those pieces individually are gone.
 
-common_set_selection() is tested separately because it does not appear in the
-sweep at all: it runs once per frame in the trajectory loop, and its failure
-mode is silent. Column 0 of the match indexes the calculated array and column 1
-the experimental one; swapping them misaligns every reflection in fcalc_list
-and still yields a plausible correlation.
+The mapping from calculated to experimental reflections used to be tested
+separately here, when it lived in its own function. It is inlined in the
+trajectory loop now, and the coverage moved rather than vanished: feeding
+test_xtraj_smoke.py a SHUFFLED SUBSET as ID_file makes the two match columns
+different permutations, so a swapped or reordered mapping fails there. That
+was established by mutation, not assumed -- see the commit that made the
+change.
 
 Everything here needs cctbx, and importing xtraj needs mdtraj, h5py and gemmi
 besides; the module skips rather than errors where they are missing.
@@ -172,91 +174,3 @@ def test_correlator_without_an_operator_is_plain_pearson(xtraj):
         xtraj.correlator(reference)(rows),
         [np.corrcoef(reference, row)[0, 1] for row in rows],
         rtol=0, atol=1e-12)
-
-
-# --------------------------------------------------------------------------
-# the cctbx seam the sweep does not reach
-# --------------------------------------------------------------------------
-
-@pytest.fixture
-def arrays(xtraj):
-    """A calculated complex array, and an experimental subset in a jumbled order."""
-    from cctbx import crystal, miller
-    from cctbx.array_family import flex
-
-    symmetry = crystal.symmetry(
-        unit_cell=(34.196, 45.558, 99.044, 90, 90, 90),
-        space_group_symbol="P212121")
-    miller_set = miller.build_set(crystal_symmetry=symmetry,
-                                  anomalous_flag=False, d_min=3.0)
-    n = miller_set.indices().size()
-
-    rng = np.random.default_rng(0)
-    calc_data = rng.normal(size=n) + 1j * rng.normal(size=n)
-    fcalc = miller.array(miller_set=miller_set,
-                         data=flex.complex_double(calc_data))
-
-    # Two thirds of the reflections, shuffled: a subset in an unrelated order,
-    # which is what an experimental file on disk actually looks like.
-    keep = rng.permutation(n)[: (2 * n) // 3]
-    expt = miller_set.select(flex.size_t(np.sort(keep).astype(np.uint64)))
-    expt = expt.select(flex.size_t(
-        rng.permutation(expt.indices().size()).astype(np.uint64)))
-    diffuse_expt = miller.array(
-        miller_set=expt,
-        data=flex.double(rng.normal(size=expt.indices().size())))
-
-    return fcalc, diffuse_expt, calc_data
-
-
-class TestCommonSetSelection:
-    def test_reproduces_common_sets_exactly(self, xtraj, arrays):
-        fcalc, diffuse_expt, _ = arrays
-        fcalc_nonanom = fcalc.as_non_anomalous_array()
-
-        expt_ref, calc_ref = diffuse_expt.common_sets(fcalc_nonanom)
-        expt_new, calc_new, _ = xtraj.common_set_selection(
-            fcalc_nonanom, diffuse_expt)
-
-        assert expt_new.indices().all_eq(expt_ref.indices())
-        assert calc_new.indices().all_eq(calc_ref.indices())
-        np.testing.assert_array_equal(expt_new.data().as_numpy_array(),
-                                      expt_ref.data().as_numpy_array())
-        np.testing.assert_array_equal(calc_new.data().as_numpy_array(),
-                                      calc_ref.data().as_numpy_array())
-
-    def test_the_selection_survives_a_later_frame(self, xtraj, arrays):
-        """
-        The caching claim: derive the mapping on frame 0, apply it to a frame
-        carrying different data on the same Miller set, and get what
-        common_sets() would have given for THAT frame.
-        """
-        from cctbx import miller
-        from cctbx.array_family import flex
-
-        fcalc, diffuse_expt, _ = arrays
-        _, _, calc_sel = xtraj.common_set_selection(
-            fcalc.as_non_anomalous_array(), diffuse_expt)
-
-        rng = np.random.default_rng(99)
-        for _frame in range(3):
-            n = fcalc.indices().size()
-            later = rng.normal(size=n) + 1j * rng.normal(size=n)
-            later_array = miller.array(miller_set=fcalc.set(),
-                                       data=flex.complex_double(later))
-
-            _, calc_ref = diffuse_expt.common_sets(
-                later_array.as_non_anomalous_array())
-            np.testing.assert_array_equal(later[calc_sel],
-                                          calc_ref.data().as_numpy_array())
-
-    def test_a_swapped_column_would_be_caught(self, xtraj, arrays):
-        """
-        Guards the tests above: if the fixture were ordered so that both match
-        columns agreed, they would pass with the columns swapped.
-        """
-        fcalc, diffuse_expt, _ = arrays
-        pairs = fcalc.as_non_anomalous_array().match_indices(
-            other=diffuse_expt).pairs()
-        assert not np.array_equal(pairs.column(0).as_numpy_array(),
-                                  pairs.column(1).as_numpy_array())
