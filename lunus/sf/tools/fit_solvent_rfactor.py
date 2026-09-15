@@ -170,7 +170,7 @@ def read_model(path, log=sys.stdout):
 
 def build_density(xrs, elements, b_per_atom, occ, frac, grid, device, dtype,
                   expand_symmetry, log=sys.stdout, u_cart=None,
-                  is_aniso=None):
+                  is_aniso=None, cutoff=0.01):
     """Splat, then symmetry-expand on the GRID.
 
     expand_symmetry is True here and False for a trajectory, and the difference
@@ -191,7 +191,7 @@ def build_density(xrs, elements, b_per_atom, occ, frac, grid, device, dtype,
     present = sorted(set(elements))
     atom_A, atom_lam, offsets, atom_r, taper_w, e2i = build_atom_kernels_torch(
         elements, present, IT92_COEFFS, b_per_atom, 0.0, grid, M_np,
-        cutoff=0.01, device=device, dtype=dtype)
+        cutoff=cutoff, device=device, dtype=dtype)
 
     atom_L6 = aniso_mask = None
     if u_cart is not None:
@@ -202,7 +202,7 @@ def build_density(xrs, elements, b_per_atom, occ, frac, grid, device, dtype,
         atom_A, atom_L6, offsets, atom_r, taper_w, _ = \
             build_atom_kernels_aniso_torch(
                 elements, present, IT92_COEFFS, u_cart, 0.0, grid, M_np,
-                cutoff=0.01, device=device, dtype=dtype)
+                cutoff=cutoff, device=device, dtype=dtype)
         aniso_mask = torch.tensor(is_aniso, device=device)
         print("anisotropic ADPs: %d of %d atoms on the tensor kernel"
               % (int(is_aniso.sum()), len(elements)), file=log)
@@ -594,7 +594,13 @@ def main():
     p.add_argument("--target-occupancy", type=float, default=None,
                    help="override the gemmi-measured calibration target")
     p.add_argument("--taper-frac", type=float, default=0.5,
-                   help="taper width as a fraction of the cutoff")
+                   help="taper width as a fraction of the SOLVENT MASK cutoff")
+    p.add_argument("--density-cutoff", type=float, default=0.01, metavar="E",
+                   help="atomic density below which an atom's contribution is "
+                        "dropped when splatting, e/A^3. Not the solvent mask "
+                        "threshold above -- this is xtraj's gemmi_cutoff, and "
+                        "0.01 is its default. See docs/solvent-design.md, "
+                        "'What the density cutoff costs'")
     p.add_argument("--mask-blur", type=float, default=None, metavar="B",
                    help="smooth the density by exp(-B s^2/4) before "
                         "thresholding; the threshold mask's probe radius "
@@ -658,7 +664,8 @@ def main():
     density, orth, volume = build_density(
         xrs, elements, b_per_atom, occ, frac, grid, device, dtype,
         expand_symmetry=not args.no_expand_symmetry,
-        u_cart=u_cart if args.aniso_adp else None, is_aniso=is_aniso)
+        u_cart=u_cart if args.aniso_adp else None, is_aniso=is_aniso,
+        cutoff=args.density_cutoff)
 
     hkl = torch.tensor(hkl_np, dtype=torch.long, device=device)
     F_obs = torch.tensor(fobs_np, dtype=dtype, device=device)
