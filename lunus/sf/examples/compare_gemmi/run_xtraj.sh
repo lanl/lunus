@@ -91,8 +91,20 @@ ARGS="${ARGS} engine=${var}"
 # (That break-even assumes inductor's on-disk cache does not carry between
 # runs. If it does, only the first run on a machine pays and this should be
 # revisited.)
-if [ "${var}" = "torch" ] && [ -z "${LUNUS_COMPILE:-}" ]; then
-  ARGS="${ARGS} torch_compile=False"
+# LUNUS_COMPILE honours its VALUE, not merely its presence. It used to test
+# only whether the variable was set, so LUNUS_COMPILE=0 -- which reads as "off"
+# to anyone -- turned compiling ON, and unsetting it turned compiling OFF. Both
+# directions were tripped over in practice, once at a cost of 19 minutes a run.
+#
+# Passed explicitly either way, so the "torch.compile =" line in the log
+# reports what was asked for rather than what xtraj defaulted to. Note xtraj
+# tests for the exact string "True": torch_compile=1 would quietly mean False.
+case "${LUNUS_COMPILE:-0}" in
+  0|no|false|False|"") lunus_compile=False ;;
+  *)                   lunus_compile=True ;;
+esac
+if [ "${var}" = "torch" ]; then
+  ARGS="${ARGS} torch_compile=${lunus_compile}"
 fi
 
 # Useful extra flags:
