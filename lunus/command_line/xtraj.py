@@ -697,18 +697,22 @@ if __name__=="__main__":
   else:
     torch_taper_width_override = float(args.pop(idx).split("=")[1])
 
-# torch.compile the density splat's inner blocks (default True). Fusing them
+# torch.compile the density splat's inner blocks (default "auto"). Fusing them
 # is worth ~2.9x on the splat -- the per-voxel work is memory-bound, so run
 # eagerly it costs one pass over an (n_atoms, n_voxels) array per elementary
-# operation, roughly twenty of them, where fused it is a couple. Costs a
-# one-off compile of ~1s on the first frame, so set torch_compile=False for a
-# single-frame run, if your torch has no working compiler backend, or to
-# isolate a suspected compile-related numerical difference.
+# operation, roughly twenty of them, where fused it is a couple.
+#
+# It is NOT free: the one-off compile is ~8.8 s on CUDA against ~1.4 s on CPU,
+# so on CUDA it is a net LOSS below ~210 frames per process and a two-frame
+# smoke test pays the whole cost for nothing. "auto" does that arithmetic from
+# the frame count and the device -- see lunus/sf/tune.py. True/False force it,
+# which is what you want to isolate a suspected compile-related numerical
+# difference, or on a torch with no working compiler backend.
 
   try:
     idx = [a.find("torch_compile")==0 for a in args].index(True)
   except ValueError:
-    torch_compile = True
+    torch_compile = "auto"
   else:
     torch_compile = args.pop(idx).split("=")[1] == "True"
 
@@ -881,15 +885,18 @@ if __name__=="__main__":
 # Max atom-voxel PAIRS per batch for the torch engine -- the quantity that
 # actually sets intermediate tensor size, and the main tuning knob now that
 # batching is budgeted by pairs rather than by atom count. It is a speed knob
-# as much as a memory one: the default keeps each working buffer around 16 MB
-# so it stays cache-resident, which measured faster than both larger and
-# smaller values. Re-tune with lunus/sf/tools/bench_splat.py on a different machine.
-# Leave unset to use density_torch.splat_density's default.
+# as much as a memory one: the measured CPU value keeps each working buffer
+# around 16 MB so it stays cache-resident, which beat both larger and smaller
+# values. That criterion is "one buffer fits in cache", so it does not transfer
+# to a GPU unchanged -- splat_density's docstring says to expect a GPU to want
+# more. Default "auto" sizes it to the device's own L2 and caps it against free
+# memory (lunus/sf/tune.py); an integer forces it. Re-tune a forced value with
+# lunus/sf/tools/bench_splat.py on a different machine.
 
   try:
     idx = [a.find("torch_max_pairs_per_batch")==0 for a in args].index(True)
   except ValueError:
-    torch_max_pairs_per_batch = None
+    torch_max_pairs_per_batch = "auto"
   else:
     torch_max_pairs_per_batch = int(args.pop(idx).split("=")[1])
 
@@ -1231,9 +1238,10 @@ if __name__=="__main__":
       build_grid_ops_from_cctbx, adjust_grid_for_symmetry, symmetrize_sum,
     )
 
-    # left empty when unset so splat_density's own (measured) default applies
-    torch_pairs_kwarg = ({} if torch_max_pairs_per_batch is None
-                         else {"max_pairs_per_batch": torch_max_pairs_per_batch})
+    # Resolved below, once the grid shape and the device are both known --
+    # "auto" needs them. Both consumers (the compile warmup and the frame
+    # loop) come after that point.
+    torch_pairs_kwarg = {}
 
     torch_b_iso = 20.0 * d_min * d_min if apply_bfac else 0.0
     torch_dtype = torch.float32  # confirmed via the resolution-shell comparison that float64
@@ -1581,6 +1589,40 @@ if __name__=="__main__":
             "table from this run is NOT a performance measurement"
             .format(torch_profile_frames))
 
+    # ---- resolve the "auto" performance knobs -------------------------------
+    # Both need the grid shape and the device, so this cannot happen at parse
+    # time. Explicit values pass through untouched; only "auto" is decided
+    # here, and every decision prints its reason, because a knob that silently
+    # picks a number is exactly as hard to debug as one the user guessed.
+    from lunus.sf import tune as _tune
+
+    _dev_info = _tune.describe_device(torch_device, torch_module=torch)
+
+    if torch_max_pairs_per_batch == "auto":
+      torch_max_pairs_per_batch, _pairs_why = _tune.recommended_max_pairs(_dev_info)
+    else:
+      _pairs_why = "set explicitly"
+    torch_pairs_kwarg = {"max_pairs_per_batch": torch_max_pairs_per_batch}
+
+    if torch_compile == "auto":
+      # Compilation is per PROCESS, so what matters is this rank's share of
+      # the trajectory, not the whole of it.
+      _frames_this_rank = max(1, int(nsteps / max(1, mpi_size)))
+      torch_compile, _compile_why = _tune.recommended_compile(
+        _frames_this_rank, _dev_info)
+    else:
+      _compile_why = "set explicitly"
+
+    if mpi_rank == 0:
+      print("torch engine: auto-tuning -> max_pairs_per_batch = %d (%s), "
+            "torch.compile = %s (%s)"
+            % (torch_max_pairs_per_batch, _pairs_why, torch_compile, _compile_why))
+      _mem_warn = _tune.memory_warning(
+        xrs_sel.scatterers().size(), torch_grid_shape,
+        torch_max_pairs_per_batch, _dev_info)
+      if _mem_warn:
+        print("torch engine: WARNING, " + _mem_warn)
+
     # Compile ONCE on rank 0, then let the others start. Without this every
     # rank compiles the same kernels itself, and N concurrent compilations
     # saturate the machine: measured on 10 ranks with a cold cache, frame times
@@ -1607,8 +1649,7 @@ if __name__=="__main__":
             ", grid =", torch_grid_shape,
             ", b_iso =", ("per-atom (use_top_bfacs)" if use_top_bfacs else torch_b_iso),
             ", device =", torch_device, ", max_atoms_per_batch =", torch_max_atoms_per_batch,
-            ", max_pairs_per_batch =",
-            ("default" if torch_max_pairs_per_batch is None else torch_max_pairs_per_batch),
+            ", max_pairs_per_batch =", torch_max_pairs_per_batch,
             ", taper_width =", torch_taper_width, ", torch.compile =", torch_compile,
             ", matmul_precision =", torch_matmul_precision)
 

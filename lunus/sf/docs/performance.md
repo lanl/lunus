@@ -606,13 +606,48 @@ to `torch._dynamo.utils.counters["stats"]["unique_graphs"]`.
 | option | effect |
 |---|---|
 | `torch_device=cpu\|mps\|cuda` | where the splat, symmetrization and FFT run |
-| `torch_compile=False` | skip the one-off compile; worth it for single-frame runs, or on MPS where it cannot succeed |
-| `torch_max_pairs_per_batch=N` | atom-voxel pair budget, the knob that actually sets intermediate tensor size. The default keeps each working buffer cache-resident, which measured faster than both larger and smaller values. Re-tune on a new machine with `bench_splat.py`. |
+| `torch_compile=True\|False` | force compilation on or off. **Default is `auto`** -- see "Choosing the knobs automatically" below. |
+| `torch_max_pairs_per_batch=N` | atom-voxel pair budget, the knob that actually sets intermediate tensor size. **Default is `auto`**; a forced value should be re-tuned on a new machine with `bench_splat.py`. |
 | `torch_num_threads=N` | threads per rank. Defaults to the cgroup CPU quota, or to 1 on a device run when no quota is discoverable. Set `OMP_NUM_THREADS` too — see "The container was CPU-throttled, which was worth more than the code". |
 | `torch_taper_width=W` | taper width in Å; narrower is closer to gemmi but harsher on gradients |
 
 `torch_max_atoms_per_batch` still exists but is now secondary: batching is
 budgeted by pairs, and the atom cap almost never binds.
+
+### Choosing the knobs automatically
+
+Two of the knobs above are wrong often enough, and silently enough, that
+`xtraj.py` now picks them itself by default. The rules are in `tune.py`, they
+are derived from the measurements on this page, and **every decision prints
+its reason** -- a knob that quietly picks a number is no easier to debug than
+one the user guessed at.
+
+`torch.compile` is the one that bites. It is worth 2.58x on the CUDA splat and
+costs ~8.77 s once, so it is a **net loss below ~210 frames per process** and a
+two-frame smoke test pays the whole cost for nothing. `auto` does that
+arithmetic from the frame count and the device: ~210 frames on CUDA, ~2 on CPU
+(~1.4 s against ~1.15 s/frame saved), and never on MPS, where inductor's Metal
+backend cannot build at all. Note the count that matters is **frames per
+process**, not per run -- compilation is per process, so `mpirun -n 10` over
+500 frames is 50 frames each and below the CUDA break-even.
+
+`max_pairs_per_batch` defaults to 4M because that is ~16 MB, which stays
+resident in a CPU cache -- and `splat_density`'s docstring has always said to
+expect a GPU to want more. The transferable rule is the criterion, not the
+number, so `auto` sizes the buffer to **the L2 the CUDA device reports**, then
+caps it so the live buffers stay inside a quarter of free memory. If the device
+will not report an L2, it keeps the measured CPU default and says so rather
+than guessing.
+
+`auto` also prints a warning when the estimated peak -- density grid, rfft
+output and pair buffers -- is within 70% of free device memory. The grid goes
+as `d_min^-3`, so this is the term that makes a finer run fail where a coarser
+one fitted. It counts nothing autograd retains, so treat it as a floor: a
+guided step over an ensemble is a different problem, see "Ensembles: memory is
+the binding constraint".
+
+Explicit values always win and are reported as "set explicitly", so nothing
+here can override a deliberate choice.
 
 ### Diagnostics
 
