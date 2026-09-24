@@ -49,6 +49,13 @@ density is below the cutoff by construction. Structure factors are unchanged
 by any radius at or above the true one, so this need not agree exactly with
 the radius another implementation picks.
 
+That last sentence holds in the limit and is misleading in practice: it is
+conditional on the cutoff being tight enough that the discarded density really
+is negligible. At `xtraj`'s default of 0.01 e/Å³ it is not, and the two
+implementations' differing radius conventions are then the **largest** source
+of disagreement with gemmi — larger than the taper below. See "Of those two
+terms, the cutoff dominates".
+
 **The taper.** A hard cutoff is unusable for gradients: atoms crossing the
 boundary make the density discontinuous, so the finite-difference derivative
 swings erratically. A smooth taper over the outermost 0.1 Å fixes that at the
@@ -196,6 +203,121 @@ symmetry. It is monotonic in resolution — Icalc correlation 1.0000 at low
 resolution falling to 0.9099 in the 0.900–0.932 Å shell — which is the
 signature of a real-space truncation difference, and it halves when the taper is
 narrowed. Reproduce with `examples/compare_gemmi/run_xtraj.sh`.
+
+### Of those two terms, the cutoff dominates
+
+Measured 2026-09-20 on a 7FPV MD trajectory at `d_min` 1.2 (supercell
+68.392 × 91.116 × 198.088, 1,496,008 reflections, ten equal-count resolution
+shells), comparing `engine=torch` against `engine=gemmi` through
+`tools/compare_icalc_mtz.py`. R-factor on Icalc per shell:
+
+| d_mid (Å) | A: taper 0.1, cutoff 0.01 | B: taper 0.001, cutoff 0.01 | C: taper 0.1, cutoff 1e-3 torch / 1e-4 gemmi | D: taper 0.1, cutoff 1e-4 both |
+|---|---|---|---|---|
+| 1.222 | 0.1633 | 0.0624 | 0.0164 | **0.0048** |
+| 1.268 | 0.1452 | 0.0578 | 0.0271 | **0.0038** |
+| 1.323 | 0.1022 | 0.0425 | 0.0283 | **0.0027** |
+| 1.388 | 0.0564 | 0.0250 | 0.0177 | **0.0022** |
+| 1.468 | 0.0187 | 0.0100 | 0.0067 | **0.0020** |
+| 1.571 | 0.0106 | 0.0041 | 0.0049 | **0.0016** |
+| 1.711 | 0.0186 | 0.0070 | 0.0057 | **0.0012** |
+| 1.922 | 0.0119 | 0.0052 | 0.0024 | **0.0010** |
+| 2.319 | 0.0034 | 0.0014 | 0.0025 | **0.0007** |
+| 3.793 | 0.0039 | 0.0016 | 0.0015 | **0.0004** |
+| **mean** | **0.0534** | **0.0217** | **0.0113** | **0.0020** |
+
+Three things this settles, none of which was obvious from the `d_min` 0.9
+parity run above.
+
+**The taper acts as a resolution-independent factor; the cutoff carries the
+resolution dependence.** Narrowing the taper (A → B) improves every shell by
+**2.41 ± 0.22×**, including the low-resolution shells where R was already
+0.003, and leaves the monotonic shape intact. Tightening the cutoff removes the
+shape itself. So the steep high-resolution disagreement that motivates this
+section is the *cutoff*, and narrowing the taper treats a symptom the loose
+cutoff amplifies.
+
+**Matched tight cutoffs beat a narrowed taper by 13× at the resolution limit**
+(D 0.0048 against B 0.0624), at the default taper. Both knobs help, but they
+are not comparable in size, and they are not independent: the taper acts over
+the outermost 0.1 Å of the cutoff radius, where at 1e-4 the density is 100×
+smaller than at 1e-2, so B's 2.41× should not be expected to transfer on top of
+D.
+
+**Mismatched cutoffs cancel, and the cancellation is legible in the shape.** C
+sets the two engines to different cutoffs and looks good at the resolution
+limit (0.0164), but it is the only configuration whose R is *not* monotonic —
+it peaks at 1.323 Å with the outermost shell better than the two inside it.
+Two densities truncated at different radii differ by a thin spherical shell,
+whose transform oscillates in s rather than growing with it, and that hump is
+the tell. Matching the cutoffs (D) is 3.4× better at the edge and 5.6× better
+in the mean. **Do not tune the two engines' cutoffs independently to minimise
+their disagreement**: agreement between two differently-truncated calculations
+is not evidence that either is right.
+
+Both engines take the cutoff from the same `gemmi_cutoff=` argument
+(`xtraj.py` passes it to the torch kernel and to `calc.cutoff` alike), so D is
+the configuration to run and A is only the default. The cost is the one
+`6099334` measured: **1.76× on the torch splat** (2501 frames, `d_min` 1.8,
+CUDA, 176 s → 310 s), 1.16–1.47× for gemmi's calculator on CPU, since the work
+goes as the cutoff radius cubed. A Gaussian radius model — r ∝ √ln(ρ₀/c),
+work ∝ r³ — reproduces that 1.76× to within 5% and predicts ~1.40× for 1e-3,
+if a cheaper setting is wanted.
+
+This is an independent confirmation of that commit's conclusion that "0.01 is a
+reasonable default and a poor production setting", reached through engine
+parity rather than through the solvent R-factor. `docs/solvent-design.md`'s
+"What the density cutoff costs" reaches 1e-4 from the other direction.
+
+### Settled against exact direct summation
+
+The configurations above are engine-against-engine, which establishes
+consistency and not accuracy. Both were therefore run against
+`engine=cctbx cctbx_method=direct` — exact structure factors, no grid, no FFT,
+no cutoff, no taper — on the same trajectory and reflection set. R-factor on
+Icalc against that reference:
+
+| d_mid (Å) | gemmi vs exact | torch vs exact | torch/gemmi | torch vs gemmi (D) |
+|---|---|---|---|---|
+| 1.222 | 0.0021 | 0.0050 | 2.4 | 0.0048 |
+| 1.268 | 0.0014 | 0.0044 | 3.1 | 0.0038 |
+| 1.323 | 0.0015 | 0.0034 | 2.3 | 0.0027 |
+| 1.388 | 0.0011 | 0.0025 | 2.3 | 0.0022 |
+| 1.468 | 0.0005 | 0.0020 | 4.0 | 0.0020 |
+| 1.571 | 0.0004 | 0.0018 | 4.5 | 0.0016 |
+| 1.711 | 0.0003 | 0.0013 | 4.3 | 0.0012 |
+| 1.922 | 0.0002 | 0.0010 | 5.0 | 0.0010 |
+| 2.319 | 0.0002 | 0.0008 | 4.0 | 0.0007 |
+| 3.793 | 0.0002 | 0.0005 | 2.5 | 0.0004 |
+| **overall** | **0.000564** | **0.001651** | **2.9** | **0.001519** |
+
+correlation 0.999999 (gemmi), 0.999996 (torch vs exact) and 0.999996
+(torch vs gemmi) overall. The last column is the same five frames (0–4) as
+the reference runs; against the larger frame set of the table above it moves
+by at most 0.0002 in any shell, so none of this depends on frame count.
+
+**Both engines are accurate; gemmi is 2.9× the more accurate of the two.** The
+ratio is stable across every shell (2.3–5.0), and both residuals span the same
+10× from the resolution limit to low resolution — the same mechanism at
+different magnitudes, which is what two truncated-and-gridded calculations
+should look like.
+
+**D's agreement was real, not cancellation.** If the two engines' errors were
+independent, the torch-vs-gemmi R would be their quadrature sum. Observed
+**0.001519 against a predicted 0.001745** — a ratio of 0.87, i.e. independent
+to within a small common-mode term, which is expected since both truncate on
+the same threshold. So the C-versus-D contrast above is exactly what it
+appeared to be: C cancelled, D did not.
+
+**A corollary worth keeping: gemmi is a slightly flattering reference.**
+torch-vs-gemmi (0.001519) is 0.92× torch-vs-exact (0.001651), so benchmarking
+the torch engine against gemmi understates its true error by ~8% — the
+common-mode truncation the two share cancels in that comparison and does not
+cancel against reality. Small here, but it is the reason the parity tables
+above are a consistency check and this section is the accuracy one.
+
+The practical reading: at `gemmi_cutoff=1e-4` the torch engine is within
+**0.5% of exact at the resolution limit and 0.17% overall**, and gemmi within
+0.2% and 0.06%. Nothing in this pipeline is limited by that.
 
 ## Anisotropic ADPs
 
