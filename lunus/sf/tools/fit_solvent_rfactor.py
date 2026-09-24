@@ -595,11 +595,12 @@ def main():
                    help="override the gemmi-measured calibration target")
     p.add_argument("--taper-frac", type=float, default=0.5,
                    help="taper width as a fraction of the SOLVENT MASK cutoff")
-    p.add_argument("--density-cutoff", type=float, default=0.01, metavar="E",
+    p.add_argument("--density-cutoff", type=float, default=1e-4, metavar="E",
                    help="atomic density below which an atom's contribution is "
                         "dropped when splatting, e/A^3. Not the solvent mask "
-                        "threshold above -- this is xtraj's gemmi_cutoff, and "
-                        "0.01 is its default. See docs/solvent-design.md, "
+                        "threshold above -- this is the same quantity xtraj "
+                        "calls gemmi_cutoff, and shares its default. Pass 0.01 "
+                        "for the old one. See docs/solvent-design.md, "
                         "'What the density cutoff costs'")
     p.add_argument("--mask-blur", type=float, default=None, metavar="B",
                    help="smooth the density by exp(-B s^2/4) before "

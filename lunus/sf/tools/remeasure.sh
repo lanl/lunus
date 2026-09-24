@@ -152,6 +152,12 @@ step "2/4  frame budget  -> replaces 'Where the time actually goes'"
 # The first full-resolution check under expand_symmetry=False. Parity is the
 # headline correctness claim, and it is the one result the cell change should
 # NOT have moved -- both engines fold identically, whatever cell they are given.
+#
+# gemmi_cutoff is PINNED to 0.01 deliberately, and no longer matches xtraj's
+# default of 1e-4. This script exists to regenerate the published tables, and
+# those were measured at 0.01; inheriting the new default would silently
+# replace them with numbers from a different configuration rather than
+# reproducing them. Change it here only together with the tables it feeds.
 step "3/4  engine parity  -> replaces the gemmi-vs-torch correlation / R"
 for eng in gemmi torch; do
   "${PY[@]}" "${REPO_ROOT}/lunus/command_line/xtraj.py" \

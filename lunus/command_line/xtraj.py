@@ -333,12 +333,35 @@ if __name__=="__main__":
   else:
     d_max = float(args.pop(idx).split("=")[1])
 
-# gemmi_cutoff
+# gemmi_cutoff -- the atomic density below which an atom's contribution is
+# dropped when splatting, e/A^3. Badly named: despite "gemmi" it is handed to
+# BOTH the gemmi calculator (calc.cutoff) and the torch kernel, so it sets the
+# truncation radius for either engine. fit_solvent_rfactor.py calls the same
+# quantity --density-cutoff, to distinguish it there from the solvent MASK
+# threshold, which is a different and calibrated number.
+#
+# Was 0.01 -- a thousandfold looser than gemmi's own default of 1e-5 -- until
+# three independent lines of evidence converged on 1e-4:
+#
+#   engine parity     torch vs gemmi over 1.5M reflections at d_min 1.2 goes
+#                     from mean R 0.0534 to 0.0020, and the disagreement stops
+#                     being monotonic in resolution. Measured 2026-09; the
+#                     shell tables are not yet in docs/design.md
+#   direct summation  against exact cctbx structure factors, gemmi reaches
+#                     R 0.000564 and torch 0.001651 at 1e-4
+#   solvent R-factor  7FPV R-work 0.1810 -> 0.1802, b_sol toward the
+#                     conventional value; converged by 1e-4, 1e-5 adds nothing
+#                     (docs/solvent-design.md, "What the density cutoff costs")
+#
+# It is not free: 1.76x on the torch splat and 1.16-1.47x on gemmi's CPU
+# calculator, since the work goes as the cutoff radius cubed. Pass
+# gemmi_cutoff=0.01 to recover the old default and the numbers measured under
+# it.
 
   try:
     idx = [a.find("gemmi_cutoff")==0 for a in args].index(True)
   except ValueError:
-    gemmi_cutoff = 0.01
+    gemmi_cutoff = 1e-4
   else:
     gemmi_cutoff = float(args.pop(idx).split("=")[1])
 

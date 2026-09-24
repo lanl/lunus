@@ -7,9 +7,11 @@ the unit tests cannot reach: argument parsing, the mdtraj read, each engine's
 branch, the reductions and the file writes. A broken engine fails here; a
 slightly wrong one does not, and is not meant to.
 
-The cross-engine comparison runs at gemmi_cutoff=1e-4 rather than xtraj's
-default of 1e-2. The cutoff is the density below which an atom's contribution
-is dropped, and it applies to the torch engine as well as to gemmi; cctbx
+The cross-engine comparison pins gemmi_cutoff=1e-4 explicitly. That is now
+xtraj's default too, but the tests state it rather than inherit it, so that a
+future change to the default cannot silently move what they compare. The
+cutoff is the density below which an atom's contribution is dropped, and it
+applies to the torch engine as well as to gemmi; cctbx
 builds its own grid (algorithm="fft" by default) with sampling it chooses
 itself, and has no equivalent knob. Correlation of |F| against cctbx:
 
@@ -58,8 +60,8 @@ TRAJ = os.path.join(EXAMPLE, "traj_ref.xtc")
 # to stay a smoke test. Every second here is d_min: 4.0 gives 143k reflections
 # against 340k at 3.0, and the whole file runs in 12 s rather than 25. It must
 # not go so coarse that to_aniso() runs out of the four resolution shells a
-# cubic spline needs. On gemmi_cutoff see the module docstring -- the default
-# of 1e-2 is too coarse to compare engines against each other.
+# cubic spline needs. On gemmi_cutoff see the module docstring -- 1e-2, the
+# old default, is too coarse to compare engines against each other.
 COMMON = ["first=0", "last=1", "chunk=2", "d_min=4.0", "gemmi_cutoff=0.0001"]
 
 
