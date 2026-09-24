@@ -18,7 +18,9 @@ tool, and a FROZEN-mask mode, which subsumes the per-quantity detachment this
 note used to ask for. The diffuse convergence study has been re-run against the
 smoothed mask and its recommendation changed ("What the diffuse study found"),
 and `mask_blur`'s cost is now measured on CUDA ("At production scale") — it is
-cheap in time and costs ~1.5x peak device memory.
+cheap in time and costs ~1.5x peak device memory. The atomic density cutoff
+xtraj defaults to is now measured against the same R factors, and exposed as
+`--density-cutoff` ("What the density cutoff costs").
 
 Written 2026-08-15, revised the same day against the current code — the API
 assumptions below were checked, the cost estimate was replaced with a
@@ -746,6 +748,76 @@ computes `ifftn(density)` for `F_protein`, and for real input
 from work already done — one FFT instead of two. It needs `compute_fcalc` to
 hand back its grid, which complicates the checkpointing contract, so it is
 recorded rather than done.
+
+## What the density cutoff costs
+
+The R-factor above was measured at an atomic density cutoff of 0.01 e/A^3 --
+what `xtraj.py` then defaulted `gemmi_cutoff` to, and what this tool hardcoded
+until `--density-cutoff` was added. It was not gemmi's default, which is 1e-5,
+nor `kernel_torch.py`'s, which is also 1e-5: only xtraj loosened it, and it
+loosened it a thousandfold.
+
+**That default has since moved to 1e-4**, on the evidence in this section
+together with two later results measured against the torch engine: parity
+with gemmi over 1,496,008 reflections at `d_min` 1.2 improves from mean
+R 0.0534 to 0.0020, and against exact cctbx direct summation gemmi reaches
+R 0.000564 and torch 0.001651 at 1e-4. The numbers immediately below are
+therefore the *old* default against the new one, and the second row is now
+what a default run gives.
+
+Re-run on 7FPV with nothing else changed (`--aniso`, same grid, same
+calibration):
+
+| cutoff | R-work | R-free | k_sol | b_sol | R-work, no solvent |
+|---|---|---|---|---|---|
+| **0.01** (xtraj default, and what the row above used) | 0.1810 | 0.1947 | 0.388 | 49.1 | 0.2654 |
+| 0.001 | 0.1802 | 0.1940 | 0.402 | 47.3 | 0.2706 |
+| 0.0001 | **0.1802** | **0.1939** | 0.404 | 47.4 | 0.2715 |
+| 0.00001 (gemmi's default) | 0.1802 | 0.1939 | 0.404 | 47.5 | 0.2716 |
+| *mmtbx on the same isotropic model (the target)* | *0.1789* | *0.1936* | *0.340* | *13.3* | — |
+
+Tightening buys 0.0008 in both R-work and R-free, and converges by 1e-4. That
+is small, and the headline conclusion of the section above -- that the mask
+model is sound -- does not depend on it. Two details are worth more than the
+headline:
+
+**It closes about a third of the residual.** The gap to the mmtbx target goes
+from 0.0021/0.0011 to 0.0013/0.0003; R-free ends up within 0.0003. That
+residual was attributed to the missing anisotropic kernel, and part of it was
+density truncation instead.
+
+**The solvent scales move toward the conventional values** -- k_sol 0.388 ->
+0.404, b_sol 49.1 -> 47.4 -- which is this harness's own criterion for a model
+being physical. And note the NO-SOLVENT R-work climbing, 0.2654 -> 0.2716,
+while the with-solvent R falls: the truncated density was flattering the
+unmodelled-solvent case. Both say the truncation was being absorbed into the
+fitted parameters rather than showing up as R, which is exactly the failure
+mode this gate exists to catch, in miniature.
+
+### What it costs in time, and what it does not
+
+Measured elsewhere, on the diffuse side:
+
+- gemmi's density calculator, CPU, 2 frames: 1.16x at d_min 1.5, 1.47x at 3.0.
+- the torch splat, CUDA, 2501 frames at d_min 1.8: 176 s -> 310 s, **1.76x**.
+  The splat's work goes as the cutoff radius cubed, so it pays more than gemmi
+  does; take the 1.76x, not the 1.16x, when budgeting a torch run.
+
+On the diffuse correlation against data it moved the third decimal place -- the
+same order as the R factors here.
+
+So 0.01 is defensible as a DEFAULT: it is nearly 2x faster on the torch path
+for a difference exploratory work will not see, and it is why the default has
+not been changed. For a production number -- an R factor, a published
+correlation -- use 1e-4. Nothing beyond 1e-4 is measurable.
+
+NOTE THE B FACTORS when reading any of this. The effect depends strongly on
+them, because the cutoff is an ABSOLUTE density and a large B flattens atoms
+and lowers their peak, so more of each falls below it. `test_xtraj_smoke.py`
+measures 0.9148 correlation against cctbx at B=180 against 0.9744 at B=45, for
+the same cutoff of 0.01. 7FPV's refined isotropic Bs and the diffuse runs'
+blur-dominated ones are both in the gentle regime; a coarse `d_min` is not,
+since xtraj sets `b_iso = 20*d_min^2` when it is not reading B from the model.
 
 ## The FFT-artifact blur is the same operation as `mask_blur`
 
