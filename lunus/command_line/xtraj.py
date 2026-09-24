@@ -345,10 +345,11 @@ if __name__=="__main__":
 #
 #   engine parity     torch vs gemmi over 1.5M reflections at d_min 1.2 goes
 #                     from mean R 0.0534 to 0.0020, and the disagreement stops
-#                     being monotonic in resolution. Measured 2026-09; the
-#                     shell tables are not yet in docs/design.md
+#                     being monotonic in resolution (docs/design.md, "Of those
+#                     two terms, the cutoff dominates")
 #   direct summation  against exact cctbx structure factors, gemmi reaches
-#                     R 0.000564 and torch 0.001651 at 1e-4
+#                     R 0.000564 and torch 0.001651 at 1e-4 (same doc,
+#                     "Settled against exact direct summation")
 #   solvent R-factor  7FPV R-work 0.1810 -> 0.1802, b_sol toward the
 #                     conventional value; converged by 1e-4, 1e-5 adds nothing
 #                     (docs/solvent-design.md, "What the density cutoff costs")

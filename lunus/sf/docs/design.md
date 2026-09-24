@@ -256,7 +256,9 @@ is not evidence that either is right.
 
 Both engines take the cutoff from the same `gemmi_cutoff=` argument
 (`xtraj.py` passes it to the torch kernel and to `calc.cutoff` alike), so D is
-the configuration to run and A is only the default. The cost is the one
+the configuration to run. **On this evidence `gemmi_cutoff` now defaults to
+1e-4**, and A is what `gemmi_cutoff=0.01` recovers -- which is what every
+number published before that change was measured under. The cost is the one
 `6099334` measured: **1.76× on the torch splat** (2501 frames, `d_min` 1.8,
 CUDA, 176 s → 310 s), 1.16–1.47× for gemmi's calculator on CPU, since the work
 goes as the cutoff radius cubed. A Gaussian radius model — r ∝ √ln(ρ₀/c),
