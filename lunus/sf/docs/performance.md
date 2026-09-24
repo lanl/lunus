@@ -606,7 +606,7 @@ to `torch._dynamo.utils.counters["stats"]["unique_graphs"]`.
 | option | effect |
 |---|---|
 | `torch_device=cpu\|mps\|cuda` | where the splat, symmetrization and FFT run |
-| `torch_compile=True\|False` | force compilation on or off. **Default is `auto`** -- see "Choosing the knobs automatically" below. |
+| `torch_compile=False` | skip the one-off compile: worth it below a couple of hundred frames **per process** on CUDA (~8.8 s one-off), on MPS where it cannot succeed, or to isolate a compile-related numerical difference. Not auto-selected -- see below. |
 | `torch_max_pairs_per_batch=N` | atom-voxel pair budget, the knob that actually sets intermediate tensor size. **Default is `auto`**; a forced value should be re-tuned on a new machine with `bench_splat.py`. |
 | `torch_num_threads=N` | threads per rank. Defaults to the cgroup CPU quota, or to 1 on a device run when no quota is discoverable. Set `OMP_NUM_THREADS` too — see "The container was CPU-throttled, which was worth more than the code". |
 | `torch_taper_width=W` | taper width in Å; narrower is closer to gemmi but harsher on gradients |
@@ -616,20 +616,11 @@ budgeted by pairs, and the atom cap almost never binds.
 
 ### Choosing the knobs automatically
 
-Two of the knobs above are wrong often enough, and silently enough, that
-`xtraj.py` now picks them itself by default. The rules are in `tune.py`, they
-are derived from the measurements on this page, and **every decision prints
-its reason** -- a knob that quietly picks a number is no easier to debug than
-one the user guessed at.
-
-`torch.compile` is the one that bites. It is worth 2.58x on the CUDA splat and
-costs ~8.77 s once, so it is a **net loss below ~210 frames per process** and a
-two-frame smoke test pays the whole cost for nothing. `auto` does that
-arithmetic from the frame count and the device: ~210 frames on CUDA, ~2 on CPU
-(~1.4 s against ~1.15 s/frame saved), and never on MPS, where inductor's Metal
-backend cannot build at all. Note the count that matters is **frames per
-process**, not per run -- compilation is per process, so `mpirun -n 10` over
-500 frames is 50 frames each and below the CUDA break-even.
+`max_pairs_per_batch` is wrong often enough, and silently enough, that
+`xtraj.py` now picks it by default. The rule is in `tune.py`, it is derived
+from the measurements on this page, and **the decision prints its reason** --
+a knob that quietly picks a number is no easier to debug than one the user
+guessed at.
 
 `max_pairs_per_batch` defaults to 4M because that is ~16 MB, which stays
 resident in a CPU cache -- and `splat_density`'s docstring has always said to
@@ -648,6 +639,19 @@ the binding constraint".
 
 Explicit values always win and are reported as "set explicitly", so nothing
 here can override a deliberate choice.
+
+**`torch.compile` is deliberately NOT auto-selected**, though it is the knob
+that looks most like it should be. The trade is a fixed one-off against a
+per-frame saving, so the break-even is a frame count -- ~210 on CUDA on the
+numbers above. Three things stop that being decidable for someone else:
+~8.77 s is one measurement on one machine (the same section records 12.5 s
+cold against 8.35 s warm on that machine alone); 41.7 ms/frame was taken at
+`d_min` 0.9 and the saving scales with grid and atom count, so the break-even
+moves with resolution; and a hard threshold implies precision the inputs do
+not have. `tune.recommended_compile()` holds the arithmetic and stays unwired
+until the one-off is timed on the target machine and the compiled/eager ratio
+is confirmed at two resolutions. Until then `torch_compile` defaults to True
+and short runs should set it False.
 
 ### Diagnostics
 

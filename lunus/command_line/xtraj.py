@@ -697,22 +697,28 @@ if __name__=="__main__":
   else:
     torch_taper_width_override = float(args.pop(idx).split("=")[1])
 
-# torch.compile the density splat's inner blocks (default "auto"). Fusing them
+# torch.compile the density splat's inner blocks (default True). Fusing them
 # is worth ~2.9x on the splat -- the per-voxel work is memory-bound, so run
 # eagerly it costs one pass over an (n_atoms, n_voxels) array per elementary
 # operation, roughly twenty of them, where fused it is a couple.
 #
-# It is NOT free: the one-off compile is ~8.8 s on CUDA against ~1.4 s on CPU,
-# so on CUDA it is a net LOSS below ~210 frames per process and a two-frame
-# smoke test pays the whole cost for nothing. "auto" does that arithmetic from
-# the frame count and the device -- see lunus/sf/tune.py. True/False force it,
-# which is what you want to isolate a suspected compile-related numerical
-# difference, or on a torch with no working compiler backend.
+# It is NOT free, and the default does not know that: the one-off compile is
+# ~8.8 s on CUDA against ~1.4 s on CPU, so on CUDA it is a net LOSS below a
+# couple of hundred frames per PROCESS -- a two-frame smoke test pays the
+# whole cost for nothing, and under mpirun the count that matters is each
+# rank's share, not the run's total. Set torch_compile=False for short runs,
+# on MPS where inductor's Metal backend cannot build at all, or to isolate a
+# suspected compile-related numerical difference.
+#
+# Deliberately NOT auto-selected. tune.recommended_compile() has the
+# break-even arithmetic, but its inputs are one measurement on one machine
+# and a per-frame saving that scales with grid and atom count, so the
+# threshold does not transfer across resolutions. See that docstring.
 
   try:
     idx = [a.find("torch_compile")==0 for a in args].index(True)
   except ValueError:
-    torch_compile = "auto"
+    torch_compile = True
   else:
     torch_compile = args.pop(idx).split("=")[1] == "True"
 
@@ -1590,10 +1596,18 @@ if __name__=="__main__":
             .format(torch_profile_frames))
 
     # ---- resolve the "auto" performance knobs -------------------------------
-    # Both need the grid shape and the device, so this cannot happen at parse
-    # time. Explicit values pass through untouched; only "auto" is decided
-    # here, and every decision prints its reason, because a knob that silently
-    # picks a number is exactly as hard to debug as one the user guessed.
+    # This needs the grid shape and the device, so it cannot happen at parse
+    # time. An explicit value passes through untouched; only "auto" is decided
+    # here, and it prints its reason, because a knob that silently picks a
+    # number is exactly as hard to debug as one the user guessed.
+    #
+    # torch_compile is deliberately NOT decided here. The arithmetic is easy
+    # (a fixed compile cost against a per-frame saving) and the inputs are
+    # not: the compile cost varies by machine and cache state, and the saving
+    # scales with grid and atom count, so a break-even measured at one
+    # resolution does not transfer. tune.recommended_compile() implements the
+    # rule and is left unwired until those are measured properly -- see its
+    # docstring.
     from lunus.sf import tune as _tune
 
     _dev_info = _tune.describe_device(torch_device, torch_module=torch)
@@ -1604,19 +1618,9 @@ if __name__=="__main__":
       _pairs_why = "set explicitly"
     torch_pairs_kwarg = {"max_pairs_per_batch": torch_max_pairs_per_batch}
 
-    if torch_compile == "auto":
-      # Compilation is per PROCESS, so what matters is this rank's share of
-      # the trajectory, not the whole of it.
-      _frames_this_rank = max(1, int(nsteps / max(1, mpi_size)))
-      torch_compile, _compile_why = _tune.recommended_compile(
-        _frames_this_rank, _dev_info)
-    else:
-      _compile_why = "set explicitly"
-
     if mpi_rank == 0:
-      print("torch engine: auto-tuning -> max_pairs_per_batch = %d (%s), "
-            "torch.compile = %s (%s)"
-            % (torch_max_pairs_per_batch, _pairs_why, torch_compile, _compile_why))
+      print("torch engine: auto-tuning -> max_pairs_per_batch = %d (%s)"
+            % (torch_max_pairs_per_batch, _pairs_why))
       _mem_warn = _tune.memory_warning(
         xrs_sel.scatterers().size(), torch_grid_shape,
         torch_max_pairs_per_batch, _dev_info)

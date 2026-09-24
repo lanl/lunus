@@ -62,6 +62,12 @@ class TestMaxPairs:
 
 
 class TestCompile:
+    """recommended_compile is NOT wired into xtraj -- see its docstring.
+
+    These still pin its arithmetic, so that the rule is ready to re-measure
+    against rather than re-derive if it is ever turned on.
+    """
+
     def test_mps_never_compiles(self):
         on, why = recommended_compile(10_000, MPS)
         assert on is False

@@ -1,12 +1,17 @@
 """Automatic selection of the torch engine's performance knobs.
 
-The knobs in `docs/performance.md`'s "Tuning knobs" table are all defensible
-defaults and all wrong somewhere: `torch_compile` is a net LOSS below a couple
-of hundred frames on CUDA, and `max_pairs_per_batch`'s default was fitted to a
-CPU cache and the splat's own docstring says to expect a GPU to want more. This
-module picks them from things that are known before the frame loop starts --
-frame count, grid shape, atom count, and what the device reports about itself
--- so that the common case needs no experiment.
+`max_pairs_per_batch`'s default was fitted to a CPU cache, and the splat's own
+docstring says to expect a GPU to want more -- so on a GPU the shipped default
+is knowingly wrong and the user is left to discover that with `bench_splat.py`.
+This module picks it instead, from things known before the frame loop starts:
+grid shape, atom count, and what the device reports about itself.
+
+WHAT IS AND IS NOT DECIDED HERE. `recommended_max_pairs()` and
+`memory_warning()` are wired into xtraj. `recommended_compile()` is NOT -- its
+rule is arithmetically fine and its measured inputs are too thin to transfer
+across machines and resolutions, so `torch_compile` remains the user's to set.
+That function stays as the written-down version of the trade, with what it
+would take to trust it; see its docstring.
 
 EVERY RULE HERE TRACES TO A MEASUREMENT OR TO A HARDWARE QUERY. Nothing is
 invented; where a number would have to be guessed the function says so and
@@ -142,12 +147,30 @@ def recommended_max_pairs(info, bytes_per_pair=BYTES_PER_PAIR):
 def recommended_compile(n_frames, info):
     """Whether torch.compile pays for itself. Returns (bool, why).
 
+    NOT WIRED INTO xtraj, DELIBERATELY. `torch_compile` still defaults to
+    True and is the user's to set. The arithmetic below is sound -- a fixed
+    one-off against a per-frame saving is a break-even frame count -- but
+    three of its inputs are not good enough to decide for someone:
+
+    - COMPILE_SECONDS_CUDA is one measurement on one machine. The same page
+      records 12.5 s cold against 8.35 s warm on that machine alone, so the
+      numerator carries a ~1.5x spread before any other hardware is involved.
+    - COMPILE_SAVED_PER_FRAME_CUDA is a fixed millisecond figure taken at
+      d_min 0.9 on one system. Eager and compiled splat both scale with grid
+      and atom count, so the SAVING scales too and the break-even moves with
+      resolution. The transferable form is the ratio (compiled is ~0.37x
+      eager), applied to an estimated per-frame cost -- not a constant.
+    - The threshold is a cliff where the penalty either side is small and
+      asymmetric, which implies more precision than the inputs support.
+
+    What would make it usable: time warmup_compile() on the target machine
+    for the one-off, and measure the compiled/eager splat ratio at two
+    resolutions to confirm a ratio rule holds. Until then this function is
+    here to be read and re-measured against, not called.
+
     n_frames is the count THIS PROCESS will splat -- compilation is per
     process, so under `mpirun -n N` it is frames/N even though xtraj warms the
     inductor cache on rank 0 first.
-
-    The trade is a fixed one-off against a per-frame saving, so the break-even
-    is a frame count and the decision is arithmetic rather than a preference.
     """
     if info.kind == "mps":
         return False, ("torch.compile has no working Metal backend "
