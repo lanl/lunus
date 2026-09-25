@@ -338,7 +338,7 @@ of what follows.
 
 | phase | ms/frame | share | same phase at `d_min` 0.9 on the other card |
 |---|---|---|---|
-| **splat** | **83.9** | **68.3%** | 65.9 (1.3x) |
+| **splat** | **83.9** | **68.3%** | 25.0 compiled / 65.9 eager -- see below |
 | into cctbx | 14.3 | 11.6% | 1.9 (**7.5x**) |
 | fft+extract | 10.0 | 8.1% | 0.3 (**33x**) |
 | traj read | 6.5 | 5.3% | ~12.8 |
@@ -349,10 +349,34 @@ of what follows.
 | host->device | 0.3 | 0.2% | 0.6 |
 | **total** | **122.9** | | |
 
-The splat is only 1.3x slower, which is the part that was optimized. What
-moved is everything else: `fft+extract` costs **33x** the documented figure on
-a grid with 2.7 M voxels against 6.9 M, and the host phases cost ~7x on Grace
-ARM cores at one thread.
+**Compare the splat like for like.** The two runs do different amounts of
+work -- GB10 has MORE atom-voxel pairs despite the coarser grid, 395,426,690
+against 348,765,878, because it ran the current 1e-4 cutoff against the 0.01
+of the tables above, and the larger radius more than cancels the coarser
+grid. Per pair:
+
+| | other card | GB10 | |
+|---|---|---|---|
+| eager | 65.9 ms -> 5,292e6 pairs/s | 697 ms* -> 567e6 | **9.3x slower** |
+| compiled | 25.0 ms -> 13,951e6 pairs/s | 77.4 ms -> 5,109e6 | **2.7x slower** |
+
+\* derived, not measured: the eager run was timed whole-loop only, so this is
+736.1 ms/frame less the 39.0 ms of non-splat phases from the compiled run.
+The agreement with `bench_splat` noted below is what justifies it.
+
+So the splat does NOT transfer either -- and the eager/compiled split is the
+bandwidth story stated twice: 9.3x apart without fusion, 2.7x with it. (An
+earlier version of this section compared GB10's compiled splat against the
+other card's EAGER figure and concluded it was "only 1.3x slower". It was
+comparing a compiled run with an uncompiled one.)
+
+What moves further still is everything around it: `fft+extract` costs **33x**
+the documented figure on a grid with 2.7 M voxels against 6.9 M, and the host
+phases ~7x on Grace ARM cores at one thread.
+
+One check worth keeping: the phase table implies an eager splat rate of
+567e6 pairs/s and `bench_splat` measured 567.5e6 independently. The eager
+splat is a case where the benchmark does not overstate the loop.
 
 **So the splat is 68% of the frame, not the 94% recorded above, and non-splat
 work is 39.0 ms/frame. An infinitely fast splat would buy 3.15x and no more.**
