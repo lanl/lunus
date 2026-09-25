@@ -13,7 +13,6 @@ from lunus.sf.tune import (
     describe_device,
     estimated_peak_bytes,
     memory_warning,
-    recommended_compile,
     recommended_max_pairs,
 )
 
@@ -59,43 +58,6 @@ class TestMaxPairs:
         lean = DeviceInfo(kind="cuda", l2_bytes=8 << 20, free_bytes=10**12)
         pairs, _ = recommended_max_pairs(lean)
         assert pairs == max((8 << 20) // 4, MAX_PAIRS_CPU)
-
-
-class TestCompile:
-    """recommended_compile is NOT wired into xtraj -- see its docstring.
-
-    These still pin its arithmetic, so that the rule is ready to re-measure
-    against rather than re-derive if it is ever turned on.
-    """
-
-    def test_mps_never_compiles(self):
-        on, why = recommended_compile(10_000, MPS)
-        assert on is False
-        assert "Metal" in why
-
-    def test_cuda_long_run_compiles(self):
-        on, _ = recommended_compile(2501, CUDA)
-        assert on is True
-
-    def test_cuda_short_run_does_not(self):
-        """The documented trap: a two-frame smoke test must not pay 8.8 s."""
-        on, why = recommended_compile(2, CUDA)
-        assert on is False
-        assert "break-even" in why
-
-    def test_cuda_break_even_is_about_210_frames(self):
-        assert recommended_compile(209, CUDA)[0] is False
-        assert recommended_compile(211, CUDA)[0] is True
-
-    def test_cpu_compiles_almost_always(self):
-        """~1.4 s one-off against ~1.15 s/frame: it repays in two frames."""
-        assert recommended_compile(2, CPU)[0] is True
-        assert recommended_compile(1, CPU)[0] is False
-
-    def test_reason_is_always_given(self):
-        for n, info in [(1, CPU), (500, CUDA), (5, MPS)]:
-            _, why = recommended_compile(n, info)
-            assert why and isinstance(why, str)
 
 
 class TestMemory:

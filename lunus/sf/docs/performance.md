@@ -419,8 +419,8 @@ Fusing passes matters more the less bandwidth there is, so the same code
 change is worth twice as much here -- and the one-off is five times smaller.
 A frame-count rule calibrated on the other machine would have refused to
 compile anything under 210 frames per rank and been wrong on essentially every
-run on this one. This is why `tune.recommended_compile()` exists but is not
-wired in: the arithmetic is fine and the constants do not transfer.
+run on this one. Which is why xtraj does not choose this for you: the
+arithmetic is fine and the constants do not transfer.
 
 Threads point the same way. With no cgroup quota, xtraj sets torch to one
 thread; `OMP_NUM_THREADS` then governs only numpy/BLAS in the host phases, and
@@ -797,10 +797,10 @@ numbers above. Three things stop that being decidable for someone else:
 cold against 8.35 s warm on that machine alone); 41.7 ms/frame was taken at
 `d_min` 0.9 and the saving scales with grid and atom count, so the break-even
 moves with resolution; and a hard threshold implies precision the inputs do
-not have. `tune.recommended_compile()` holds the arithmetic and stays unwired
-until the one-off is timed on the target machine and the compiled/eager ratio
-is confirmed at two resolutions. Until then `torch_compile` defaults to True
-and short runs should set it False.
+not have -- GB10 measured 2.8 frames against the ~210 these numbers imply.
+So `torch_compile` defaults to True and is yours to set: turn it off for short
+runs, and on a new machine time frame 0 against the median to find where your
+own break-even falls.
 
 ### Diagnostics
 

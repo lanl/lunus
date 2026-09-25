@@ -711,10 +711,11 @@ if __name__=="__main__":
 # on MPS where inductor's Metal backend cannot build at all, or to isolate a
 # suspected compile-related numerical difference.
 #
-# Deliberately NOT auto-selected. tune.recommended_compile() has the
-# break-even arithmetic, but its inputs are one measurement on one machine
-# and a per-frame saving that scales with grid and atom count, so the
-# threshold does not transfer across resolutions. See that docstring.
+# Deliberately NOT auto-selected. The break-even is easy arithmetic -- a
+# fixed one-off against a per-frame saving -- but the inputs do not transfer:
+# the compile cost varies by machine and cache state, and the saving scales
+# with grid and atom count. Measured, it is ~210 frames on one card and 2.8
+# on another. docs/performance.md, "A second machine".
 
   try:
     idx = [a.find("torch_compile")==0 for a in args].index(True)
@@ -1602,13 +1603,9 @@ if __name__=="__main__":
     # here, and it prints its reason, because a knob that silently picks a
     # number is exactly as hard to debug as one the user guessed.
     #
-    # torch_compile is deliberately NOT decided here. The arithmetic is easy
-    # (a fixed compile cost against a per-frame saving) and the inputs are
-    # not: the compile cost varies by machine and cache state, and the saving
-    # scales with grid and atom count, so a break-even measured at one
-    # resolution does not transfer. tune.recommended_compile() implements the
-    # rule and is left unwired until those are measured properly -- see its
-    # docstring.
+    # torch_compile is deliberately NOT decided here -- see the comment on
+    # its argument above. The break-even was measured at ~210 frames on one
+    # card and 2.8 on another, so it does not transfer.
     from lunus.sf import tune as _tune
 
     _dev_info = _tune.describe_device(torch_device, torch_module=torch)

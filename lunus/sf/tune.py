@@ -14,11 +14,11 @@ frame and the FFT and host phases were the rest; see docs/performance.md,
 "A second machine".
 
 WHAT IS AND IS NOT DECIDED HERE. `recommended_max_pairs()` and
-`memory_warning()` are wired into xtraj. `recommended_compile()` is NOT -- its
-rule is arithmetically fine and its measured inputs are too thin to transfer
-across machines and resolutions, so `torch_compile` remains the user's to set.
-That function stays as the written-down version of the trade, with what it
-would take to trust it; see its docstring.
+`memory_warning()` are wired into xtraj; nothing else is. `torch_compile` in
+particular is the user's to set -- its break-even is a frame count, and the
+one measured on one machine turned out not to transfer (2.8 frames on GB10
+against ~210 on a faster card), so choosing it automatically would be worse
+than leaving it alone. docs/performance.md, "A second machine".
 
 EVERY RULE HERE TRACES TO A MEASUREMENT OR TO A HARDWARE QUERY. Nothing is
 invented; where a number would have to be guessed the function says so and
@@ -51,18 +51,6 @@ LIVE_PAIR_BUFFERS = 4
 # Fraction of FREE device memory the pair buffers may occupy. The grid, the
 # FFT workspace and the offset tables all come out of the same pool.
 PAIR_BUDGET_FRACTION = 0.25
-
-# docs/performance.md, "NVIDIA GPU (CUDA)": frame 0 costs 8961.5 ms compiled
-# against 195.9 ms eager, so ~8.77 s is inductor; the median goes 66.7 -> 25.0
-# ms, saving 41.7 ms/frame. A persistent TORCHINDUCTOR_CACHE_DIR takes frame 0
-# to ~8.35 s warm, so this barely moves with a warm cache.
-COMPILE_SECONDS_CUDA = 8.77
-COMPILE_SAVED_PER_FRAME_CUDA = 0.0417
-
-# docs/performance.md, "CPU": 2.00 s eager against 0.85 s compiled at 6
-# threads, for ~1.4 s of one-off compilation.
-COMPILE_SECONDS_CPU = 1.4
-COMPILE_SAVED_PER_FRAME_CPU = 1.15
 
 
 DeviceInfo = namedtuple("DeviceInfo", "kind l2_bytes free_bytes total_bytes name")
@@ -165,53 +153,6 @@ def recommended_max_pairs(info, bytes_per_pair=BYTES_PER_PAIR):
     if pairs < MAX_PAIRS_CPU:
         pairs, why = MAX_PAIRS_CPU, why + "; floored at the measured default"
     return pairs, why
-
-
-def recommended_compile(n_frames, info):
-    """Whether torch.compile pays for itself. Returns (bool, why).
-
-    NOT WIRED INTO xtraj, DELIBERATELY. `torch_compile` still defaults to
-    True and is the user's to set. The arithmetic below is sound -- a fixed
-    one-off against a per-frame saving is a break-even frame count -- but
-    three of its inputs are not good enough to decide for someone:
-
-    - COMPILE_SECONDS_CUDA is one measurement on one machine. The same page
-      records 12.5 s cold against 8.35 s warm on that machine alone, so the
-      numerator carries a ~1.5x spread before any other hardware is involved.
-    - COMPILE_SAVED_PER_FRAME_CUDA is a fixed millisecond figure taken at
-      d_min 0.9 on one system. Eager and compiled splat both scale with grid
-      and atom count, so the SAVING scales too and the break-even moves with
-      resolution. The transferable form is the ratio (compiled is ~0.37x
-      eager), applied to an estimated per-frame cost -- not a constant.
-    - The threshold is a cliff where the penalty either side is small and
-      asymmetric, which implies more precision than the inputs support.
-
-    What would make it usable: time warmup_compile() on the target machine
-    for the one-off, and measure the compiled/eager splat ratio at two
-    resolutions to confirm a ratio rule holds. Until then this function is
-    here to be read and re-measured against, not called.
-
-    n_frames is the count THIS PROCESS will splat -- compilation is per
-    process, so under `mpirun -n N` it is frames/N even though xtraj warms the
-    inductor cache on rank 0 first.
-    """
-    if info.kind == "mps":
-        return False, ("torch.compile has no working Metal backend "
-                       "(InductorError on c10/metal/reduction_utils.h); "
-                       "skipping it avoids the failed attempt")
-    if info.kind == "cuda":
-        one_off, saved = COMPILE_SECONDS_CUDA, COMPILE_SAVED_PER_FRAME_CUDA
-    else:
-        one_off, saved = COMPILE_SECONDS_CPU, COMPILE_SAVED_PER_FRAME_CPU
-
-    break_even = one_off / saved
-    if n_frames >= break_even:
-        return True, ("%d frames per process against a break-even of %d "
-                      "(%.1f s one-off, %.0f ms/frame saved)"
-                      % (n_frames, round(break_even), one_off, saved * 1e3))
-    return False, ("%d frames per process is below the break-even of %d "
-                   "(%.1f s one-off would not be repaid)"
-                   % (n_frames, round(break_even), one_off))
 
 
 def estimated_peak_bytes(n_atoms, grid_shape, max_pairs,
