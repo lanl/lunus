@@ -6,6 +6,13 @@ is knowingly wrong and the user is left to discover that with `bench_splat.py`.
 This module picks it instead, from things known before the frame loop starts:
 grid shape, atom count, and what the device reports about itself.
 
+Keep its worth in proportion. Swept on GB10, the whole 8x range of budgets
+spans 1.089x on the compiled splat, so this is a sub-1% knob there -- it is
+here to stop a GPU silently inheriting a CPU-shaped default, not because
+tuning it is where the time goes. On that machine the splat was 68% of the
+frame and the FFT and host phases were the rest; see docs/performance.md,
+"A second machine".
+
 WHAT IS AND IS NOT DECIDED HERE. `recommended_max_pairs()` and
 `memory_warning()` are wired into xtraj. `recommended_compile()` is NOT -- its
 rule is arithmetically fine and its measured inputs are too thin to transfer
@@ -100,21 +107,37 @@ def describe_device(device, torch_module=None):
 def recommended_max_pairs(info, bytes_per_pair=BYTES_PER_PAIR):
     """Atom-voxel pair budget for splat_density. Returns (pairs, why).
 
-    The CPU value is measured (see MAX_PAIRS_CPU). The criterion behind it is
-    "one working buffer stays resident in cache", so the transferable rule is
-    not the number 4M but the cache it was sized against -- applied to a GPU
-    that means its L2, which is tens of MB rather than the tens of MB of an
-    L3 slice, and is why splat_density's docstring says to expect a GPU to
-    prefer a larger value.
-
-    So: on CUDA, size the buffer to the L2 the device reports, then clamp so
+    On CUDA, size the buffer to the L2 the device reports, then clamp so
     LIVE_PAIR_BUFFERS of them fit in PAIR_BUDGET_FRACTION of free memory. If
     the device will not report its L2, KEEP THE CPU DEFAULT and say so -- a
     guess here is a silent performance regression, and the honest fallback is
-    the value that was actually measured.
+    the value that was actually measured. The clamp never raises the budget,
+    only lowers it, so a small free-memory reading cannot recommend something
+    larger than the cache rule.
 
-    The clamp never raises the budget, only lowers it, so a small free-memory
-    reading cannot make this recommend something larger than the cache rule.
+    THE CACHE JUSTIFICATION FOR THIS IS WRONG, and the rule is kept anyway.
+    It was written from MAX_PAIRS_CPU's criterion -- "one working buffer stays
+    resident in cache across the fused kernel's passes" -- on the assumption
+    that it transferred to a GPU with L2 in place of L3. Swept on GB10 (24 MiB
+    L2) the COMPILED splat is monotonically faster with a bigger budget, right
+    past 2x the L2, with no optimum: 91.8 / 95.6 / 97.4 / 98.2 / 100% of peak
+    at 1.5 / 3.1 / 4.0 / 6.3 / 12.6 M pairs. Fusion keeps the intermediates
+    out of memory, so whole-buffer residency is not what binds; per-chunk
+    launch overhead is, and fewer chunks wins. Cache residency IS real for the
+    eager path, which runs the other way over the same sweep (852 -> 560 Ge/s,
+    best at the SMALLEST budget) -- which is also why the CPU default looked
+    like a genuine optimum when it was measured.
+
+    The rule survives on the numbers rather than the reasoning: 98.2% of peak
+    on GB10, against 97.4% for the old 4M default. The whole 8x sweep spans
+    1.089x, so this knob is worth under 1% there and is not where tuning time
+    should go. Going bigger is not free either -- padding grows 1.010 -> 1.058
+    across the sweep, so at 12.6 M you waste 5.8% of pair work to save 1.8% of
+    overhead. Sized to L2 sits near where those cross, which is the defensible
+    version of this rule.
+
+    Measured on ONE device. A less bandwidth-starved card may well flatten or
+    turn over where GB10 does not; docs/performance.md, "A second machine".
     """
     if info.kind != "cuda":
         return MAX_PAIRS_CPU, "measured CPU default (cache-resident at ~%.0f MB)" % (

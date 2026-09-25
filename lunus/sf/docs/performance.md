@@ -196,6 +196,12 @@ Measured on a container with an NVIDIA card (driver CUDA 13.0), torch 2.13.0
 `cuda130_mkl` from conda-forge, on the same 135,834-atom system and
 120 × 160 × 360 grid. The splat *in isolation*:
 
+> **One machine.** Every number in this section is that card -- a
+> high-bandwidth datacenter GPU on a Kubernetes pod. On GB10 (DGX Spark) the
+> splat is 68% of the frame rather than 94%, the FFT costs 33x this, and
+> `torch.compile` breaks even at 3 frames rather than 210. See "A second
+> machine: GB10 (DGX Spark)" below before treating any of this as general.
+
 | device | splat | vs gemmi | pairs/s |
 |---|---|---|---|
 | gemmi (C++, 1 core) | 1.42 s | 1.00x | — |
@@ -307,6 +313,108 @@ Environment notes, all of which cost a round to discover:
   on the splat and costs ~8.1 s per process that no cache or configuration
   recovers. Break-even is ~196 frames. Turn it on for trajectories, leave it
   off for smoke tests, and do not expect a persistent cache to change that.
+
+## A second machine: GB10 (DGX Spark)
+
+Everything above is one machine. This section is a second one, and the point
+of it is how much does NOT transfer.
+
+| | |
+|---|---|
+| device | NVIDIA **GB10**, DGX Spark (Grace Blackwell, unified LPDDR5X) |
+| the CUDA section above | a datacenter card on a Kubernetes pod, believed H100 (HBM3) |
+| system | the same 7FPV box, 135,834 atoms |
+| `d_min` | **1.2**, grid 90 x 120 x 250 = 2.70 M voxels (0.9 gives 120 x 160 x 360 = 6.91 M) |
+| cutoff | 1e-4, the current default |
+| threads | `cpu.max` reads `max 100000`, i.e. NO quota, so xtraj sets torch threads to 1 |
+
+The two cards differ by roughly an order of magnitude in memory bandwidth, and
+since almost every phase here is bandwidth-bound, that one ratio explains most
+of what follows.
+
+### The frame is not 94% splat here
+
+251 frames, compiled, `torch_timing=True`:
+
+| phase | ms/frame | share | same phase at `d_min` 0.9 on the other card |
+|---|---|---|---|
+| **splat** | **83.9** | **68.3%** | 65.9 (1.3x) |
+| into cctbx | 14.3 | 11.6% | 1.9 (**7.5x**) |
+| fft+extract | 10.0 | 8.1% | 0.3 (**33x**) |
+| traj read | 6.5 | 5.3% | ~12.8 |
+| accumulate | 5.8 | 4.7% | 0.8 (7.2x) |
+| device->host | 1.0 | 0.8% | 0.3 |
+| coords->numpy | 0.6 | 0.5% | - |
+| frac coords | 0.4 | 0.3% | 0.3 |
+| host->device | 0.3 | 0.2% | 0.6 |
+| **total** | **122.9** | | |
+
+The splat is only 1.3x slower, which is the part that was optimized. What
+moved is everything else: `fft+extract` costs **33x** the documented figure on
+a grid with 2.7 M voxels against 6.9 M, and the host phases cost ~7x on Grace
+ARM cores at one thread.
+
+**So the splat is 68% of the frame, not the 94% recorded above, and non-splat
+work is 39.0 ms/frame. An infinitely fast splat would buy 3.15x and no more.**
+That is the number to have in hand before optimizing this pipeline further on
+a machine of this shape, and it is the answer to why ten CPU ranks draw level
+with one GPU at high resolution: the GPU accelerates the 68%, and MPI
+parallelizes all of it.
+
+### torch.compile is worth far more here, and pays back ~80x sooner
+
+Both rows at `OMP_NUM_THREADS=10`, so the comparison is matched:
+
+| | GB10 | the other card |
+|---|---|---|
+| whole frame loop, eager | 736 ms/frame | - |
+| whole frame loop, compiled | 133 ms/frame | - |
+| speedup | **5.53x** | 2.58x on the splat |
+| saved per frame | **603 ms** | 41.7 ms |
+| one-off (frame 0 minus median) | **1.66 s** | 8.77 s |
+| **break-even** | **2.8 frames** | ~210 frames |
+
+Fusing passes matters more the less bandwidth there is, so the same code
+change is worth twice as much here -- and the one-off is five times smaller.
+A frame-count rule calibrated on the other machine would have refused to
+compile anything under 210 frames per rank and been wrong on essentially every
+run on this one. This is why `tune.recommended_compile()` exists but is not
+wired in: the arithmetic is fine and the constants do not transfer.
+
+Threads point the same way. With no cgroup quota, xtraj sets torch to one
+thread; `OMP_NUM_THREADS` then governs only numpy/BLAS in the host phases, and
+**10 threads is 14% SLOWER than 1** (33.40 s against 29.22 s) because they
+contend for work that is not there. The inverse of the throttling story above.
+
+### The pair budget is a sub-1% knob here
+
+`bench_splat.py`, same system and grid, sweeping `--max-pairs`:
+
+| max_pairs | MiB/buffer | eager Ge/s | compiled Ge/s | % of best | chunks | padding |
+|---|---|---|---|---|---|---|
+| 1,572,864 | 6.0 | **852.2** | 7038.4 | 91.8% | 403 | 1.0103 |
+| 3,145,728 | 12.0 | 752.1 | 7330.4 | 95.6% | 206 | 1.0185 |
+| 4,000,000 | 15.3 | 688.1 | 7462.4 | 97.4% | 164 | 1.0226 |
+| 6,291,456 (L2) | 24.0 | 567.5 | 7526.7 | 98.2% | 106 | 1.0330 |
+| 12,582,912 | 48.0 | 560.1 | **7665.1** | 100% | 58 | 1.0584 |
+
+**The compiled path is monotonic in the budget with no optimum**, faster right
+past 2x the L2 -- so the "one buffer stays cache-resident" criterion that
+produced the 4M CPU default does NOT describe it. Fusion keeps the
+intermediates out of memory; what binds is per-chunk launch overhead, and
+fewer chunks wins. The eager path runs the other way over the same sweep, best
+at the smallest budget, which is the genuine residency effect and why 4M
+looked like a real optimum when it was measured.
+
+The whole 8x sweep spans **1.089x**, so on this device the knob is worth under
+1%. `tune.py`'s L2 rule lands at 98.2% against 97.4% for the old default --
+kept on the numbers, not on the reasoning, and its docstring says so. Padding
+grows with the budget (1.010 -> 1.058), so going bigger trades 5.8% of wasted
+pair work for 1.8% of overhead; L2 sits near where those cross.
+
+Both figures are `bench_splat` numbers, which this page warns are upper
+bounds. The in-situ splat median at 6.29 M was 77.4 ms/frame against the
+benchmark's implied 52.5 ms for the same pair count -- the usual ~1.5x gap.
 
 ### GPU runs are not bit-reproducible
 
