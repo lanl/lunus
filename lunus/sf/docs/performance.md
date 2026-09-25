@@ -370,9 +370,26 @@ earlier version of this section compared GB10's compiled splat against the
 other card's EAGER figure and concluded it was "only 1.3x slower". It was
 comparing a compiled run with an uncompiled one.)
 
-What moves further still is everything around it: `fft+extract` costs **33x**
-the documented figure on a grid with 2.7 M voxels against 6.9 M, and the host
-phases ~7x on Grace ARM cores at one thread.
+**The FFT needs a different normalisation, and is worse than it looks.** The
+splat scales with PAIRS, so per-pair handles the cutoff difference. FFT scales
+with VOXELS, where the cutoff is irrelevant and GB10's grid is 2.6x SMALLER --
+so the raw ratio flatters it:
+
+| | other card | GB10 | |
+|---|---|---|---|
+| voxels | 6.91 M | 2.70 M | |
+| fft+extract | 0.3 ms | 10.0 ms | raw **33x** |
+| per voxel | | | **85x** |
+
+Even allowing an order of magnitude for bandwidth, ~8x is unexplained --
+cuFFT plan selection and the unified-memory path are the things to look at.
+At 8% of the frame for an operation the other card does in 0.3 ms, this is
+the clearest optimisation target in the profile, and unlike the splat it has
+had no attention at all.
+
+The host phases cost ~7x on Grace ARM cores at one thread; those scale with
+reflection count, which the coarser grid reduces, so they are understated
+here too.
 
 One check worth keeping: the phase table implies an eager splat rate of
 567e6 pairs/s and `bench_splat` measured 567.5e6 independently. The eager
