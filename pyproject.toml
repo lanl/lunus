@@ -35,8 +35,10 @@ classifiers = [
 ]
 
 # Only numpy is unconditional. The heavy scientific stack is left to extras
-# (or to conda, see [tool.pixi] below) so that installing this package never
-# drags in a second copy of torch or cctbx alongside a conda-provided one.
+# (or to conda, see [tool.pixi] below) so that a bare `pip install lunus`
+# never drags in a second copy of torch or cctbx alongside a conda-provided
+# one. The extras DO name them, because an extra is opt-in and the pixi
+# environment installs this package without any.
 dependencies = ["numpy"]
 
 [project.optional-dependencies]
@@ -44,9 +46,23 @@ dependencies = ["numpy"]
 # coefficients that elements.py reads at run time (cctbx also works, but it is
 # far better installed from conda than from PyPI, so it is not listed here).
 sf = ["torch", "gemmi"]
-# The MD-trajectory pipeline, lunus.command_line.xtraj. cctbx is deliberately absent for
-# the same reason; install it from conda-forge.
-xtraj = ["mdtraj", "scipy", "h5py"]
+# The MD-trajectory pipeline, lunus.command_line.xtraj.
+#
+# cctbx-base IS listed, unlike in `sf` above. xtraj.py imports iotbx, cctbx,
+# mmtbx and libtbx at MODULE level, so without it the module cannot be
+# imported at all -- not for any engine, including engine=torch, which needs
+# nothing from cctbx once it is running. An extra named for this pipeline that
+# installs a version of it that dies on line 15 is worse than no extra.
+#
+# cctbx is still better from conda where conda is available, and nothing here
+# changes that: the pixi environment takes cctbx-base from conda-forge and
+# installs this package with NO extras (see [tool.pixi.pypi-dependencies]), so
+# this line cannot put a second copy alongside it. It reaches only someone who
+# asked for it by pip, who by definition is not getting it from conda.
+#
+# PyPI ships manylinux_2_28 wheels for x86-64 and aarch64 (cp310-cp314),
+# ~70-80 MB. Verified working on linux-aarch64 / cp312.
+xtraj = ["mdtraj", "scipy", "h5py", "cctbx-base"]
 dev = ["pytest"]
 
 [project.urls]
