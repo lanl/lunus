@@ -17,10 +17,9 @@ from lunus.sf.tune import (
 )
 
 CPU = DeviceInfo(kind="cpu")
-MPS = DeviceInfo(kind="mps")
-# An 80 GB card with a 50 MB L2, most of it free.
+# A card with a 50 MB L2 and 70 GB free.
 CUDA = DeviceInfo(kind="cuda", l2_bytes=50 << 20, free_bytes=70 * 10**9,
-                  total_bytes=80 * 10**9, name="Test GPU")
+                  name="Test GPU")
 
 
 # ---- recommended_max_pairs --------------------------------------------------

@@ -53,8 +53,8 @@ LIVE_PAIR_BUFFERS = 4
 PAIR_BUDGET_FRACTION = 0.25
 
 
-DeviceInfo = namedtuple("DeviceInfo", "kind l2_bytes free_bytes total_bytes name")
-DeviceInfo.__new__.__defaults__ = (None, None, None, None)
+DeviceInfo = namedtuple("DeviceInfo", "kind l2_bytes free_bytes name",
+                        defaults=(None, None, None))
 
 
 def describe_device(device, torch_module=None):
@@ -82,13 +82,11 @@ def describe_device(device, torch_module=None):
     # L2_cache_size is not present on every torch/driver combination, hence
     # getattr rather than attribute access -- its absence must not be fatal.
     l2 = getattr(props, "L2_cache_size", None)
-    total = getattr(props, "total_memory", None)
     try:
-        free, total_q = torch.cuda.mem_get_info(device)
+        free, _total = torch.cuda.mem_get_info(device)
     except Exception:
-        free, total_q = None, None
-    return DeviceInfo(kind=kind, l2_bytes=l2 or None,
-                      free_bytes=free, total_bytes=total_q or total,
+        free = None
+    return DeviceInfo(kind=kind, l2_bytes=l2 or None, free_bytes=free,
                       name=getattr(props, "name", None))
 
 
