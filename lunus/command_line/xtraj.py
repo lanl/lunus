@@ -1606,12 +1606,12 @@ if __name__=="__main__":
     # torch_compile is deliberately NOT decided here -- see the comment on
     # its argument above. The break-even was measured at ~210 frames on one
     # card and 2.8 on another, so it does not transfer.
-    from lunus.sf import tune as _tune
+    from lunus.sf.tune import describe_device, recommended_max_pairs, memory_warning
 
-    _dev_info = _tune.describe_device(torch_device, torch_module=torch)
+    _dev_info = describe_device(torch_device, torch_module=torch)
 
     if torch_max_pairs_per_batch == "auto":
-      torch_max_pairs_per_batch, _pairs_why = _tune.recommended_max_pairs(_dev_info)
+      torch_max_pairs_per_batch, _pairs_why = recommended_max_pairs(_dev_info)
     else:
       _pairs_why = "set explicitly"
     torch_pairs_kwarg = {"max_pairs_per_batch": torch_max_pairs_per_batch}
@@ -1619,7 +1619,7 @@ if __name__=="__main__":
     if mpi_rank == 0:
       print("torch engine: auto-tuning -> max_pairs_per_batch = %d (%s)"
             % (torch_max_pairs_per_batch, _pairs_why))
-      _mem_warn = _tune.memory_warning(
+      _mem_warn = memory_warning(
         xrs_sel.scatterers().size(), torch_grid_shape,
         torch_max_pairs_per_batch, _dev_info)
       if _mem_warn:
