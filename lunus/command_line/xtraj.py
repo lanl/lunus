@@ -1081,13 +1081,13 @@ if __name__=="__main__":
   import collections
   import contextlib
 
-  _phase_totals = collections.OrderedDict()
-  _phase_calls = collections.Counter()
-  _phase_series = {}
+  phase_totals = collections.OrderedDict()
+  phase_calls = collections.Counter()
+  phase_series = {}
 
-  def _record_phase(name, dt):
-    _phase_totals[name] = _phase_totals.get(name, 0.0) + dt
-    _phase_calls[name] += 1
+  def record_phase(name, dt):
+    phase_totals[name] = phase_totals.get(name, 0.0) + dt
+    phase_calls[name] += 1
     # Per-call durations, not just the total. A one-time cost paid on frame 0
     # and a genuine per-frame cost are indistinguishable in an average, and
     # differ by the frame count -- which is how a 10-frame comparison can show
@@ -1099,7 +1099,7 @@ if __name__=="__main__":
     # steady-state splat was ~20 ms/frame reported 67.8: torch.compile spends
     # ~12 s on frame 0 and the mean spreads it over all 251. That is the very
     # failure this series exists to expose, so it should not need a flag.
-    _phase_series.setdefault(name, []).append(dt)
+    phase_series.setdefault(name, []).append(dt)
 
   @contextlib.contextmanager
   def host_phase(name):
@@ -1110,7 +1110,7 @@ if __name__=="__main__":
     try:
       yield
     finally:
-      _record_phase(name, time.time() - t0)
+      record_phase(name, time.time() - t0)
 
   # Set by the torch setup below. Every other engine reads xrs frame by frame.
   torch_bypass_xrs = False
@@ -1120,9 +1120,9 @@ if __name__=="__main__":
   torch_profiler = None
 
   def report_phases(n_frames, loop_wall=None):
-    if not torch_timing or not _phase_totals:
+    if not torch_timing or not phase_totals:
       return
-    total = sum(_phase_totals.values())
+    total = sum(phase_totals.values())
     print("\n=== {0} engine phase timing (rank 0), {1} frames ===".format(
       engine, n_frames))
     # The call count matters for reading the table: most phases run once per
@@ -1135,17 +1135,17 @@ if __name__=="__main__":
     # that shrinks as the run lengthens, which makes short and long runs of
     # the same configuration look like different machines. Measured on 10
     # frames: splat mean 79.9 against median 66.9.
-    have_series = bool(_phase_series)
+    have_series = bool(phase_series)
     header = "  {0:<22} {1:>10} {2:>12} {3:>8} {4:>7}"
     if have_series:
       header += " {5:>11}"
     print(header.format("phase", "total s", "ms/frame", "share", "calls",
                         "median ms"))
-    for name, secs in _phase_totals.items():
+    for name, secs in phase_totals.items():
       row = "  {0:<22} {1:>10.2f} {2:>12.1f} {3:>7.1f}% {4:>7d}".format(
         name, secs, 1e3 * secs / max(n_frames, 1), 100.0 * secs / total,
-        _phase_calls[name])
-      series = _phase_series.get(name)
+        phase_calls[name])
+      series = phase_series.get(name)
       if have_series:
         if series and len(series) > 1:
           rest = sorted(series[1:])
@@ -1188,7 +1188,7 @@ if __name__=="__main__":
         min(a / i for a, i in zip(actual, ideal)),
         max(a / i for a, i in zip(actual, ideal))))
 
-    series = _phase_series.get("splat")
+    series = phase_series.get("splat")
     if series and len(series) >= 4:
       # Frame 0 separately: it carries the one-time warmup, and any cost that
       # a setup-time change moves OUT of the loop shows up here and nowhere
@@ -1212,7 +1212,7 @@ if __name__=="__main__":
     if torch_matmul_precision != "highest":
       torch.set_float32_matmul_precision(torch_matmul_precision)
 
-    def _torch_sync(dev):
+    def torch_sync(dev):
       """Block until queued device work has finished.
 
       CUDA and MPS kernels are launched asynchronously, so an unsynchronized
@@ -1229,13 +1229,13 @@ if __name__=="__main__":
       if not torch_timing:
         yield
         return
-      _torch_sync(device)
+      torch_sync(device)
       t0 = time.time()
       try:
         yield
       finally:
-        _torch_sync(device)
-        _record_phase(name, time.time() - t0)
+        torch_sync(device)
+        record_phase(name, time.time() - t0)
 
     from lunus.sf.elements import it92_coefficients
     from lunus.sf.cell_utils import orth_matrix, grid_shape_for_resolution, recommended_blur
@@ -1272,7 +1272,7 @@ if __name__=="__main__":
     # this was diagnosed on -- because a CPU limit is enforced by accounting,
     # not by restricting which cores the process may run on. Affinity is used
     # here only as an additional cap, never as the answer.
-    def _cpu_quota():
+    def detect_cpu_quota():
       try:
         with open("/sys/fs/cgroup/cpu.max") as fh:      # cgroup v2
           quota, period = fh.read().split()
@@ -1293,44 +1293,44 @@ if __name__=="__main__":
 
     # Leave the CPU multi-rank case to the more specific logic below.
     if not (torch_device == "cpu" and mpi_size > 1):
-      _quota = _cpu_quota()
+      cpu_quota = detect_cpu_quota()
       try:
-        _affinity = len(os.sched_getaffinity(0))        # Linux only
+        affinity = len(os.sched_getaffinity(0))        # Linux only
       except AttributeError:
-        _affinity = None
+        affinity = None
 
       if torch_num_threads is not None:
-        _target, _why = torch_num_threads, "torch_num_threads"
-      elif _quota is not None:
+        target, why = torch_num_threads, "torch_num_threads"
+      elif cpu_quota is not None:
         # NEVER RAISE. The quota is a ceiling, not a target: OMP_NUM_THREADS=3
         # under a 12-CPU quota is someone deliberately asking for 3, and this
         # code was overriding them up to 12 -- the exact opposite of what a
         # guard against oversubscription is for. Observed on the pod:
         # "torch.set_num_threads(12), was 3".
-        _target = _quota if _affinity is None else min(_quota, _affinity)
-        _target = min(_target, torch.get_num_threads())
-        _why = "cgroup CPU quota"
+        target = cpu_quota if affinity is None else min(cpu_quota, affinity)
+        target = min(target, torch.get_num_threads())
+        why = "cgroup CPU quota"
       elif torch_device != "cpu":
         # No discoverable quota, and the host only dispatches on a device run
         # -- there is no torch CPU work in the frame loop to spread. One
         # thread cannot oversubscribe a limit we cannot see.
-        _target, _why = 1, "device run with no discoverable CPU quota"
+        target, why = 1, "device run with no discoverable CPU quota"
       else:
-        _target, _why = None, None                      # real CPU work: leave it
+        target, why = None, None                      # real CPU work: leave it
 
-      if _target is not None and _target != torch.get_num_threads():
-        _was = torch.get_num_threads()
-        torch.set_num_threads(_target)
+      if target is not None and target != torch.get_num_threads():
+        was = torch.get_num_threads()
+        torch.set_num_threads(target)
         if mpi_rank == 0:
           print("torch engine: torch.set_num_threads({0}), was {1} ({2})"
-                .format(_target, _was, _why))
-          if _quota is not None and _was > _target:
+                .format(target, was, why))
+          if cpu_quota is not None and was > target:
             print("  Threads beyond the quota spin-wait, spend it faster than "
                   "useful work does, and get the whole process throttled -- "
                   "measured 4.3x on the splat. This does NOT cover numpy/BLAS, "
                   "which reads the environment before this program starts: "
-                  "export OMP_NUM_THREADS={0} as well.".format(_target))
-          elif _quota is None:
+                  "export OMP_NUM_THREADS={0} as well.".format(target))
+          elif cpu_quota is None:
             print("  The host only dispatches on a device run, so there is no "
                   "torch CPU work to spread. torch_num_threads=N to override.")
 
@@ -1506,17 +1506,17 @@ if __name__=="__main__":
       # A bypass that disagreed with cctbx would move every atom and change
       # every structure factor, quietly. Check the matrix against sites_frac()
       # itself, on the topology coordinates xrs is holding right now.
-      _chk_cart = xrs_sel.sites_cart().as_double().as_numpy_array().reshape((-1, 3))
-      _chk_ref = xrs_sel.sites_frac().as_double().as_numpy_array().reshape((-1, 3))
-      _chk_dev = np.max(np.abs(_chk_cart @ torch_frac_matrix_np.T - _chk_ref))
-      assert _chk_dev < 1e-12, (
+      chk_cart = xrs_sel.sites_cart().as_double().as_numpy_array().reshape((-1, 3))
+      chk_ref = xrs_sel.sites_frac().as_double().as_numpy_array().reshape((-1, 3))
+      chk_dev = np.max(np.abs(chk_cart @ torch_frac_matrix_np.T - chk_ref))
+      assert chk_dev < 1e-12, (
         "fractionalization matrix disagrees with cctbx sites_frac() by %g; "
-        "the frame-loop bypass would change the answer" % _chk_dev)
+        "the frame-loop bypass would change the answer" % chk_dev)
 
       # The selection as row indices into the trajectory's atom axis. None
       # means "all atoms", which lets the frame loop skip the gather entirely.
-      _sel_np = selection.as_numpy_array()
-      torch_sel_idx = None if _sel_np.all() else np.nonzero(_sel_np)[0]
+      sel_np = selection.as_numpy_array()
+      torch_sel_idx = None if sel_np.all() else np.nonzero(sel_np)[0]
 
       torch_occ_np = np.array(xrs_sel.scatterers().extract_occupancies())
       torch_element_idx_np = np.array(
@@ -1527,7 +1527,7 @@ if __name__=="__main__":
       if mpi_rank == 0:
         print("torch engine: bypassing the per-frame xray.structure round trip"
               " (%d of %d atoms selected, fractionalization agrees with cctbx "
-              "to %.2g)" % (len(torch_occ_np), len(_sel_np), _chk_dev))
+              "to %.2g)" % (len(torch_occ_np), len(sel_np), chk_dev))
     elif mpi_rank == 0:
       print("torch engine: translational_fit=True, so the per-frame "
             "xray.structure round trip is kept")
@@ -1559,12 +1559,12 @@ if __name__=="__main__":
           "charges per Python call and would misattribute the torch work it is "
           "wrapped around. Run one or the other.")
 
-      from torch.profiler import ProfilerActivity, schedule as _profiler_schedule
+      from torch.profiler import ProfilerActivity, schedule as profiler_schedule
 
-      _trace_path = "torch_trace_rank{0}.json".format(mpi_rank)
+      trace_path = "torch_trace_rank{0}.json".format(mpi_rank)
 
-      def _on_trace_ready(prof):
-        prof.export_chrome_trace(_trace_path)
+      def on_trace_ready(prof):
+        prof.export_chrome_trace(trace_path)
         # Sort by device self time where the build reports it -- the name
         # changed across torch versions, and CPU-only runs have neither.
         for key in ("self_device_time_total", "self_cuda_time_total",
@@ -1576,21 +1576,21 @@ if __name__=="__main__":
           print("\n=== torch.profiler, sorted by {0} ===".format(key))
           print(table)
           break
-        print("torch profiler: Chrome trace written to", _trace_path,
+        print("torch profiler: Chrome trace written to", trace_path,
               "-- load it in chrome://tracing or https://ui.perfetto.dev to see "
               "kernel timings and the gaps between them")
 
-      _activities = [ProfilerActivity.CPU]
+      activities = [ProfilerActivity.CPU]
       if str(torch_device).startswith("cuda"):
-        _activities.append(ProfilerActivity.CUDA)
+        activities.append(ProfilerActivity.CUDA)
 
       torch_profiler = torch.profiler.profile(
-        activities=_activities,
+        activities=activities,
         # Frame 0 carries one-time warmup and frame 1 warms the profiler
         # itself, so recording starts at frame 2.
-        schedule=_profiler_schedule(
+        schedule=profiler_schedule(
           wait=1, warmup=1, active=torch_profile_frames, repeat=1),
-        on_trace_ready=_on_trace_ready,
+        on_trace_ready=on_trace_ready,
         record_shapes=True,
       )
       print("torch engine: profiling {0} frames (from frame 2); the phase "
@@ -1608,22 +1608,22 @@ if __name__=="__main__":
     # card and 2.8 on another, so it does not transfer.
     from lunus.sf.tune import describe_device, recommended_max_pairs, memory_warning
 
-    _dev_info = describe_device(torch_device, torch_module=torch)
+    dev_info = describe_device(torch_device, torch_module=torch)
 
     if torch_max_pairs_per_batch == "auto":
-      torch_max_pairs_per_batch, _pairs_why = recommended_max_pairs(_dev_info)
+      torch_max_pairs_per_batch, pairs_why = recommended_max_pairs(dev_info)
     else:
-      _pairs_why = "set explicitly"
+      pairs_why = "set explicitly"
     torch_pairs_kwarg = {"max_pairs_per_batch": torch_max_pairs_per_batch}
 
     if mpi_rank == 0:
       print("torch engine: auto-tuning -> max_pairs_per_batch = %d (%s)"
-            % (torch_max_pairs_per_batch, _pairs_why))
-      _mem_warn = memory_warning(
+            % (torch_max_pairs_per_batch, pairs_why))
+      mem_warn = memory_warning(
         xrs_sel.scatterers().size(), torch_grid_shape,
-        torch_max_pairs_per_batch, _dev_info)
-      if _mem_warn:
-        print("torch engine: WARNING, " + _mem_warn)
+        torch_max_pairs_per_batch, dev_info)
+      if mem_warn:
+        print("torch engine: WARNING, " + mem_warn)
 
     # Compile ONCE on rank 0, then let the others start. Without this every
     # rank compiles the same kernels itself, and N concurrent compilations
@@ -1636,14 +1636,14 @@ if __name__=="__main__":
     if torch_compile and mpi_size > 1:
       from lunus.sf.density_torch import warmup_compile
       if mpi_rank == 0:
-        _t_warm = time.time()
+        t_warm = time.time()
         warmup_compile(
           torch_elem_offsets, torch_grid_shape, torch_orth_matrix, torch_taper_width,
           max_atoms_per_batch=torch_max_atoms_per_batch, **torch_pairs_kwarg,
         )
         print("torch engine: populated the torch.compile cache on rank 0 in "
               "%.1f s before releasing the other %d ranks (each would otherwise "
-              "compile the same kernels itself)" % (time.time() - _t_warm, mpi_size - 1))
+              "compile the same kernels itself)" % (time.time() - t_warm, mpi_size - 1))
       mpi_comm.Barrier()
 
     if mpi_rank == 0:
@@ -1824,13 +1824,13 @@ EOF
   # nor a phase timer can see it. Semantics are otherwise unchanged.
   while True:
 
-    _t_read = time.time()
+    t_read = time.time()
     try:
       tt = next(ti)
     except StopIteration:
       break
     if torch_timing:
-      _record_phase("traj read", time.time() - _t_read)
+      record_phase("traj read", time.time() - t_read)
 
     mtime = time.time()
       
@@ -1940,7 +1940,7 @@ EOF
           with host_phase("xrs.select"):
             xrs_sel = xrs.select(selection)
         if engine == "sfall":
-          _t_engine = time.time()
+          t_engine = time.time()
           pdbtmp = xrs_sel.as_pdb_file()
           pdbnam_tmp = "tmp_{rank:03d}.pdb".format(rank=mpi_rank)
           fcalcnam_tmp = "tmp_{rank:03d}.mtz".format(rank=mpi_rank)
@@ -1954,12 +1954,12 @@ EOF
           miller_arrays = hkl_in.as_miller_arrays()
           fcalc = miller_arrays[1]
           if torch_timing:
-            _record_phase("sfall calc", time.time() - _t_engine)
+            record_phase("sfall calc", time.time() - t_engine)
         elif engine == "gemmi":
           # One timestamp pair rather than a `with` around the whole branch,
           # which would reindent it for no gain. The branch is a single phase
           # from the report's point of view either way.
-          _t_engine = time.time()
+          t_engine = time.time()
           st = gemmi.Structure()
           st.cell = gemmi.UnitCell(*xrs_sel.unit_cell().parameters())
           # gemmi expands the model by whatever symmetry the structure
@@ -2094,7 +2094,7 @@ EOF
           fcalc.set_info(miller.array_info(labels=["FWT", "PHIFWT"]))
           fcalc = fcalc.resolution_filter(d_min=d_min,d_max=d_max)
           if torch_timing:
-            _record_phase("gemmi calc", time.time() - _t_engine)
+            record_phase("gemmi calc", time.time() - t_engine)
         elif engine == "torch":
           if torch_bypass_xrs:
             # Everything cctbx was being asked for, without cctbx: the frame's
@@ -2149,7 +2149,7 @@ EOF
             if torch_free_early:
               torch_density = None
               F_t = None
-            _splat_stats = {} if torch_splat_stats else None
+            splat_stats = {} if torch_splat_stats else None
             with torch_phase("splat", torch_device):
               torch_density = splat_density(
                 frac_t, element_idx_t, occ_t,
@@ -2157,11 +2157,11 @@ EOF
                 torch_grid_shape, torch_orth_matrix, torch_taper_width,
                 max_atoms_per_batch=torch_max_atoms_per_batch,
                 compile_core=torch_compile,
-                out=torch_grid_buf, stats=_splat_stats,
+                out=torch_grid_buf, stats=splat_stats,
                 **torch_pairs_kwarg,
               )
-            if _splat_stats is not None:
-              torch_splat_stats_log.append(_splat_stats)
+            if splat_stats is not None:
+              torch_splat_stats_log.append(splat_stats)
 
 
             # Symmetry-expand the density grid, exactly as gemmi's
