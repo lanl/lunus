@@ -345,10 +345,11 @@ if __name__=="__main__":
 #
 #   engine parity     torch vs gemmi over 1.5M reflections at d_min 1.2 goes
 #                     from mean R 0.0534 to 0.0020, and the disagreement stops
-#                     being monotonic in resolution. Measured 2026-09; the
-#                     shell tables are not yet in docs/design.md
+#                     being monotonic in resolution (docs/design.md, "Of those
+#                     two terms, the cutoff dominates")
 #   direct summation  against exact cctbx structure factors, gemmi reaches
-#                     R 0.000564 and torch 0.001651 at 1e-4
+#                     R 0.000564 and torch 0.001651 at 1e-4 (same doc,
+#                     "Settled against exact direct summation")
 #   solvent R-factor  7FPV R-work 0.1810 -> 0.1802, b_sol toward the
 #                     conventional value; converged by 1e-4, 1e-5 adds nothing
 #                     (docs/solvent-design.md, "What the density cutoff costs")
@@ -700,10 +701,21 @@ if __name__=="__main__":
 # torch.compile the density splat's inner blocks (default True). Fusing them
 # is worth ~2.9x on the splat -- the per-voxel work is memory-bound, so run
 # eagerly it costs one pass over an (n_atoms, n_voxels) array per elementary
-# operation, roughly twenty of them, where fused it is a couple. Costs a
-# one-off compile of ~1s on the first frame, so set torch_compile=False for a
-# single-frame run, if your torch has no working compiler backend, or to
-# isolate a suspected compile-related numerical difference.
+# operation, roughly twenty of them, where fused it is a couple.
+#
+# It is NOT free, and the default does not know that: the one-off compile is
+# ~8.8 s on CUDA against ~1.4 s on CPU, so on CUDA it is a net LOSS below a
+# couple of hundred frames per PROCESS -- a two-frame smoke test pays the
+# whole cost for nothing, and under mpirun the count that matters is each
+# rank's share, not the run's total. Set torch_compile=False for short runs,
+# on MPS where inductor's Metal backend cannot build at all, or to isolate a
+# suspected compile-related numerical difference.
+#
+# Deliberately NOT auto-selected. The break-even is easy arithmetic -- a
+# fixed one-off against a per-frame saving -- but the inputs do not transfer:
+# the compile cost varies by machine and cache state, and the saving scales
+# with grid and atom count. Measured, it is ~210 frames on one card and 2.8
+# on another. docs/performance.md, "A second machine".
 
   try:
     idx = [a.find("torch_compile")==0 for a in args].index(True)
@@ -881,15 +893,18 @@ if __name__=="__main__":
 # Max atom-voxel PAIRS per batch for the torch engine -- the quantity that
 # actually sets intermediate tensor size, and the main tuning knob now that
 # batching is budgeted by pairs rather than by atom count. It is a speed knob
-# as much as a memory one: the default keeps each working buffer around 16 MB
-# so it stays cache-resident, which measured faster than both larger and
-# smaller values. Re-tune with lunus/sf/tools/bench_splat.py on a different machine.
-# Leave unset to use density_torch.splat_density's default.
+# as much as a memory one: the measured CPU value keeps each working buffer
+# around 16 MB so it stays cache-resident, which beat both larger and smaller
+# values. That criterion is "one buffer fits in cache", so it does not transfer
+# to a GPU unchanged -- splat_density's docstring says to expect a GPU to want
+# more. Default "auto" sizes it to the device's own L2 and caps it against free
+# memory (lunus/sf/tune.py); an integer forces it. Re-tune a forced value with
+# lunus/sf/tools/bench_splat.py on a different machine.
 
   try:
     idx = [a.find("torch_max_pairs_per_batch")==0 for a in args].index(True)
   except ValueError:
-    torch_max_pairs_per_batch = None
+    torch_max_pairs_per_batch = "auto"
   else:
     torch_max_pairs_per_batch = int(args.pop(idx).split("=")[1])
 
@@ -1231,9 +1246,10 @@ if __name__=="__main__":
       build_grid_ops_from_cctbx, adjust_grid_for_symmetry, symmetrize_sum,
     )
 
-    # left empty when unset so splat_density's own (measured) default applies
-    torch_pairs_kwarg = ({} if torch_max_pairs_per_batch is None
-                         else {"max_pairs_per_batch": torch_max_pairs_per_batch})
+    # Resolved below, once the grid shape and the device are both known --
+    # "auto" needs them. Both consumers (the compile warmup and the frame
+    # loop) come after that point.
+    torch_pairs_kwarg = {}
 
     torch_b_iso = 20.0 * d_min * d_min if apply_bfac else 0.0
     torch_dtype = torch.float32  # confirmed via the resolution-shell comparison that float64
@@ -1581,6 +1597,34 @@ if __name__=="__main__":
             "table from this run is NOT a performance measurement"
             .format(torch_profile_frames))
 
+    # ---- resolve the "auto" performance knobs -------------------------------
+    # This needs the grid shape and the device, so it cannot happen at parse
+    # time. An explicit value passes through untouched; only "auto" is decided
+    # here, and it prints its reason, because a knob that silently picks a
+    # number is exactly as hard to debug as one the user guessed.
+    #
+    # torch_compile is deliberately NOT decided here -- see the comment on
+    # its argument above. The break-even was measured at ~210 frames on one
+    # card and 2.8 on another, so it does not transfer.
+    from lunus.sf.tune import describe_device, recommended_max_pairs, memory_warning
+
+    _dev_info = describe_device(torch_device, torch_module=torch)
+
+    if torch_max_pairs_per_batch == "auto":
+      torch_max_pairs_per_batch, _pairs_why = recommended_max_pairs(_dev_info)
+    else:
+      _pairs_why = "set explicitly"
+    torch_pairs_kwarg = {"max_pairs_per_batch": torch_max_pairs_per_batch}
+
+    if mpi_rank == 0:
+      print("torch engine: auto-tuning -> max_pairs_per_batch = %d (%s)"
+            % (torch_max_pairs_per_batch, _pairs_why))
+      _mem_warn = memory_warning(
+        xrs_sel.scatterers().size(), torch_grid_shape,
+        torch_max_pairs_per_batch, _dev_info)
+      if _mem_warn:
+        print("torch engine: WARNING, " + _mem_warn)
+
     # Compile ONCE on rank 0, then let the others start. Without this every
     # rank compiles the same kernels itself, and N concurrent compilations
     # saturate the machine: measured on 10 ranks with a cold cache, frame times
@@ -1607,8 +1651,7 @@ if __name__=="__main__":
             ", grid =", torch_grid_shape,
             ", b_iso =", ("per-atom (use_top_bfacs)" if use_top_bfacs else torch_b_iso),
             ", device =", torch_device, ", max_atoms_per_batch =", torch_max_atoms_per_batch,
-            ", max_pairs_per_batch =",
-            ("default" if torch_max_pairs_per_batch is None else torch_max_pairs_per_batch),
+            ", max_pairs_per_batch =", torch_max_pairs_per_batch,
             ", taper_width =", torch_taper_width, ", torch.compile =", torch_compile,
             ", matmul_precision =", torch_matmul_precision)
 

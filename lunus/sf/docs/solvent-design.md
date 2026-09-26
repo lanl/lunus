@@ -758,12 +758,13 @@ nor `kernel_torch.py`'s, which is also 1e-5: only xtraj loosened it, and it
 loosened it a thousandfold.
 
 **That default has since moved to 1e-4**, on the evidence in this section
-together with two later results measured against the torch engine: parity
-with gemmi over 1,496,008 reflections at `d_min` 1.2 improves from mean
-R 0.0534 to 0.0020, and against exact cctbx direct summation gemmi reaches
-R 0.000564 and torch 0.001651 at 1e-4. The numbers immediately below are
-therefore the *old* default against the new one, and the second row is now
-what a default run gives.
+together with the engine-parity and direct-summation results in
+`docs/design.md` ("Of those two terms, the cutoff dominates" and "Settled
+against exact direct summation"): parity with gemmi over 1,496,008
+reflections at `d_min` 1.2 improves from mean R 0.0534 to 0.0020, and against
+exact cctbx direct summation gemmi reaches R 0.000564 and torch 0.001651. The
+numbers immediately below are therefore the *old* default against the new
+one, and the second row is now what a default run gives.
 
 Re-run on 7FPV with nothing else changed (`--aniso`, same grid, same
 calibration):
