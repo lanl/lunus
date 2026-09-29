@@ -271,7 +271,7 @@ def calc_msd(x):
   for k in range(3):
     d[:,k] = (this_sites_frac[:,k] - ref_sites_frac[:,k] + x[k] + 0.5)%1.0 - 0.5
     msd += np.sum(d[:,k] * d[:,k])
-    return msd
+  return msd
 
 def write_nexus_metadata(h5_file, miller_array):
   """Helper to map cctbx symmetry to NeXus groups."""
