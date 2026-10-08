@@ -67,6 +67,19 @@ def test_passthrough_reaches_the_torch_parser():
         (2.0, True, "gemmi", 4)
 
 
+def test_binned_row_is_extra_and_off_in_the_torch_tool_by_default():
+    """pdb_rfactor asks run() for the binned fit with --also-scale-bins, which
+    must leave the main fit single-scale; fit_solvent_rfactor itself bins
+    nothing unless told to."""
+    import fit_solvent_rfactor
+
+    parse = fit_solvent_rfactor.build_parser().parse_args
+    plain = parse(["m.pdb", "m-sf.cif"])
+    assert (plain.scale_bins, plain.also_scale_bins) == (0, 0)
+    extra = parse(["m.pdb", "m-sf.cif", "--also-scale-bins", "20"])
+    assert (extra.scale_bins, extra.also_scale_bins) == (0, 20)
+
+
 def test_charged_scattering_types_get_coefficients():
     """7TX0 types carboxylate oxygens 'O1-'; the default table of neutral
     elements raised KeyError. cctbx has the ion; 'N1+' it does not, and that
