@@ -65,3 +65,19 @@ def test_passthrough_reaches_the_torch_parser():
          "--shells", "4"])
     assert (args.d_min, args.aniso_adp, args.mask, args.shells) == \
         (2.0, True, "gemmi", 4)
+
+
+def test_charged_scattering_types_get_coefficients():
+    """7TX0 types carboxylate oxygens 'O1-'; the default table of neutral
+    elements raised KeyError. cctbx has the ion; 'N1+' it does not, and that
+    one must fall back to N rather than fail."""
+    import io
+
+    import fit_solvent_rfactor
+
+    log = io.StringIO()
+    table = fit_solvent_rfactor.scattering_table(["C", "N1+", "O", "O1-"], log)
+    assert set(table) == {"C", "N1+", "O", "O1-"}
+    assert table["O1-"] != table["O"]            # a real ion entry, not a copy
+    assert table["N1+"] == fit_solvent_rfactor.scattering_table(["N"])["N"]
+    assert "N1+ -> N" in log.getvalue()

@@ -168,6 +168,36 @@ def read_model(path, log=sys.stdout):
     return xrs, elements, b_per_atom, occ, frac, n_aniso, u_cart, is_aniso
 
 
+def scattering_table(present, log=sys.stdout):
+    """IT92 coefficients for the scattering types cctbx actually assigned.
+
+    A deposited model is read with cctbx, which types a charged atom by its
+    ion -- 'O1-' for a carboxylate oxygen, 'Zn2+', 'Cl1-' -- and the default
+    IT92_COEFFS table knows only neutral elements, so 7TX0 raised KeyError
+    on 'O1-'. cctbx's own IT92 table carries the ions, and it is what
+    mmtbx.f_model scatters off, so taking the coefficients from there keeps
+    the two methods on identical form factors. A type cctbx has no entry
+    for ('N1+' is one) falls back to the neutral atom, which is what a
+    refinement program would do too, and says so.
+    """
+    import re
+
+    from lunus.sf.elements import it92_coefficients
+
+    table, fallback = {}, []
+    for sym in present:
+        try:
+            table[sym] = it92_coefficients([sym], source="cctbx")[sym]
+        except (RuntimeError, ValueError):
+            neutral = re.sub(r"[0-9]*[+-]$", "", sym)
+            table[sym] = it92_coefficients([neutral], source="cctbx")[neutral]
+            fallback.append("%s -> %s" % (sym, neutral))
+    if fallback:
+        print("no IT92 entry for charged type(s); using the neutral atom: %s"
+              % ", ".join(fallback), file=log)
+    return table
+
+
 def build_density(xrs, elements, b_per_atom, occ, frac, grid, device, dtype,
                   expand_symmetry, log=sys.stdout, u_cart=None,
                   is_aniso=None, cutoff=0.01):
@@ -181,7 +211,6 @@ def build_density(xrs, elements, b_per_atom, occ, frac, grid, device, dtype,
     """
     from lunus.sf.cell_utils import orth_matrix
     from lunus.sf.density_torch import splat_density
-    from lunus.sf.elements import IT92_COEFFS
     from lunus.sf.kernel_torch import (build_atom_kernels_aniso_torch,
                                        build_atom_kernels_torch)
     from lunus.sf.symmetry_torch import build_grid_ops_from_cctbx, symmetrize_sum
@@ -189,8 +218,9 @@ def build_density(xrs, elements, b_per_atom, occ, frac, grid, device, dtype,
     cell = xrs.unit_cell().parameters()
     M_np = orth_matrix(*cell)
     present = sorted(set(elements))
+    coeffs = scattering_table(present, log)
     atom_A, atom_lam, offsets, atom_r, taper_w, e2i = build_atom_kernels_torch(
-        elements, present, IT92_COEFFS, b_per_atom, 0.0, grid, M_np,
+        elements, present, coeffs, b_per_atom, 0.0, grid, M_np,
         cutoff=cutoff, device=device, dtype=dtype)
 
     atom_L6 = aniso_mask = None
@@ -201,7 +231,7 @@ def build_density(xrs, elements, b_per_atom, occ, frac, grid, device, dtype,
         # atom_lam and the dispatch mask distinguish them.
         atom_A, atom_L6, offsets, atom_r, taper_w, _ = \
             build_atom_kernels_aniso_torch(
-                elements, present, IT92_COEFFS, u_cart, 0.0, grid, M_np,
+                elements, present, coeffs, u_cart, 0.0, grid, M_np,
                 cutoff=cutoff, device=device, dtype=dtype)
         aniso_mask = torch.tensor(is_aniso, device=device)
         print("anisotropic ADPs: %d of %d atoms on the tensor kernel"
