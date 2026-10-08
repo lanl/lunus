@@ -487,18 +487,19 @@ def compare_masks(ours, gemmi_grid, F_ours, F_gemmi, d, log=sys.stdout):
     return agreement
 
 
-def external_reference(pdb, cif, d_min, log=sys.stdout):
-    """What this dataset supports, measured without any lunus code.
+def mmtbx_fit(pdb, cif, d_min=None, isotropic=False):
+    """R-work, R-free, k_sol and b_sol from mmtbx.f_model on the deposited
+    model, with no lunus.sf code involved.
 
-    Two numbers, and the harness's output cannot be read without them:
+    This is mmtbx's own bulk solvent and anisotropic scaling, run on the
+    coordinates and ADPs exactly as deposited -- no refinement -- so it is the
+    R that a correct solvent model and a correct scattering model reach on
+    this data. isotropic=True first flattens every ADP to its isotropic
+    equivalent, which is what lunus.sf computes without --aniso-adp.
 
-      * mmtbx.f_model's own bulk solvent and scaling on the SAME model. That is
-        the R a correct solvent model reaches here, and it is the honest
-        target -- not the deposited R, which additionally had every coordinate
-        and ADP refined against this data.
-      * the same, on the model converted to isotropic ADPs, which is what
-        lunus.sf can represent. The gap between the two rows is the cost of the
-        missing anisotropic kernel, and on a 1.04 A structure it is large.
+    The observations go through read_observations, i.e. the same French-Wilson
+    amplitudes and the same free set the torch fit sees, so the two methods
+    are compared on identical data.
     """
     import contextlib
     import io as _io
@@ -511,24 +512,46 @@ def external_reference(pdb, cif, d_min, log=sys.stdout):
     free_flags = F_obs.customized_copy(
         data=flex.bool(free_np.tolist())).set_observation_type(None)
 
-    xrs_aniso = hierarchy.input(
+    xrs = hierarchy.input(
         file_name=pdb, sort_atoms=False).input.xray_structure_simple()
-    xrs_iso = xrs_aniso.deep_copy_scatterers()
-    xrs_iso.convert_to_isotropic()
+    if isotropic:
+        xrs = xrs.deep_copy_scatterers()
+        xrs.convert_to_isotropic()
 
+    fmodel = mmtbx.f_model.manager(
+        f_obs=F_obs, r_free_flags=free_flags, xray_structure=xrs)
+    with contextlib.redirect_stdout(_io.StringIO()):
+        fmodel.update_all_scales(remove_outliers=False)
+    k_sol, b_sol = fmodel.k_sol_b_sol_from_k_mask()
+    return {"R-work": float(fmodel.r_work()), "R-free": float(fmodel.r_free()),
+            "k_sol": float(k_sol), "b_sol": float(b_sol),
+            "n_work": int(F_obs.size() - free_np.sum()),
+            "n_free": int(free_np.sum())}
+
+
+def external_reference(pdb, cif, d_min, log=sys.stdout):
+    """What this dataset supports, measured without any lunus code.
+
+    Two numbers, and the harness's output cannot be read without them:
+
+      * mmtbx.f_model's own bulk solvent and scaling on the SAME model. That is
+        the R a correct solvent model reaches here, and it is the honest
+        target -- not the deposited R, which additionally had every coordinate
+        and ADP refined against this data.
+      * the same, on the model converted to isotropic ADPs, which is what
+        lunus.sf represents without --aniso-adp. The gap between the two rows
+        is the cost of the anisotropic kernel being switched off, and on a
+        1.04 A structure it is large.
+    """
     print("\nexternal reference (cctbx/mmtbx; no lunus.sf code involved)",
           file=log)
     print("  %-34s %8s %8s %8s %8s"
           % ("", "R-work", "R-free", "k_sol", "b_sol"), file=log)
-    for name, xrs in (("deposited model, anisotropic ADPs", xrs_aniso),
-                      ("same model, isotropic ADPs", xrs_iso)):
-        fmodel = mmtbx.f_model.manager(
-            f_obs=F_obs, r_free_flags=free_flags, xray_structure=xrs)
-        with contextlib.redirect_stdout(_io.StringIO()):
-            fmodel.update_all_scales(remove_outliers=False)
-        k_sol, b_sol = fmodel.k_sol_b_sol_from_k_mask()
+    for name, isotropic in (("deposited model, anisotropic ADPs", False),
+                            ("same model, isotropic ADPs", True)):
+        r = mmtbx_fit(pdb, cif, d_min, isotropic=isotropic)
         print("  %-34s %8.4f %8.4f %8.3f %8.1f"
-              % (name, fmodel.r_work(), fmodel.r_free(), k_sol, b_sol),
+              % (name, r["R-work"], r["R-free"], r["k_sol"], r["b_sol"]),
               file=log)
     print("  Which row is the target depends on --aniso-adp: without it the",
           file=log)
@@ -574,7 +597,7 @@ def shell_table(d, F_obs, model_no_solvent, model_solvent, work, free,
                  100.0 * float(solvent_share[sel].mean())), file=log)
 
 
-def main():
+def build_parser():
     p = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -622,8 +645,14 @@ def main():
     p.add_argument("--no-expand-symmetry", action="store_true",
                    help="the model already contains every symmetry copy")
     p.add_argument("--shells", type=int, default=10)
-    args = p.parse_args()
+    return p
 
+
+def run(args):
+    """The whole fit, from a parsed namespace. Returns the overall numbers
+    (R-work/R-free with and without solvent, k_sol, b_sol, k_overall) as a
+    dict so that tools/pdb_rfactor.py can tabulate them; everything else is
+    printed as it goes."""
     from lunus.sf.cell_utils import grid_shape_for_resolution
     from lunus.sf.solvent_torch import (
         MASK_BLUR_DEFAULT, calibrate_cutoff, f_solvent, mask_occupancy,
@@ -758,10 +787,15 @@ def main():
           % ("conventional", "-", "0.35 / 46"))
 
     print("\noverall")
+    result = {"k_sol": float(fit1["k_sol"]), "b_sol": float(fit1["b_sol"]),
+              "k_overall": float(torch.exp(fit1["log_k"])),
+              "n_work": int(work.sum()), "n_free": int(free_np.sum())}
     for name, sel in (("R-work", work), ("R-free", free_np)):
         if sel.sum() < 2:
+            result[name + " no solvent"] = result[name] = float("nan")
             continue
         r0, r1 = r_factor(F_obs[sel], m0[sel]), r_factor(F_obs[sel], m1[sel])
+        result[name + " no solvent"], result[name] = r0, r1
         print("  %-8s no solvent %.4f   with solvent %.4f   change %+.4f (%+.1f%%)"
               % (name, r0, r1, r1 - r0, 100.0 * (r1 - r0) / r0))
 
@@ -814,6 +848,11 @@ def main():
         print("    u_aniso code path rather than a modelling result.")
     print("\n  The diagnostic quantity is the CHANGE from solvent and where it")
     print("  falls, not the absolute R. See docs/solvent-design.md, Validation.")
+    return result
+
+
+def main():
+    run(build_parser().parse_args())
 
 
 if __name__ == "__main__":

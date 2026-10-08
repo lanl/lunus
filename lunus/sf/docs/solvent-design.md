@@ -489,6 +489,13 @@ comparable.
   `7FPV_map_coeffs.mtz` alongside (map coefficients, derived — the R-factor
   work does not need it).
 
+  **For any other entry**, `tools/pdb_rfactor.py <ID>` fetches the model and
+  the deposited structure factors and runs the same fit, next to
+  `mmtbx.f_model` on the same amplitudes and free set, so the comparison
+  below can be repeated on a crystal of your choosing without hand-wiring
+  the downloads. Deposited `.pdb` files with no R-free flags (4WOR) report
+  R-work only.
+
   What it holds, and the reading path, verified:
 
   ```python
