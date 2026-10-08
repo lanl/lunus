@@ -19,6 +19,15 @@ missing scaling rather than the mask. Fitting three parameters against 70,000
 observations is standard practice and is what makes the residual attributable
 to the model.
 
+--scale-bins N replaces the single overall scale with one per resolution bin,
+which is what mmtbx.f_model fits and is most of why its R is lower on the same
+model: across the 40 sampleworks entries the swap test (lunus.sf F_calc and
+mask, mmtbx scaling) put two thirds of the R gap in the scaling model and none
+in the structure factors. It is off by default so the numbers in the design
+note stay reproducible. The cost is that the lowest-resolution bin overlaps the
+solvent term, so a binned fit WITHOUT solvent recovers some of what the mask
+would have, and the drop in R from switching the solvent on is smaller.
+
 WHAT THE ANSWER MEANS, AND WHAT IT DOES NOT.
 
   * The target is NOT the deposited R = 0.126 / R-free = 0.145. That came from
@@ -441,8 +450,19 @@ def r_factor(F_obs, F_model):
     return float((F_obs - F_model).abs().sum() / F_obs.abs().sum())
 
 
+def resolution_bins(inv_d2, n_bins):
+    """Equal-count resolution bins: an index 0..n_bins-1 per reflection, 0 the
+    lowest resolution. Free reflections are binned with the rest, so that a
+    scale fitted on the work set applies to them unchanged."""
+    order = torch.argsort(inv_d2)
+    bins = torch.empty_like(order)
+    bins[order] = (torch.arange(len(order), device=order.device) * n_bins
+                   // len(order))
+    return bins
+
+
 def fit_scales(F_obs, F_protein, F_mask, inv_d2, s_cart, work, aniso,
-               fit_solvent=True, log=sys.stdout):
+               fit_solvent=True, bins=None, log=sys.stdout):
     """
     Least squares on amplitudes over the work set. Returns a parameter dict.
 
@@ -455,6 +475,14 @@ def fit_scales(F_obs, F_protein, F_mask, inv_d2, s_cart, work, aniso,
          everything is a vector op over ~70k reflections and the two structure
          factor sets are computed once, before the scan.
       2. LBFGS on every parameter at once from the best node.
+
+      3. Only with bins (resolution_bins): the single overall scale becomes
+         one scale per bin, refined by LBFGS jointly with everything else from
+         where stage 2 finished. This is mmtbx's binned k_isotropic, and it is
+         what lets the model follow a falloff that no Gaussian B can -- 8VQ1,
+         room-temperature XFEL data, goes from R-work 0.198 to 0.138 with 20
+         bins, against mmtbx's 0.137. k_sol and b_sol stay single numbers, so
+         they remain the diagnostic they are without bins.
 
     Fitting on amplitudes rather than intensities matches the quantity R is
     computed from. The fit is unweighted -- weighting by 1/sigma^2 would tilt
@@ -529,8 +557,53 @@ def fit_scales(F_obs, F_protein, F_mask, inv_d2, s_cart, work, aniso,
 
     opt.step(closure)
 
+    log_k_bins = None
+    if bins is not None:
+        # The overall scale is absorbed into the bins, and the isotropic part
+        # of B is then degenerate with them: left free, the pair drifts
+        # together (B_overall -34 against bin scales falling to 0.01 on 8VQ1)
+        # and the printed B means nothing. So the isotropic part is held at
+        # the single-scale answer and only the anisotropy refines with the
+        # bins; an isotropic fit has no B left to refine at all.
+        b = bins[work]
+        n_bins = int(bins.max()) + 1
+        log_k_bins = torch.full((n_bins,), float(log_k.detach()), dtype=dtype,
+                                device=device, requires_grad=True)
+        n_diag = 3 if aniso else 1
+        b_iso0 = sum(float(p) for p in u_params[:n_diag]) / n_diag
+
+        def held(u):
+            shift = sum(u[:n_diag]) / n_diag - b_iso0
+            return [p - shift for p in u[:n_diag]] + list(u[n_diag:])
+
+        params = [log_k_bins] + (u_params if aniso else []) + (
+            [k_sol, b_sol] if fit_solvent else [])
+        opt = torch.optim.LBFGS(params, max_iter=300,
+                                line_search_fn="strong_wolfe",
+                                tolerance_grad=1e-10, tolerance_change=1e-12)
+
+        def closure():
+            opt.zero_grad()
+            F_c = _f_calc(Fp, Fm, s2, k_sol, b_sol)
+            model = _scaled_amplitudes(F_c, s2, s, log_k_bins[b],
+                                       held(u_params), aniso)
+            loss = ((Fo - model) ** 2).sum()
+            loss.backward()
+            return loss
+
+        opt.step(closure)
+        with torch.no_grad():
+            u_params = [p.clone() for p in held(u_params)]
+        k = torch.exp(log_k_bins.detach())
+        print("  %d resolution bins: scale %.3f-%.3f (low to high resolution: "
+              "%s)" % (n_bins, float(k.min()), float(k.max()),
+                       " ".join("%.2f" % float(v) for v in k)), file=log)
+        log_k_bins = log_k_bins.detach()
+
     return {
         "log_k": log_k.detach(),
+        "log_k_bins": log_k_bins,
+        "bins": bins,
         "u_params": [p.detach() for p in u_params],
         "aniso": aniso,
         "k_sol": k_sol.detach(),
@@ -544,7 +617,10 @@ def model_amplitudes(fit, F_protein, F_mask, inv_d2, s_cart):
     with torch.no_grad():
         F_c = _f_calc(F_protein, F_mask if fit["fit_solvent"] else None,
                       inv_d2, fit["k_sol"], fit["b_sol"])
-        return _scaled_amplitudes(F_c, inv_d2, s_cart, fit["log_k"],
+        log_k = fit["log_k"]
+        if fit.get("log_k_bins") is not None:
+            log_k = fit["log_k_bins"][fit["bins"]]
+        return _scaled_amplitudes(F_c, inv_d2, s_cart, log_k,
                                   fit["u_params"], fit["aniso"])
 
 
@@ -735,6 +811,16 @@ def build_parser():
                    help="also report what mmtbx reaches on the same model")
     p.add_argument("--aniso", action="store_true",
                    help="fit a full anisotropic scale tensor instead of one B")
+    p.add_argument("--scale-bins", type=int, default=0, metavar="N",
+                   help="refine one overall scale per resolution bin (N "
+                        "equal-count bins) instead of a single one, as mmtbx "
+                        "does; 20 is a good choice. Default 0, off")
+    p.add_argument("--also-scale-bins", type=int, default=0, metavar="N",
+                   help="after the main fit, fit again with N scale bins and "
+                        "report that R alongside it, leaving the main fit and "
+                        "everything printed from it unchanged. This is how "
+                        "pdb_rfactor.py shows how much of a gap to mmtbx is "
+                        "the scaling model. Default 0, off")
     p.add_argument("--no-expand-symmetry", action="store_true",
                    help="the model already contains every symmetry copy")
     p.add_argument("--shells", type=int, default=10)
@@ -848,12 +934,13 @@ def run(args):
     # ---- the fits
     print("\nfitting %d work reflections (%d free held out)"
           % (work.sum(), free_np.sum()))
+    bins = resolution_bins(inv_d2, args.scale_bins) if args.scale_bins else None
     print("no solvent:")
     fit0 = fit_scales(F_obs, F_protein, None, inv_d2, s_cart, work, args.aniso,
-                      fit_solvent=False)
+                      fit_solvent=False, bins=bins)
     print("with solvent:")
     fit1 = fit_scales(F_obs, F_protein, F_mask, inv_d2, s_cart, work, args.aniso,
-                      fit_solvent=True)
+                      fit_solvent=True, bins=bins)
 
     m0 = model_amplitudes(fit0, F_protein, None, inv_d2, s_cart)
     m1 = model_amplitudes(fit1, F_protein, F_mask, inv_d2, s_cart)
@@ -892,6 +979,27 @@ def run(args):
         result[name + " no solvent"], result[name] = r0, r1
         print("  %-8s no solvent %.4f   with solvent %.4f   change %+.4f (%+.1f%%)"
               % (name, r0, r1, r1 - r0, 100.0 * (r1 - r0) / r0))
+
+    if args.also_scale_bins and not args.scale_bins:
+        # Reuses F_protein and F_mask, so this costs a scale fit, not a
+        # structure-factor calculation. Reported, never used for anything
+        # below: the single-scale fit stays the measure of the model.
+        n = args.also_scale_bins
+        with contextlib.redirect_stdout(io.StringIO()):
+            fitb = fit_scales(F_obs, F_protein, F_mask, inv_d2, s_cart, work,
+                              args.aniso, fit_solvent=True,
+                              bins=resolution_bins(inv_d2, n))
+        mb = model_amplitudes(fitb, F_protein, F_mask, inv_d2, s_cart)
+        result.update({"scale_bins": n, "k_sol binned": float(fitb["k_sol"]),
+                       "b_sol binned": float(fitb["b_sol"])})
+        for name, sel in (("R-work", work), ("R-free", free_np)):
+            rb = (r_factor(F_obs[sel], mb[sel]) if sel.sum() >= 2
+                  else float("nan"))
+            result[name + " binned"] = rb
+        print("  with %d scale bins instead (--also-scale-bins): R-work %.4f, "
+              "R-free %.4f, k_sol %.3f, b_sol %.1f"
+              % (n, result["R-work binned"], result["R-free binned"],
+                 result["k_sol binned"], result["b_sol binned"]))
 
     with torch.no_grad():
         contribution = (fit1["k_sol"] * torch.exp(-0.25 * fit1["b_sol"] * inv_d2)
@@ -934,6 +1042,12 @@ def run(args):
     print("  * No positional, ADP or occupancy refinement happens here at all:")
     print("    the deposited coordinates are used exactly as given, against")
     print("    which only 3-4 scale parameters are fitted.")
+    if args.scale_bins:
+        print("  * The overall scale is fitted per resolution bin (%d bins), so"
+              % args.scale_bins)
+        print("    k_overall above is the single-scale value it started from.")
+        print("    The lowest bin overlaps the solvent term and absorbs part")
+        print("    of it, which shrinks the no-solvent/with-solvent change.")
     print("  * The fit is unweighted least squares on amplitudes.")
     if args.aniso:
         print("  * The off-diagonal B_cart components are unconstrained. In an")

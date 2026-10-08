@@ -33,6 +33,17 @@ because mmtbx scales anisotropically too; the comparison is unfair otherwise,
 and not by a little -- with anisotropic ADPs and an ISOTROPIC overall B, 7FPV
 comes out at 0.2060 rather than 0.1312. --iso-scale turns it off.
 
+mmtbx also fits its overall scale per resolution bin, which the torch fit does
+not: a binned scale absorbs resolution-dependent errors, including the ones in
+a structure-factor model that this comparison exists to expose. So the torch
+row stays single-scale, and a second row beside it (--binned-row, 20 bins by
+default) is fitted the way mmtbx is, from the same structure factors. The
+distance between the two rows is the part of the gap that is scaling. On the
+40 sampleworks entries the single-scale row is a median 0.005 above mmtbx in
+R-work and the binned row 0.002; what remains is mostly the solvent mask. On
+data whose falloff is not Gaussian the difference is large (8VQ1,
+room-temperature XFEL: 0.198 against mmtbx's 0.137, and 0.139 binned).
+
 Files are cached: an existing <ID>.pdb or <ID>-sf.cif in --dir is used as is,
 so running in examples/compare_gemmi/ never touches the network for 7FPV. If
 the entry is too large for the PDB format, <ID>.cif is fetched instead; both
@@ -115,6 +126,11 @@ def main():
                    help="use the deposited ANISOTROPIC ADPs. Without this "
                         "both methods flatten them to isotropic, so the two "
                         "stay comparable either way")
+    p.add_argument("--binned-row", type=int, default=20, metavar="N",
+                   help="add a torch row fitted with N resolution-bin scales, "
+                        "as mmtbx scales, beside the single-scale one; it "
+                        "shows how much of a gap to mmtbx is the scaling "
+                        "model. 0 omits it (default: 20)")
     p.epilog = ("Anything else -- after a bare '--' to be safe -- is passed "
                 "through to fit_solvent_rfactor.py: --mask gemmi, --device, "
                 "--mask-blur, --reference, ...")
@@ -133,13 +149,23 @@ def main():
         if not args.iso_scale:
             argv.append("--aniso")
         argv += passthrough
+        if args.binned_row:
+            argv += ["--also-scale-bins", str(args.binned_row)]
         print("\ntorch: fit_solvent_rfactor.py %s\n" % " ".join(argv[2:]))
-        r = fit_solvent_rfactor.run(fit_solvent_rfactor.build_parser()
-                                    .parse_args(argv))
+        torch_args = fit_solvent_rfactor.build_parser().parse_args(argv)
+        r = fit_solvent_rfactor.run(torch_args)
+        # A --scale-bins passed through makes the main fit itself binned; say
+        # so in its label, and run() then skips the extra row as redundant.
+        main = ("torch, %d scale bins" % torch_args.scale_bins
+                if torch_args.scale_bins else "torch")
         rows.append(("torch, no solvent", r["R-work no solvent"],
                      r["R-free no solvent"], float("nan"), float("nan")))
-        rows.append(("torch", r["R-work"], r["R-free"], r["k_sol"],
+        rows.append((main, r["R-work"], r["R-free"], r["k_sol"],
                      r["b_sol"]))
+        if "R-work binned" in r:
+            rows.append(("torch, %d scale bins" % r["scale_bins"],
+                         r["R-work binned"], r["R-free binned"],
+                         r["k_sol binned"], r["b_sol binned"]))
         n_work, n_free = r["n_work"], r["n_free"]
     if args.method in ("mmtbx", "both"):
         if passthrough:
@@ -168,6 +194,10 @@ def main():
         print("  The mmtbx row is what this data supports with the model as "
               "deposited;\n  read the torch row against it, not against the "
               "published R.")
+        if any(name.endswith("scale bins") for name, *_ in rows):
+            print("  mmtbx scales per resolution bin; the binned torch row "
+                  "does the same,\n  so its distance from the torch row is "
+                  "the part of the gap that is scaling.")
 
 
 if __name__ == "__main__":
