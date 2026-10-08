@@ -68,49 +68,90 @@ import torch
 
 # ---------------------------------------------------------------- observations
 
-def read_observations(path, d_min=None, log=sys.stdout):
+def read_observations(path, d_min=None, crystal_symmetry=None, log=sys.stdout):
     """
     Deposited structure factors -> (miller_array of F, free-set boolean mask).
 
     The reading path here is verified and fiddly enough to be worth spelling
-    out, because three of its four steps are easy to skip and none of them
-    fails loudly if you do:
+    out, because most of its steps are easy to skip and none of them fails
+    loudly if you do:
 
-      1. The deposited data are INTENSITIES, not amplitudes, and they are
-         ANOMALOUS -- 142,372 Bijvoet-separate observations with sigmas.
-      2. merge_equivalents() then average_bijvoet_mates() reduces that to one
-         observation per unique reflection.
-      3. french_wilson() converts I to F properly, i.e. without simply
-         discarding the negative intensities that a weak reflection legitimately
-         produces. It rejects a couple of hundred outright and is chatty about
-         it on stdout even with log=None, hence the redirect.
-      4. The R-free flags are NOT boolean. They are CCP4-convention bins 0-19,
-         and the test set is bin 0 -- 3,716 reflections, 5.0%, matching the
-         5.010% in the deposited REMARK 3. Reading the column as a boolean
-         would silently put 95% of the data in the test set.
+      1. A deposited file can hold SEVERAL data blocks. 1VME has six: the
+         merged amplitudes refinement used, then five blocks of unmerged
+         per-dataset intensities that carry a cell but no space group. The
+         refinement data is the FIRST block holding an observation array;
+         taking "the first intensity array" instead picked an unmerged
+         dataset and fell over on its missing symmetry.
+      2. The observations may be INTENSITIES (7FPV: anomalous, 142,372
+         Bijvoet-separate, with sigmas) or AMPLITUDES (1VME). Intensities go
+         through french_wilson(), which converts I to F properly, i.e.
+         without simply discarding the negative intensities a weak reflection
+         legitimately produces; it rejects a couple of hundred and is chatty
+         on stdout even with log=None, hence the redirect. Amplitudes are
+         used as they are. Either way merge_equivalents() then
+         average_bijvoet_mates() reduces to one observation per unique
+         reflection.
+      3. A block without symmetry takes it from the MODEL (crystal_symmetry),
+         which is what every refinement program does.
+      4. The R-free set is encoded one of two ways. _refln.status is a string
+         per reflection, 'f' for free, 'o' for work, 'x' for unobserved.
+         pdbx_r_free_flag is an integer whose convention varies: 7FPV uses
+         CCP4 bins 0-19 with the test set in bin 0 (3,716 reflections, 5.0%,
+         matching the 5.010% in its REMARK 3); other entries use 0/1 with
+         either value meaning free. cctbx's own scorer decides which value is
+         the test set, since reading the column as a boolean would silently
+         put 95% of 7FPV in the test set.
     """
+    from cctbx.array_family import flex
     from iotbx.reflection_file_reader import any_reflection_file
+    from iotbx.reflection_file_utils import get_r_free_flags_scores
 
-    arrays = any_reflection_file(file_name=path).as_miller_arrays()
-    intensities = [a for a in arrays if a.is_xray_intensity_array()]
-    flags = [a for a in arrays if "r_free_flag" in a.info().label_string()]
-    if not intensities:
-        raise SystemExit("no intensity array in %s" % path)
+    arrays = any_reflection_file(file_name=path).as_miller_arrays(
+        crystal_symmetry=crystal_symmetry, force_symmetry=True)
 
-    I = intensities[0]
+    def block(a):
+        return a.info().label_string().split(",")[0]
+
+    obs = [a for a in arrays
+           if a.is_xray_intensity_array() or a.is_xray_amplitude_array()]
+    if not obs:
+        raise SystemExit("no intensity or amplitude array in %s" % path)
+    first = block(obs[0])
+    in_block = [a for a in obs if block(a) == first]
+    intensities = [a for a in in_block if a.is_xray_intensity_array()]
+    I_or_F = intensities[0] if intensities else in_block[0]
+    if len({block(a) for a in obs}) > 1:
+        print("%s holds %d data blocks; using the first with observations, "
+              "%s" % (path, len({block(a) for a in arrays}), first), file=log)
+    if I_or_F.space_group_info() is None:
+        raise SystemExit("%s carries no space group; pass the model's" % path)
+
     with contextlib.redirect_stdout(io.StringIO()):
-        F = I.merge_equivalents().array().average_bijvoet_mates()
-        F = F.french_wilson(log=None)
+        F = I_or_F.merge_equivalents().array().average_bijvoet_mates()
+        if F.is_xray_intensity_array():
+            F = F.french_wilson(log=None)
     if d_min is not None:
         F = F.resolution_filter(d_min=d_min)
 
+    flags = [a for a in arrays if block(a) == first
+             and ("r_free_flag" in a.info().label_string()
+                  or "status" in a.info().label_string())]
+    free_mask = np.zeros(F.size(), dtype=bool)
     if flags:
-        free = flags[0].merge_equivalents().array().average_bijvoet_mates()
+        raw = flags[0]
+        if isinstance(raw.data(), flex.std_string):
+            free = raw.customized_copy(
+                data=flex.bool([v == "f" for v in raw.data()]))
+            free = free.select(flex.bool([v != "x" for v in raw.data()]))
+        else:
+            test_value = get_r_free_flags_scores(
+                miller_arrays=[raw], test_flag_value=None).test_flag_values[0]
+            free = raw.customized_copy(data=(raw.data() == test_value))
+        free = free.merge_equivalents().array().average_bijvoet_mates()
         F, free = F.common_sets(free)
-        free_mask = np.array(free.data()) == 0
+        free_mask = np.array(free.data(), dtype=bool)
     else:
         print("no R-free flags found: R-free will not be reported", file=log)
-        free_mask = np.zeros(F.size(), dtype=bool)
 
     # (0,0,0) carries no measurable amplitude and would sit alone in the
     # lowest-resolution shell with an infinite d.
@@ -538,12 +579,14 @@ def mmtbx_fit(pdb, cif, d_min=None, isotropic=False):
     from cctbx.array_family import flex
     from iotbx.pdb import hierarchy
 
-    F_obs, free_np = read_observations(cif, d_min=d_min, log=_io.StringIO())
+    xrs = hierarchy.input(
+        file_name=pdb, sort_atoms=False).input.xray_structure_simple()
+    F_obs, free_np = read_observations(
+        cif, d_min=d_min, crystal_symmetry=xrs.crystal_symmetry(),
+        log=_io.StringIO())
     free_flags = F_obs.customized_copy(
         data=flex.bool(free_np.tolist())).set_observation_type(None)
 
-    xrs = hierarchy.input(
-        file_name=pdb, sort_atoms=False).input.xray_structure_simple()
     if isotropic:
         xrs = xrs.deep_copy_scatterers()
         xrs.convert_to_isotropic()
@@ -700,7 +743,10 @@ def run(args):
     print("bulk solvent against deposited amplitudes")
     print("=" * 78)
 
-    F_obs_array, free_np = read_observations(args.cif, d_min=args.d_min)
+    xrs, elements, b_per_atom, occ, frac, n_aniso, u_cart, is_aniso = \
+        read_model(args.pdb)
+    F_obs_array, free_np = read_observations(
+        args.cif, d_min=args.d_min, crystal_symmetry=xrs.crystal_symmetry())
     d_np = np.array(F_obs_array.d_spacings().data())
     hkl_np = np.array(F_obs_array.indices())
     fobs_np = np.array(F_obs_array.data())
@@ -708,8 +754,6 @@ def run(args):
           % (args.cif, len(fobs_np), d_np.max(), d_np.min(), free_np.sum(),
              100.0 * free_np.mean()))
 
-    xrs, elements, b_per_atom, occ, frac, n_aniso, u_cart, is_aniso = \
-        read_model(args.pdb)
     cell = xrs.unit_cell().parameters()
     d_min_grid = args.d_min if args.d_min is not None else float(d_np.min())
     grid = adjust_grid_for_symmetry(

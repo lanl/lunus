@@ -493,8 +493,10 @@ comparable.
   the deposited structure factors and runs the same fit, next to
   `mmtbx.f_model` on the same amplitudes and free set, so the comparison
   below can be repeated on a crystal of your choosing without hand-wiring
-  the downloads. Deposited `.pdb` files with no R-free flags (4WOR) report
-  R-work only.
+  the downloads. It reads the free set from either encoding the archive
+  uses, `pdbx_r_free_flag` integers or `_refln.status` strings, and takes the
+  refinement data from the first block of a multi-block file (1VME deposits
+  its unmerged per-dataset intensities alongside, without a space group).
 
   What it holds, and the reading path, verified:
 

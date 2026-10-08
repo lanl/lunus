@@ -151,10 +151,11 @@ def main():
                      r["b_sol"]))
         n_work, n_free = r["n_work"], r["n_free"]
 
-    print("\n%s: %d work, %d free reflections%s, %s ADPs"
+    print("\n%s: %d work, %d free reflections%s, %s"
           % (args.pdb_id.upper(), n_work, n_free,
              "" if args.d_min is None else " to %.2f A" % args.d_min,
-             "anisotropic" if args.aniso_adp else "isotropic"))
+             "ADPs as deposited" if args.aniso_adp
+             else "ADPs flattened to isotropic"))
     print("  %-20s %8s %8s %8s %8s" % ("", "R-work", "R-free", "k_sol", "b_sol"))
     for name, rw, rf, ks, bs in rows:
         print("  %-20s %8.4f %8s %8s %8s"
