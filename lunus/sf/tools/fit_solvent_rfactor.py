@@ -191,6 +191,26 @@ def read_model(path, log=sys.stdout):
                          [c[3], c[1], c[5]],
                          [c[4], c[5], c[2]]]
 
+    # A deposited ANISOU is not always positive definite (7P6M has 7 atoms
+    # with a slightly negative eigenvalue). The real-space kernel cannot
+    # place a Gaussian that grows along one axis, and raises; cctbx just
+    # evaluates the reciprocal-space Debye-Waller factor. Clamp the offending
+    # eigenvalues to a small floor -- a change far below what the data can
+    # see -- and say how many atoms it touched.
+    U_FLOOR = 1e-3  # A^2, B ~ 0.08
+    if is_aniso.any():
+        w, v = np.linalg.eigh(u_cart[is_aniso])
+        bad = (w < U_FLOOR).any(axis=1)
+        if bad.any():
+            w_min = float(w[bad].min())
+            w = np.maximum(w, U_FLOOR)
+            fixed = np.einsum("nij,nj,nkj->nik", v, w, v)
+            idx = np.flatnonzero(is_aniso)[bad]
+            u_cart[idx] = fixed[bad]
+            print("%d ANISOU tensor(s) not positive definite; eigenvalues "
+                  "clamped to %.0e A^2 (lowest was %.4f)"
+                  % (int(bad.sum()), U_FLOOR, w_min), file=log)
+
     n_aniso = int(is_aniso.sum())
     xrs.convert_to_isotropic()
 
