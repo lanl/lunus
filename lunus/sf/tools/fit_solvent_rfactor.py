@@ -68,49 +68,90 @@ import torch
 
 # ---------------------------------------------------------------- observations
 
-def read_observations(path, d_min=None, log=sys.stdout):
+def read_observations(path, d_min=None, crystal_symmetry=None, log=sys.stdout):
     """
     Deposited structure factors -> (miller_array of F, free-set boolean mask).
 
     The reading path here is verified and fiddly enough to be worth spelling
-    out, because three of its four steps are easy to skip and none of them
-    fails loudly if you do:
+    out, because most of its steps are easy to skip and none of them fails
+    loudly if you do:
 
-      1. The deposited data are INTENSITIES, not amplitudes, and they are
-         ANOMALOUS -- 142,372 Bijvoet-separate observations with sigmas.
-      2. merge_equivalents() then average_bijvoet_mates() reduces that to one
-         observation per unique reflection.
-      3. french_wilson() converts I to F properly, i.e. without simply
-         discarding the negative intensities that a weak reflection legitimately
-         produces. It rejects a couple of hundred outright and is chatty about
-         it on stdout even with log=None, hence the redirect.
-      4. The R-free flags are NOT boolean. They are CCP4-convention bins 0-19,
-         and the test set is bin 0 -- 3,716 reflections, 5.0%, matching the
-         5.010% in the deposited REMARK 3. Reading the column as a boolean
-         would silently put 95% of the data in the test set.
+      1. A deposited file can hold SEVERAL data blocks. 1VME has six: the
+         merged amplitudes refinement used, then five blocks of unmerged
+         per-dataset intensities that carry a cell but no space group. The
+         refinement data is the FIRST block holding an observation array;
+         taking "the first intensity array" instead picked an unmerged
+         dataset and fell over on its missing symmetry.
+      2. The observations may be INTENSITIES (7FPV: anomalous, 142,372
+         Bijvoet-separate, with sigmas) or AMPLITUDES (1VME). Intensities go
+         through french_wilson(), which converts I to F properly, i.e.
+         without simply discarding the negative intensities a weak reflection
+         legitimately produces; it rejects a couple of hundred and is chatty
+         on stdout even with log=None, hence the redirect. Amplitudes are
+         used as they are. Either way merge_equivalents() then
+         average_bijvoet_mates() reduces to one observation per unique
+         reflection.
+      3. A block without symmetry takes it from the MODEL (crystal_symmetry),
+         which is what every refinement program does.
+      4. The R-free set is encoded one of two ways. _refln.status is a string
+         per reflection, 'f' for free, 'o' for work, 'x' for unobserved.
+         pdbx_r_free_flag is an integer whose convention varies: 7FPV uses
+         CCP4 bins 0-19 with the test set in bin 0 (3,716 reflections, 5.0%,
+         matching the 5.010% in its REMARK 3); other entries use 0/1 with
+         either value meaning free. cctbx's own scorer decides which value is
+         the test set, since reading the column as a boolean would silently
+         put 95% of 7FPV in the test set.
     """
+    from cctbx.array_family import flex
     from iotbx.reflection_file_reader import any_reflection_file
+    from iotbx.reflection_file_utils import get_r_free_flags_scores
 
-    arrays = any_reflection_file(file_name=path).as_miller_arrays()
-    intensities = [a for a in arrays if a.is_xray_intensity_array()]
-    flags = [a for a in arrays if "r_free_flag" in a.info().label_string()]
-    if not intensities:
-        raise SystemExit("no intensity array in %s" % path)
+    arrays = any_reflection_file(file_name=path).as_miller_arrays(
+        crystal_symmetry=crystal_symmetry, force_symmetry=True)
 
-    I = intensities[0]
+    def block(a):
+        return a.info().label_string().split(",")[0]
+
+    obs = [a for a in arrays
+           if a.is_xray_intensity_array() or a.is_xray_amplitude_array()]
+    if not obs:
+        raise SystemExit("no intensity or amplitude array in %s" % path)
+    first = block(obs[0])
+    in_block = [a for a in obs if block(a) == first]
+    intensities = [a for a in in_block if a.is_xray_intensity_array()]
+    I_or_F = intensities[0] if intensities else in_block[0]
+    if len({block(a) for a in obs}) > 1:
+        print("%s holds %d data blocks; using the first with observations, "
+              "%s" % (path, len({block(a) for a in arrays}), first), file=log)
+    if I_or_F.space_group_info() is None:
+        raise SystemExit("%s carries no space group; pass the model's" % path)
+
     with contextlib.redirect_stdout(io.StringIO()):
-        F = I.merge_equivalents().array().average_bijvoet_mates()
-        F = F.french_wilson(log=None)
+        F = I_or_F.merge_equivalents().array().average_bijvoet_mates()
+        if F.is_xray_intensity_array():
+            F = F.french_wilson(log=None)
     if d_min is not None:
         F = F.resolution_filter(d_min=d_min)
 
+    flags = [a for a in arrays if block(a) == first
+             and ("r_free_flag" in a.info().label_string()
+                  or "status" in a.info().label_string())]
+    free_mask = np.zeros(F.size(), dtype=bool)
     if flags:
-        free = flags[0].merge_equivalents().array().average_bijvoet_mates()
+        raw = flags[0]
+        if isinstance(raw.data(), flex.std_string):
+            free = raw.customized_copy(
+                data=flex.bool([v == "f" for v in raw.data()]))
+            free = free.select(flex.bool([v != "x" for v in raw.data()]))
+        else:
+            test_value = get_r_free_flags_scores(
+                miller_arrays=[raw], test_flag_value=None).test_flag_values[0]
+            free = raw.customized_copy(data=(raw.data() == test_value))
+        free = free.merge_equivalents().array().average_bijvoet_mates()
         F, free = F.common_sets(free)
-        free_mask = np.array(free.data()) == 0
+        free_mask = np.array(free.data(), dtype=bool)
     else:
         print("no R-free flags found: R-free will not be reported", file=log)
-        free_mask = np.zeros(F.size(), dtype=bool)
 
     # (0,0,0) carries no measurable amplitude and would sit alone in the
     # lowest-resolution shell with an infinite d.
@@ -150,6 +191,26 @@ def read_model(path, log=sys.stdout):
                          [c[3], c[1], c[5]],
                          [c[4], c[5], c[2]]]
 
+    # A deposited ANISOU is not always positive definite (7P6M has 7 atoms
+    # with a slightly negative eigenvalue). The real-space kernel cannot
+    # place a Gaussian that grows along one axis, and raises; cctbx just
+    # evaluates the reciprocal-space Debye-Waller factor. Clamp the offending
+    # eigenvalues to a small floor -- a change far below what the data can
+    # see -- and say how many atoms it touched.
+    U_FLOOR = 1e-3  # A^2, B ~ 0.08
+    if is_aniso.any():
+        w, v = np.linalg.eigh(u_cart[is_aniso])
+        bad = (w < U_FLOOR).any(axis=1)
+        if bad.any():
+            w_min = float(w[bad].min())
+            w = np.maximum(w, U_FLOOR)
+            fixed = np.einsum("nij,nj,nkj->nik", v, w, v)
+            idx = np.flatnonzero(is_aniso)[bad]
+            u_cart[idx] = fixed[bad]
+            print("%d ANISOU tensor(s) not positive definite; eigenvalues "
+                  "clamped to %.0e A^2 (lowest was %.4f)"
+                  % (int(bad.sum()), U_FLOOR, w_min), file=log)
+
     n_aniso = int(is_aniso.sum())
     xrs.convert_to_isotropic()
 
@@ -168,6 +229,36 @@ def read_model(path, log=sys.stdout):
     return xrs, elements, b_per_atom, occ, frac, n_aniso, u_cart, is_aniso
 
 
+def scattering_table(present, log=sys.stdout):
+    """IT92 coefficients for the scattering types cctbx actually assigned.
+
+    A deposited model is read with cctbx, which types a charged atom by its
+    ion -- 'O1-' for a carboxylate oxygen, 'Zn2+', 'Cl1-' -- and the default
+    IT92_COEFFS table knows only neutral elements, so 7TX0 raised KeyError
+    on 'O1-'. cctbx's own IT92 table carries the ions, and it is what
+    mmtbx.f_model scatters off, so taking the coefficients from there keeps
+    the two methods on identical form factors. A type cctbx has no entry
+    for ('N1+' is one) falls back to the neutral atom, which is what a
+    refinement program would do too, and says so.
+    """
+    import re
+
+    from lunus.sf.elements import it92_coefficients
+
+    table, fallback = {}, []
+    for sym in present:
+        try:
+            table[sym] = it92_coefficients([sym], source="cctbx")[sym]
+        except (RuntimeError, ValueError):
+            neutral = re.sub(r"[0-9]*[+-]$", "", sym)
+            table[sym] = it92_coefficients([neutral], source="cctbx")[neutral]
+            fallback.append("%s -> %s" % (sym, neutral))
+    if fallback:
+        print("no IT92 entry for charged type(s); using the neutral atom: %s"
+              % ", ".join(fallback), file=log)
+    return table
+
+
 def build_density(xrs, elements, b_per_atom, occ, frac, grid, device, dtype,
                   expand_symmetry, log=sys.stdout, u_cart=None,
                   is_aniso=None, cutoff=0.01):
@@ -181,7 +272,6 @@ def build_density(xrs, elements, b_per_atom, occ, frac, grid, device, dtype,
     """
     from lunus.sf.cell_utils import orth_matrix
     from lunus.sf.density_torch import splat_density
-    from lunus.sf.elements import IT92_COEFFS
     from lunus.sf.kernel_torch import (build_atom_kernels_aniso_torch,
                                        build_atom_kernels_torch)
     from lunus.sf.symmetry_torch import build_grid_ops_from_cctbx, symmetrize_sum
@@ -189,8 +279,9 @@ def build_density(xrs, elements, b_per_atom, occ, frac, grid, device, dtype,
     cell = xrs.unit_cell().parameters()
     M_np = orth_matrix(*cell)
     present = sorted(set(elements))
+    coeffs = scattering_table(present, log)
     atom_A, atom_lam, offsets, atom_r, taper_w, e2i = build_atom_kernels_torch(
-        elements, present, IT92_COEFFS, b_per_atom, 0.0, grid, M_np,
+        elements, present, coeffs, b_per_atom, 0.0, grid, M_np,
         cutoff=cutoff, device=device, dtype=dtype)
 
     atom_L6 = aniso_mask = None
@@ -201,7 +292,7 @@ def build_density(xrs, elements, b_per_atom, occ, frac, grid, device, dtype,
         # atom_lam and the dispatch mask distinguish them.
         atom_A, atom_L6, offsets, atom_r, taper_w, _ = \
             build_atom_kernels_aniso_torch(
-                elements, present, IT92_COEFFS, u_cart, 0.0, grid, M_np,
+                elements, present, coeffs, u_cart, 0.0, grid, M_np,
                 cutoff=cutoff, device=device, dtype=dtype)
         aniso_mask = torch.tensor(is_aniso, device=device)
         print("anisotropic ADPs: %d of %d atoms on the tensor kernel"
@@ -487,6 +578,50 @@ def compare_masks(ours, gemmi_grid, F_ours, F_gemmi, d, log=sys.stdout):
     return agreement
 
 
+def mmtbx_fit(pdb, cif, d_min=None, isotropic=False):
+    """R-work, R-free, k_sol and b_sol from mmtbx.f_model on the deposited
+    model, with no lunus.sf code involved.
+
+    This is mmtbx's own bulk solvent and anisotropic scaling, run on the
+    coordinates and ADPs exactly as deposited -- no refinement -- so it is the
+    R that a correct solvent model and a correct scattering model reach on
+    this data. isotropic=True first flattens every ADP to its isotropic
+    equivalent, which is what lunus.sf computes without --aniso-adp.
+
+    The observations go through read_observations, i.e. the same French-Wilson
+    amplitudes and the same free set the torch fit sees, so the two methods
+    are compared on identical data.
+    """
+    import contextlib
+    import io as _io
+
+    import mmtbx.f_model
+    from cctbx.array_family import flex
+    from iotbx.pdb import hierarchy
+
+    xrs = hierarchy.input(
+        file_name=pdb, sort_atoms=False).input.xray_structure_simple()
+    F_obs, free_np = read_observations(
+        cif, d_min=d_min, crystal_symmetry=xrs.crystal_symmetry(),
+        log=_io.StringIO())
+    free_flags = F_obs.customized_copy(
+        data=flex.bool(free_np.tolist())).set_observation_type(None)
+
+    if isotropic:
+        xrs = xrs.deep_copy_scatterers()
+        xrs.convert_to_isotropic()
+
+    fmodel = mmtbx.f_model.manager(
+        f_obs=F_obs, r_free_flags=free_flags, xray_structure=xrs)
+    with contextlib.redirect_stdout(_io.StringIO()):
+        fmodel.update_all_scales(remove_outliers=False)
+    k_sol, b_sol = fmodel.k_sol_b_sol_from_k_mask()
+    return {"R-work": float(fmodel.r_work()), "R-free": float(fmodel.r_free()),
+            "k_sol": float(k_sol), "b_sol": float(b_sol),
+            "n_work": int(F_obs.size() - free_np.sum()),
+            "n_free": int(free_np.sum())}
+
+
 def external_reference(pdb, cif, d_min, log=sys.stdout):
     """What this dataset supports, measured without any lunus code.
 
@@ -497,38 +632,19 @@ def external_reference(pdb, cif, d_min, log=sys.stdout):
         target -- not the deposited R, which additionally had every coordinate
         and ADP refined against this data.
       * the same, on the model converted to isotropic ADPs, which is what
-        lunus.sf can represent. The gap between the two rows is the cost of the
-        missing anisotropic kernel, and on a 1.04 A structure it is large.
+        lunus.sf represents without --aniso-adp. The gap between the two rows
+        is the cost of the anisotropic kernel being switched off, and on a
+        1.04 A structure it is large.
     """
-    import contextlib
-    import io as _io
-
-    import mmtbx.f_model
-    from cctbx.array_family import flex
-    from iotbx.pdb import hierarchy
-
-    F_obs, free_np = read_observations(cif, d_min=d_min, log=_io.StringIO())
-    free_flags = F_obs.customized_copy(
-        data=flex.bool(free_np.tolist())).set_observation_type(None)
-
-    xrs_aniso = hierarchy.input(
-        file_name=pdb, sort_atoms=False).input.xray_structure_simple()
-    xrs_iso = xrs_aniso.deep_copy_scatterers()
-    xrs_iso.convert_to_isotropic()
-
     print("\nexternal reference (cctbx/mmtbx; no lunus.sf code involved)",
           file=log)
     print("  %-34s %8s %8s %8s %8s"
           % ("", "R-work", "R-free", "k_sol", "b_sol"), file=log)
-    for name, xrs in (("deposited model, anisotropic ADPs", xrs_aniso),
-                      ("same model, isotropic ADPs", xrs_iso)):
-        fmodel = mmtbx.f_model.manager(
-            f_obs=F_obs, r_free_flags=free_flags, xray_structure=xrs)
-        with contextlib.redirect_stdout(_io.StringIO()):
-            fmodel.update_all_scales(remove_outliers=False)
-        k_sol, b_sol = fmodel.k_sol_b_sol_from_k_mask()
+    for name, isotropic in (("deposited model, anisotropic ADPs", False),
+                            ("same model, isotropic ADPs", True)):
+        r = mmtbx_fit(pdb, cif, d_min, isotropic=isotropic)
         print("  %-34s %8.4f %8.4f %8.3f %8.1f"
-              % (name, fmodel.r_work(), fmodel.r_free(), k_sol, b_sol),
+              % (name, r["R-work"], r["R-free"], r["k_sol"], r["b_sol"]),
               file=log)
     print("  Which row is the target depends on --aniso-adp: without it the",
           file=log)
@@ -574,7 +690,7 @@ def shell_table(d, F_obs, model_no_solvent, model_solvent, work, free,
                  100.0 * float(solvent_share[sel].mean())), file=log)
 
 
-def main():
+def build_parser():
     p = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -622,8 +738,14 @@ def main():
     p.add_argument("--no-expand-symmetry", action="store_true",
                    help="the model already contains every symmetry copy")
     p.add_argument("--shells", type=int, default=10)
-    args = p.parse_args()
+    return p
 
+
+def run(args):
+    """The whole fit, from a parsed namespace. Returns the overall numbers
+    (R-work/R-free with and without solvent, k_sol, b_sol, k_overall) as a
+    dict so that tools/pdb_rfactor.py can tabulate them; everything else is
+    printed as it goes."""
     from lunus.sf.cell_utils import grid_shape_for_resolution
     from lunus.sf.solvent_torch import (
         MASK_BLUR_DEFAULT, calibrate_cutoff, f_solvent, mask_occupancy,
@@ -641,7 +763,10 @@ def main():
     print("bulk solvent against deposited amplitudes")
     print("=" * 78)
 
-    F_obs_array, free_np = read_observations(args.cif, d_min=args.d_min)
+    xrs, elements, b_per_atom, occ, frac, n_aniso, u_cart, is_aniso = \
+        read_model(args.pdb)
+    F_obs_array, free_np = read_observations(
+        args.cif, d_min=args.d_min, crystal_symmetry=xrs.crystal_symmetry())
     d_np = np.array(F_obs_array.d_spacings().data())
     hkl_np = np.array(F_obs_array.indices())
     fobs_np = np.array(F_obs_array.data())
@@ -649,8 +774,6 @@ def main():
           % (args.cif, len(fobs_np), d_np.max(), d_np.min(), free_np.sum(),
              100.0 * free_np.mean()))
 
-    xrs, elements, b_per_atom, occ, frac, n_aniso, u_cart, is_aniso = \
-        read_model(args.pdb)
     cell = xrs.unit_cell().parameters()
     d_min_grid = args.d_min if args.d_min is not None else float(d_np.min())
     grid = adjust_grid_for_symmetry(
@@ -758,10 +881,15 @@ def main():
           % ("conventional", "-", "0.35 / 46"))
 
     print("\noverall")
+    result = {"k_sol": float(fit1["k_sol"]), "b_sol": float(fit1["b_sol"]),
+              "k_overall": float(torch.exp(fit1["log_k"])),
+              "n_work": int(work.sum()), "n_free": int(free_np.sum())}
     for name, sel in (("R-work", work), ("R-free", free_np)):
         if sel.sum() < 2:
+            result[name + " no solvent"] = result[name] = float("nan")
             continue
         r0, r1 = r_factor(F_obs[sel], m0[sel]), r_factor(F_obs[sel], m1[sel])
+        result[name + " no solvent"], result[name] = r0, r1
         print("  %-8s no solvent %.4f   with solvent %.4f   change %+.4f (%+.1f%%)"
               % (name, r0, r1, r1 - r0, 100.0 * (r1 - r0) / r0))
 
@@ -814,6 +942,11 @@ def main():
         print("    u_aniso code path rather than a modelling result.")
     print("\n  The diagnostic quantity is the CHANGE from solvent and where it")
     print("  falls, not the absolute R. See docs/solvent-design.md, Validation.")
+    return result
+
+
+def main():
+    run(build_parser().parse_args())
 
 
 if __name__ == "__main__":

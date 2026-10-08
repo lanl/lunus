@@ -329,11 +329,18 @@ Implemented: `precalculate_density_aniso[_batch]` in `kernel.py`,
 and the conventions are pinned in `tests/test_adp_aniso.py`.
 
 **What it is worth**, which is why it was done: on 7FPV against deposited
-amplitudes, `tools/fit_solvent_rfactor.py` reaches **R-work 0.1322, R-free
-0.1528** with anisotropic ADPs against 0.1810 / 0.1947 with their isotropic
-equivalents. mmtbx on the same model and data reaches 0.1298 / 0.1510, so
-this closes a 0.049 gap to 0.0024. It was the largest single error in the
-pipeline's agreement with experimental data.
+amplitudes, `tools/fit_solvent_rfactor.py --aniso-adp --aniso` reaches
+**R-work 0.1322, R-free 0.1528** with anisotropic ADPs against 0.1810 / 0.1947
+with their isotropic equivalents. mmtbx on the same model and data reaches
+0.1298 / 0.1510, so this closes a 0.049 gap to 0.0024. It was the largest
+single error in the pipeline's agreement with experimental data.
+
+Both numbers need `--aniso`, the anisotropic overall scale tensor, and not
+as a refinement: with anisotropic ADPs and a single isotropic overall B the
+same model fits at **0.2060**, worse than the isotropic-ADP result. mmtbx
+scales anisotropically too, which is why `tools/pdb_rfactor.py` passes
+`--aniso` by default. Re-measured 2026-10-08 at 0.1312 / 0.1522, the
+density cutoff having moved from 0.01 to 1e-4 in between.
 
 **What it costs**: 2.37x on the splat for 7FPV as deposited, measured in situ
 by `tools/bench_aniso_splat.py`. Note that is close to the all-anisotropic

@@ -35,6 +35,10 @@ lunus/sf/examples/compare_gemmi/*.mtz
 # sigmas and R-free flags); the .mtz carries map coefficients derived from
 # them, which the cif also has as pdbx_FWT/PHWT.
 !lunus/sf/examples/compare_gemmi/7FPV_map_coeffs.mtz
+# ...and tools/pdb_rfactor.py downloads <ID>.pdb and <ID>-sf.cif into
+# whatever directory it is run from, which for other entries is scratch.
+lunus/sf/examples/compare_gemmi/*-sf.cif
+!lunus/sf/examples/compare_gemmi/7FPV-sf.cif
 lunus/sf/examples/compare_gemmi/*.hkl
 lunus/sf/examples/compare_gemmi/*.npy
 lunus/sf/examples/compare_gemmi/*.ndx
