@@ -73,16 +73,17 @@ no cutoff, no taper -- which is the realistic case and includes the
 taper's forward-model error in the residual. Run both and read them
 against each other.
 
-Which atoms move. --free takes a cctbx atom selection ("protein",
-"protein and not element H", default "all"): only those atoms are
-displaced, sampled for finite differences, walked and refined, while every
-atom contributes density. That is the realistic parameterization for an MD
-box -- 51,690 of the 135,834 atoms in examples/compare_gemmi/top_bfac.pdb.gz
-are water, whose positions Bragg amplitudes do not determine -- and it is
-also the right cost test, since the waters still have to be placed on the
-grid at every evaluation. For that system use --target self: direct
-summation over 135k atoms is not practical, and the 1e-4 model was exact on
-7FPV anyway.
+Which atoms exist, and which move. Both take a cctbx atom selection.
+--select (default "all") keeps only those atoms in the model at all;
+--free (default "all") chooses, among the atoms kept, the ones that are
+displaced, sampled for finite differences, walked and refined, while the
+rest contribute density and stay fixed. For an MD box such as
+examples/compare_gemmi/top_bfac.pdb.gz, 51,690 of whose 135,834 atoms are
+water, the sensible run is --select protein --free "not element H": the
+waters are gone (Bragg amplitudes do not determine their positions, and
+the production pipeline models solvent with the bulk mask), the hydrogens
+ride. For that system use --target self: direct summation over 77k atoms
+is not practical, and the 1e-4 model was exact on 7FPV anyway.
 
 Precision. On CUDA the atomic scatter is not bit-reproducible (4e-5
 relative on Icalc, docs/performance.md), which a finite difference at a
@@ -127,17 +128,29 @@ def width_label(w):
 
 
 # --------------------------------------------------------------------- setup
-def load_system(pdb, d_min, device, dtype, log, free="all"):
+def load_system(pdb, d_min, device, dtype, log, free="all", select="all"):
     """Everything about the crystal that does not depend on the taper or the
     cutoff: coordinates, B, occupancies, grid, symmetry operations, the full
-    reflection list to d_min, and which atoms are free to move."""
+    reflection list to d_min, which atoms exist and which are free to move."""
     from cctbx import miller
     from iotbx.pdb import hierarchy
 
     xrs, elements, b_per_atom, occ, frac, _, _, _ = read_model(pdb, log)
-    h = hierarchy.input(file_name=pdb, sort_atoms=False).hierarchy
-    free_np = np.array(h.atom_selection_cache().selection(free), dtype=bool)
-    assert len(free_np) == len(elements)
+    cache = hierarchy.input(file_name=pdb, sort_atoms=False).hierarchy \
+        .atom_selection_cache()
+    keep_np = np.array(cache.selection(select), dtype=bool)
+    free_np = np.array(cache.selection(free), dtype=bool)
+    assert len(keep_np) == len(elements) == len(free_np)
+    if select != "all":
+        if not keep_np.any():
+            raise SystemExit("--select %r keeps no atoms" % select)
+        from scitbx.array_family import flex
+        xrs = xrs.select(flex.bool(keep_np.tolist()))
+        elements = [e for e, k in zip(elements, keep_np) if k]
+        b_per_atom, occ, frac = b_per_atom[keep_np], occ[keep_np], frac[keep_np]
+        free_np = free_np[keep_np]
+        print("%d of %d atoms kept (--select %r)"
+              % (keep_np.sum(), len(keep_np), select), file=log)
     if not free_np.any():
         raise SystemExit("--free %r selects no atoms" % free)
     print("%d of %d atoms free to move (--free %r)"
@@ -457,6 +470,9 @@ def build_parser():
     p.add_argument("--displace", type=float, default=0.3,
                    help="RMS displacement of the starting structure, A")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--select", default="all",
+                   help="cctbx atom selection of the atoms that EXIST in the "
+                        "model; everything else is dropped (e.g. 'protein')")
     p.add_argument("--free", default="all",
                    help="cctbx atom selection of the atoms that move; the rest "
                         "contribute density but are held fixed (e.g. "
@@ -521,7 +537,8 @@ def main():
     torch.manual_seed(args.seed)
     rng = np.random.default_rng(args.seed)
 
-    s = load_system(args.pdb, args.d_min, args.device, dtype, log, free=args.free)
+    s = load_system(args.pdb, args.d_min, args.device, dtype, log,
+                    free=args.free, select=args.select)
     n_atoms = s["frac0"].shape[0]
     free_idx = np.flatnonzero(s["free_np"])
     n_free = len(free_idx)
