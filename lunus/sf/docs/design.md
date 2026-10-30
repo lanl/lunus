@@ -172,7 +172,13 @@ Twelve times the atoms means boundary crossings twelve times as frequent
 per step, and the hard cutoff's coarse stage no longer stalls late enough
 to be rescued: it hands over eight times worse than the tapered one and
 seventy fine iterations do not recover. Both tapered widths match
-one-stage. The 5% saving is inside the bound above.
+one-stage. The 5% saving is inside the bound above, and here the bound is
+the r³ one: the radii are 3.34 and 4.01 Å (this model's random
+per-residue B of 10–100 Å² makes them larger than 7FPV's), r³ predicts a
+cost ratio of 0.58 and the measured seconds per evaluation, 0.123 against
+0.187, give 0.66, so the density step does dominate this frame. With 36 of
+∼110 evaluations coarse that caps the saving at 11%, and the two-stage run
+spent seven more evaluations in total than one-stage.
 
 So the recipe is sound but minor: the coarse model takes as many
 iterations as the fine one, and 1e-3 against 1e-4 is at most a factor of
