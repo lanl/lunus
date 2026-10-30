@@ -1,18 +1,18 @@
 """
-Validates the splat -> FFT -> extract pipeline against an independent,
+Validates the density -> FFT -> extract pipeline against an independent,
 closed-form single-atom structure factor, using plain NumPy (executable
 in this sandbox, unlike PyTorch). This is the reference the PyTorch
 version in density_torch.py / structure_factor_torch.py is a direct
 translation of.
 
 Two checks:
-  1. VALUE check: F(hkl) from splat+FFT vs. the direct analytic
+  1. VALUE check: F(hkl) from density+FFT vs. the direct analytic
      single-atom formula F(hkl) = f(s) * exp(-B*s^2) * exp(-2 pi i h.x)
-  2. GRADIENT check: finite-difference dF/dx from the splat+FFT pipeline
+  2. GRADIENT check: finite-difference dF/dx from the density+FFT pipeline
      vs. finite-difference dF/dx from the closed-form analytic formula.
      These are two independently-derived expressions for the same
      physical quantity -- agreement here is strong evidence that the
-     splat+FFT pipeline (and therefore its PyTorch autograd gradient,
+     density+FFT pipeline (and therefore its PyTorch autograd gradient,
      since autograd differentiates the identical arithmetic) is correct.
 """
 
@@ -31,7 +31,7 @@ VALUE_RTOL = 1e-4
 GRAD_RTOL = 1e-3
 
 
-def splat_and_fft(pos_frac, A, lam, radius, grid_shape, M, cell_volume):
+def density_and_fft(pos_frac, A, lam, radius, grid_shape, M, cell_volume):
     """One atom, occupancy 1. Returns the full (Nu,Nv,Nw) F(hkl) grid
     (conjugated, volume-scaled ifft), matching xtraj.py's gemmi-engine
     convention exactly."""
@@ -106,16 +106,16 @@ def system():
 
 
 def test_values_match_analytic(system):
-    """splat+FFT F(hkl) vs the closed-form single-atom formula."""
+    """density+FFT F(hkl) vs the closed-form single-atom formula."""
     s = system
     Nu, Nv, Nw = s["grid_shape"]
 
-    Fgrid = splat_and_fft(s["pos_frac"], s["A"], s["lam"], s["radius"],
+    Fgrid = density_and_fft(s["pos_frac"], s["A"], s["lam"], s["radius"],
                           s["grid_shape"], s["M"], s["cell_volume"])
     F_num = np.array([Fgrid[h % Nu, k % Nv, l % Nw] for h, k, l in s["hkl"]])
     F_ana = analytic_single_atom_F(s["coef9"], s["b_iso"], s["pos_frac"], s["hkl"], s["M"])
 
-    print("\nhkl            F_splat_fft                  F_analytic                   rel.err")
+    print("\nhkl            F_density_fft                  F_analytic                   rel.err")
     for (h, k, l), fn, fa in zip(s["hkl"], F_num, F_ana):
         print(f"{h:3d}{k:3d}{l:3d}   {fn.real:8.4f}{fn.imag:+8.4f}i   "
               f"{fa.real:8.4f}{fa.imag:+8.4f}i   {abs(fn - fa) / max(abs(fa), 1e-8):.2e}")
@@ -125,12 +125,12 @@ def test_values_match_analytic(system):
     np.testing.assert_allclose(
         F_num, F_ana,
         rtol=VALUE_RTOL, atol=VALUE_RTOL * np.max(np.abs(F_ana)),
-        err_msg="splat+FFT does not reproduce the analytic single-atom F(hkl)",
+        err_msg="density+FFT does not reproduce the analytic single-atom F(hkl)",
     )
 
 
 def test_gradients_match_analytic(system):
-    """Finite-difference dF/dx from splat+FFT vs from the analytic formula.
+    """Finite-difference dF/dx from density+FFT vs from the analytic formula.
 
     Two independently-derived expressions for the same quantity, so agreement
     is strong evidence the pipeline (and hence its autograd gradient, which
@@ -148,12 +148,12 @@ def test_gradients_match_analytic(system):
     Nu, Nv, Nw = s["grid_shape"]
     eps = 1e-5
 
-    def dF_splat(pos, h, k, l):
+    def dF_density(pos, h, k, l):
         pos_p = pos.copy(); pos_p[0] += eps
         pos_m = pos.copy(); pos_m[0] -= eps
         args = (s["A"], s["lam"], s["radius"], s["grid_shape"], s["M"], s["cell_volume"])
-        Fp = splat_and_fft(pos_p, *args)[h % Nu, k % Nv, l % Nw]
-        Fm = splat_and_fft(pos_m, *args)[h % Nu, k % Nv, l % Nw]
+        Fp = density_and_fft(pos_p, *args)[h % Nu, k % Nv, l % Nw]
+        Fm = density_and_fft(pos_m, *args)[h % Nu, k % Nv, l % Nw]
         return (Fp - Fm) / (2 * eps)
 
     def dF_analytic(pos, hkl1):
@@ -166,11 +166,11 @@ def test_gradients_match_analytic(system):
     print("\nGradient check (finite difference, d F(hkl) / d frac_x):")
     checked, zero_rows, scale = [], [], 0.0
     for h, k, l in s["hkl"][:5]:
-        num = dF_splat(s["pos_frac"], h, k, l)
+        num = dF_density(s["pos_frac"], h, k, l)
         ana = dF_analytic(s["pos_frac"], np.array([[h, k, l]]))
         scale = max(scale, abs(ana))
         tag = "compared" if h != 0 else "h=0, reference is identically zero"
-        print(f"{h:3d}{k:3d}{l:3d}   dF_splat={num:10.3f}   dF_analytic={ana:10.3f}   ({tag})")
+        print(f"{h:3d}{k:3d}{l:3d}   dF_density={num:10.3f}   dF_analytic={ana:10.3f}   ({tag})")
         (checked if h != 0 else zero_rows).append((num, ana))
 
     assert checked, "no h != 0 reflections in the test set -- nothing was compared"
@@ -178,7 +178,7 @@ def test_gradients_match_analytic(system):
     ana_arr = np.array([c[1] for c in checked])
     np.testing.assert_allclose(
         num_arr, ana_arr, rtol=GRAD_RTOL, atol=GRAD_RTOL * scale,
-        err_msg="splat+FFT gradient does not match the analytic gradient",
+        err_msg="density+FFT gradient does not match the analytic gradient",
     )
 
     # h == 0: the reference is exactly zero, so require the computed value to

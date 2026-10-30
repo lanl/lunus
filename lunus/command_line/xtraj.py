@@ -334,7 +334,7 @@ if __name__=="__main__":
     d_max = float(args.pop(idx).split("=")[1])
 
 # gemmi_cutoff -- the atomic density below which an atom's contribution is
-# dropped when splatting, e/A^3. Badly named: despite "gemmi" it is handed to
+# dropped when placing density on the grid, e/A^3. Badly named: despite "gemmi" it is handed to
 # BOTH the gemmi calculator (calc.cutoff) and the torch kernel, so it sets the
 # truncation radius for either engine. fit_solvent_rfactor.py calls the same
 # quantity --density-cutoff, to distinguish it there from the solvent MASK
@@ -354,7 +354,7 @@ if __name__=="__main__":
 #                     conventional value; converged by 1e-4, 1e-5 adds nothing
 #                     (docs/solvent-design.md, "What the density cutoff costs")
 #
-# It is not free: 1.76x on the torch splat and 1.16-1.47x on gemmi's CPU
+# It is not free: 1.76x on the torch density calculation and 1.16-1.47x on gemmi's CPU
 # calculator, since the work goes as the cutoff radius cubed. Pass
 # gemmi_cutoff=0.01 to recover the old default and the numbers measured under
 # it.
@@ -698,8 +698,8 @@ if __name__=="__main__":
   else:
     torch_taper_width_override = float(args.pop(idx).split("=")[1])
 
-# torch.compile the density splat's inner blocks (default True). Fusing them
-# is worth ~2.9x on the splat -- the per-voxel work is memory-bound, so run
+# torch.compile the density calculation's inner blocks (default True). Fusing them
+# is worth ~2.9x on the density calculation -- the per-voxel work is memory-bound, so run
 # eagerly it costs one pass over an (n_atoms, n_voxels) array per elementary
 # operation, roughly twenty of them, where fused it is a couple.
 #
@@ -730,7 +730,7 @@ if __name__=="__main__":
 #   high     TF32 on NVIDIA tensor cores: ~10 bits of mantissa instead of 24
 #   medium   bfloat16: ~8 bits of mantissa
 #
-# The splat's inner product is a matmul, so this can matter on a GPU with
+# The density calculation's inner product is a matmul, so this can matter on a GPU with
 # tensor cores -- newer CUDA torch prints a startup hint recommending "high".
 #
 # It is OFF by default because it is a NUMERICS change, not a free speedup:
@@ -741,7 +741,7 @@ if __name__=="__main__":
 
 # Run under cProfile and print the hot functions at the end (default False).
 # Worth reaching for when the wall time is not where you expect: on a GPU the
-# splat can drop to a few percent of per-frame time, leaving the cost in
+# density calculation can drop to a few percent of per-frame time, leaving the cost in
 # host-side work that no torch tuning will touch.
 
   try:
@@ -756,14 +756,14 @@ if __name__=="__main__":
 #
 #   host    trajectory read, coords->numpy, set_sites_cart, xrs.select,
 #           sites_frac+occ, element idx, accumulate
-#   device  splat, symmetrize, fft+extract, the transfers, into cctbx
+#   device  density, symmetrize, fft+extract, the transfers, into cctbx
 #
 # plus the loop's wall time and the residual the phases do not account for.
 # The device half only applies to engine=torch; the host half is the same
 # code for every engine, so the report is printed whatever the engine.
 #
 # This exists because cProfile cannot answer the question. It charges per
-# PYTHON call, so the splat's ~90 batches/frame of eager torch ops look
+# PYTHON call, so the density calculation's ~90 batches/frame of eager torch ops look
 # enormous while the FFT, one call doing heavy GPU work, looks free. Worse,
 # CUDA kernels are asynchronous: without an explicit synchronize, a timer
 # measures queue submission rather than execution, and the cost lands on
@@ -779,19 +779,19 @@ if __name__=="__main__":
   else:
     torch_timing = args.pop(idx).split("=")[1] == "True"
 
-# Diagnostics for the splat's in-situ cost, which is ~4.6x what the same call
+# Diagnostics for the density calculation's in-situ cost, which is ~4.6x what the same call
 # costs repeated back-to-back on the same tensors (see lunus/sf/docs/performance.md).
 # The two differ in more than one way, so these separate them:
 #
-#   torch_splat_stats=True   count the work per frame -- atoms, chunks, and
+#   torch_density_stats=True   count the work per frame -- atoms, chunks, and
 #                            atom-voxel pairs both ideal and as actually
 #                            batched. Answers "more work or slower work?"
-#                            against lunus/sf/tools/bench_splat.py's pair count. Free.
-#   torch_reuse_grid=True    splat into ONE preallocated grid buffer for every
+#                            against lunus/sf/tools/bench_density.py's pair count. Free.
+#   torch_reuse_grid=True    place density into ONE preallocated grid buffer for every
 #                            frame instead of allocating a fresh one per call,
 #                            which is what the back-to-back repeat does.
 #   torch_free_early=True    drop the previous frame's density and F tensors
-#                            before the next splat, so the allocator is not
+#                            before the next density calculation, so the allocator is not
 #                            holding two grids while it runs.
 #
 # The last two are probes, so both default to False: the point is to compare
@@ -826,12 +826,21 @@ if __name__=="__main__":
   else:
     expand_symmetry = args.pop(idx).split("=")[1] == "True"
 
+  # Old spelling of the option, accepted with a notice.
   try:
     idx = [a.find("torch_splat_stats")==0 for a in args].index(True)
   except ValueError:
-    torch_splat_stats = False
+    pass
   else:
-    torch_splat_stats = args.pop(idx).split("=")[1] == "True"
+    print("torch_splat_stats= is deprecated; use torch_density_stats=")
+    args[idx] = args[idx].replace("torch_splat_stats", "torch_density_stats", 1)
+
+  try:
+    idx = [a.find("torch_density_stats")==0 for a in args].index(True)
+  except ValueError:
+    torch_density_stats = False
+  else:
+    torch_density_stats = args.pop(idx).split("=")[1] == "True"
 
   try:
     idx = [a.find("torch_reuse_grid")==0 for a in args].index(True)
@@ -853,7 +862,7 @@ if __name__=="__main__":
 #                            1 is a profiler warmup, so recording starts at
 #                            frame 2 and N=3 is usually enough. Rank 0 only.
 #
-# This is the instrument for the splat's rate, once work volume has been ruled
+# This is the instrument for the density calculation's rate, once work volume has been ruled
 # out: it separates one kernel running slower from the same kernels with gaps
 # between them from more kernels being launched, which no wall-clock timer can.
 # It perturbs what it measures, so the phase table from a profiled run is not a
@@ -896,10 +905,10 @@ if __name__=="__main__":
 # as much as a memory one: the measured CPU value keeps each working buffer
 # around 16 MB so it stays cache-resident, which beat both larger and smaller
 # values. That criterion is "one buffer fits in cache", so it does not transfer
-# to a GPU unchanged -- splat_density's docstring says to expect a GPU to want
+# to a GPU unchanged -- compute_density's docstring says to expect a GPU to want
 # more. Default "auto" sizes it to the device's own L2 and caps it against free
 # memory (lunus/sf/tune.py); an integer forces it. Re-tune a forced value with
-# lunus/sf/tools/bench_splat.py on a different machine.
+# lunus/sf/tools/bench_density.py on a different machine.
 
   try:
     idx = [a.find("torch_max_pairs_per_batch")==0 for a in args].index(True)
@@ -911,7 +920,7 @@ if __name__=="__main__":
 # torch threads per MPI rank on CPU (default 1, only applied when mpi_size > 1).
 # This is the single most important setting for multi-rank CPU throughput with
 # engine=torch: gemmi's density calculator is single-threaded and beats the
-# torch splat ~2.3x per core, so torch only wins by spreading over cores. Aim
+# torch density calculation ~2.3x per core, so torch only wins by spreading over cores. Aim
 # for mpi_size * torch_num_threads ~= physical cores -- e.g. 3 ranks x 6
 # threads rather than 18 ranks x 1 thread. Ignored for a single rank (torch
 # then uses its own default) and on GPU.
@@ -1093,10 +1102,10 @@ if __name__=="__main__":
     # differ by the frame count -- which is how a 10-frame comparison can show
     # an effect a 251-frame one cannot see.
     #
-    # ALWAYS recorded, where this used to be gated behind torch_splat_stats.
+    # ALWAYS recorded, where this used to be gated behind torch_density_stats.
     # It costs one float per phase per frame -- a few thousand for a long run
     # -- and without it the table reports only a mean, which is how a run whose
-    # steady-state splat was ~20 ms/frame reported 67.8: torch.compile spends
+    # steady-state density calculation was ~20 ms/frame reported 67.8: torch.compile spends
     # ~12 s on frame 0 and the mean spreads it over all 251. That is the very
     # failure this series exists to expose, so it should not need a flag.
     phase_series.setdefault(name, []).append(dt)
@@ -1114,8 +1123,8 @@ if __name__=="__main__":
 
   # Set by the torch setup below. Every other engine reads xrs frame by frame.
   torch_bypass_xrs = False
-  # Per-frame splat work counters, filled when torch_splat_stats=True.
-  torch_splat_stats_log = []
+  # Per-frame density-calculation work counters, filled when torch_density_stats=True.
+  torch_density_stats_log = []
   # torch.profiler handle, set by the torch setup when torch_profile_frames>0.
   torch_profiler = None
 
@@ -1130,11 +1139,11 @@ if __name__=="__main__":
     # figure moves with chunk= and is not comparable to the others without it.
     # The median column excludes frame 0, and exists because the mean does not
     # separate steady state from one-time cost. cuFFT builds its plan on the
-    # first transform and the splat carries its own warmup, so over few frames
+    # first transform and the density calculation carries its own warmup, so over few frames
     # the mean is inflated by roughly (one-time cost)/n_frames -- an effect
     # that shrinks as the run lengthens, which makes short and long runs of
     # the same configuration look like different machines. Measured on 10
-    # frames: splat mean 79.9 against median 66.9.
+    # frames: density mean 79.9 against median 66.9.
     have_series = bool(phase_series)
     header = "  {0:<22} {1:>10} {2:>12} {3:>8} {4:>7}"
     if have_series:
@@ -1169,17 +1178,17 @@ if __name__=="__main__":
     print("  Timers cover the frame loop only: setup, the MPI reduction and "
           "the output files are outside them.")
 
-    if torch_splat_stats_log:
-      # Compare pairs_actual against lunus/sf/tools/bench_splat.py's pair count on the same
-      # structure and grid. If they agree, the splat's in-situ cost is not
+    if torch_density_stats_log:
+      # Compare pairs_actual against lunus/sf/tools/bench_density.py's pair count on the same
+      # structure and grid. If they agree, the density calculation's in-situ cost is not
       # extra work and the difference is execution rate. pairs_actual /
       # pairs_ideal is the chunk padding, which is the one part of the work
       # volume that the coordinates can move.
-      ideal = [s["pairs_ideal"] for s in torch_splat_stats_log]
-      actual = [s["pairs_actual"] for s in torch_splat_stats_log]
-      chunks = [s["chunks"] for s in torch_splat_stats_log]
-      print("\n  splat work over {0} frames ({1:,} atoms):".format(
-        len(actual), torch_splat_stats_log[0]["atoms"]))
+      ideal = [s["pairs_ideal"] for s in torch_density_stats_log]
+      actual = [s["pairs_actual"] for s in torch_density_stats_log]
+      chunks = [s["chunks"] for s in torch_density_stats_log]
+      print("\n  density-calculation work over {0} frames ({1:,} atoms):".format(
+        len(actual), torch_density_stats_log[0]["atoms"]))
       print("    {0:<16} {1:>18} {2:>18}".format("", "min", "max"))
       for name, vals in (("pairs ideal", ideal), ("pairs actual", actual),
                          ("chunks", chunks)):
@@ -1188,7 +1197,7 @@ if __name__=="__main__":
         min(a / i for a, i in zip(actual, ideal)),
         max(a / i for a, i in zip(actual, ideal))))
 
-    series = phase_series.get("splat")
+    series = phase_series.get("density")
     if series and len(series) >= 4:
       # Frame 0 separately: it carries the one-time warmup, and any cost that
       # a setup-time change moves OUT of the loop shows up here and nowhere
@@ -1198,7 +1207,7 @@ if __name__=="__main__":
       rest = sorted(series[1:])
       chron = series[1:]
       k = max(1, len(chron) // 10)
-      print("\n  splat per frame (ms): frame 0 {0:.1f}, then min {1:.1f}, "
+      print("\n  density per frame (ms): frame 0 {0:.1f}, then min {1:.1f}, "
             "median {2:.1f}, max {3:.1f}".format(
               1e3 * first, 1e3 * rest[0], 1e3 * rest[len(rest) // 2],
               1e3 * rest[-1]))
@@ -1241,7 +1250,7 @@ if __name__=="__main__":
     from lunus.sf.cell_utils import orth_matrix, grid_shape_for_resolution, recommended_blur
     from lunus.sf.kernel_torch import build_element_kernels_torch, build_atom_kernels_torch
     from lunus.sf.structure_factor_torch import structure_factors_one_config, compute_fcalc
-    from lunus.sf.density_torch import splat_density
+    from lunus.sf.density_torch import compute_density
     from lunus.sf.symmetry_torch import (
       build_grid_ops_from_cctbx, adjust_grid_for_symmetry, symmetrize_sum,
     )
@@ -1263,9 +1272,9 @@ if __name__=="__main__":
     # exhaust the cgroup's CPU quota within ~12 ms of every 100 ms period, and
     # the kernel then freezes the whole process until the period boundary.
     #
-    # Measured here, 10 frames, CUDA, 104 threads on 3 CPUs: splat 287.9
+    # Measured here, 10 frames, CUDA, 104 threads on 3 CPUs: density 287.9
     # ms/frame median. With OMP_NUM_THREADS=2: 66.3 -- against 62.6 ms for the
-    # same work in lunus/sf/tools/bench_splat.py. The 4.6x "the splat is slow in the
+    # same work in lunus/sf/tools/bench_density.py. The 4.6x "the density calculation is slow in the
     # loop" mystery was this, start to finish. See lunus/sf/docs/performance.md.
     # The CFS QUOTA is the only thing that knows. nproc, os.cpu_count() and
     # os.sched_getaffinity() all report the host's cores -- 104 on the pod
@@ -1327,7 +1336,7 @@ if __name__=="__main__":
           if cpu_quota is not None and was > target:
             print("  Threads beyond the quota spin-wait, spend it faster than "
                   "useful work does, and get the whole process throttled -- "
-                  "measured 4.3x on the splat. This does NOT cover numpy/BLAS, "
+                  "measured 4.3x on the density calculation. This does NOT cover numpy/BLAS, "
                   "which reads the environment before this program starts: "
                   "export OMP_NUM_THREADS={0} as well.".format(target))
           elif cpu_quota is None:
@@ -1337,7 +1346,7 @@ if __name__=="__main__":
     if torch_device == "cpu" and mpi_size > 1:
       # Without this, EVERY rank's PyTorch process independently tries to
       # use all available cores for its own internal threading (the
-      # splat's elementwise math, index_add_, FFT) -- with mpi_size ranks
+      # density calculation's elementwise math, index_add_, FFT) -- with mpi_size ranks
       # doing that simultaneously, the result is severe CPU oversubscription
       # and contention, often making a multi-rank CPU run much SLOWER than
       # a single process, especially on CPU-limited/shared/containerized
@@ -1345,7 +1354,7 @@ if __name__=="__main__":
       #
       # Note on what to expect from multi-rank CPU runs with this engine:
       # gemmi's DensityCalculatorX is single-threaded (measured: 1.00 cores
-      # busy) and about 2.3x faster than the torch splat PER CORE -- 1.44 s
+      # busy) and about 2.3x faster than the torch density calculation PER CORE -- 1.44 s
       # against 3.37 s on the 135k-atom case. torch only wins on wall time by
       # spreading over cores (0.87 s on 6 threads), which one-thread-per-rank
       # denies it. Rebalancing does NOT rescue this: measured over 10 frames,
@@ -1377,11 +1386,11 @@ if __name__=="__main__":
     torch_cell_volume = xrs_sel.unit_cell().volume()
     torch_grid_shape = grid_shape_for_resolution(torch_a, torch_b_uc, torch_c, d_min, rate=1.5)
 
-    # SYMMETRY: match gemmi exactly -- splat only the atoms we were given,
+    # SYMMETRY: match gemmi exactly -- place density for only the atoms we were given,
     # then symmetry-expand the DENSITY GRID (gemmi's
     # put_model_density_on_grid() = add_model_density_to_grid() +
     # symmetrize_sum()). Expanding the density is far cheaper than expanding
-    # the ATOMS and re-splatting every symmetry copy, which is
+    # the ATOMS and re-placing density for every symmetry copy, which is
     # O(n_atoms * box_volume) Gaussian evaluations per copy; symmetrizing the
     # finished grid is O(n_grid) integer index arithmetic per operation, and
     # for signed-permutation operations (which is all of them for most space
@@ -1422,7 +1431,7 @@ if __name__=="__main__":
             "contents already; set True to expand an asymmetric unit, or to "
             "symmetry-average)")
       if not torch_grid_ops:
-        print("torch engine: P1 (or no non-identity ops) -- density used as splatted, "
+        print("torch engine: P1 (or no non-identity ops) -- density used as computed, "
               "no symmetry expansion, matching gemmi")
 
     if use_top_bfacs:
@@ -1434,8 +1443,8 @@ if __name__=="__main__":
       torch_b_per_atom_setup = torch_u_isos_setup * (8.0 * np.pi ** 2)  # U -> B, same as the gemmi branch
       torch_elements_per_atom_setup = [s.scattering_type for s in xrs_sel.scatterers()]
 
-      # THE FFT-ARTIFACT BLUR. Splatting a sharp atom onto a finite grid
-      # samples it badly; splatting a spread one and removing the spread in
+      # THE FFT-ARTIFACT BLUR. Placing a sharp atom onto a finite grid
+      # samples it badly; placing a spread one and removing the spread in
       # reciprocal space does not. Measured against exact direct summation at
       # 0.633 A spacing, B_iso = 2 with no blur gives R = 0.186 -- 37x this
       # pipeline's entire disagreement with gemmi -- and blur = 20 gives
@@ -1460,7 +1469,7 @@ if __name__=="__main__":
       if mpi_rank == 0:
         print("torch engine: use_top_bfacs=True, per-atom B range =",
               torch_b_per_atom_setup.min(), "-", torch_b_per_atom_setup.max(),
-              ", n_atoms (as splatted, before density symmetry expansion) =",
+              ", n_atoms (before density symmetry expansion) =",
               len(torch_elements_per_atom_setup),
               ", blur =", torch_blur_value)
     else:
@@ -1532,10 +1541,10 @@ if __name__=="__main__":
       print("torch engine: translational_fit=True, so the per-frame "
             "xray.structure round trip is kept")
 
-    # ---- splat probes (see the flag comments near the top) ---------------
+    # ---- density-placement probes (see the flag comments near the top) ---------------
     #
     # Bound before the loop so the free-early probe has something to drop on
-    # frame 0 and the reuse probe has a buffer to splat into.
+    # frame 0 and the reuse probe has a buffer to place density into.
     torch_density = None
     F_t = None
     torch_grid_buf = None
@@ -1545,12 +1554,12 @@ if __name__=="__main__":
         device=torch_device, dtype=torch_dtype,
       )
       if mpi_rank == 0:
-        print("torch engine: splatting into one reused %.1f MB grid buffer "
+        print("torch engine: placing density into one reused %.1f MB grid buffer "
               "rather than a fresh allocation per frame"
               % (torch_grid_buf.numel() * torch_grid_buf.element_size() / 1e6))
     if torch_free_early and mpi_rank == 0:
       print("torch engine: dropping the previous frame's density and F before "
-            "each splat")
+            "each density calculation")
 
     if torch_profile_frames > 0 and mpi_rank == 0:
       if profile:
@@ -2144,24 +2153,24 @@ EOF
           # script that actually backpropagates (see lunus/sf/examples/example_usage.py).
           with torch.no_grad():
             # Probe: with the previous frame's grid and F still alive, the
-            # allocator cannot hand the splat back the block it just used --
+            # allocator cannot hand the density calculation back the block it just used --
             # unlike the back-to-back repeat it is being compared against.
             if torch_free_early:
               torch_density = None
               F_t = None
-            splat_stats = {} if torch_splat_stats else None
-            with torch_phase("splat", torch_device):
-              torch_density = splat_density(
+            density_stats = {} if torch_density_stats else None
+            with torch_phase("density", torch_device):
+              torch_density = compute_density(
                 frac_t, element_idx_t, occ_t,
                 atom_A_t, atom_lam_t, torch_elem_offsets, atom_radius_ang_t,
                 torch_grid_shape, torch_orth_matrix, torch_taper_width,
                 max_atoms_per_batch=torch_max_atoms_per_batch,
                 compile_core=torch_compile,
-                out=torch_grid_buf, stats=splat_stats,
+                out=torch_grid_buf, stats=density_stats,
                 **torch_pairs_kwarg,
               )
-            if splat_stats is not None:
-              torch_splat_stats_log.append(splat_stats)
+            if density_stats is not None:
+              torch_density_stats_log.append(density_stats)
 
 
             # Symmetry-expand the density grid, exactly as gemmi's

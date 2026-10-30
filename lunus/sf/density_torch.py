@@ -1,5 +1,5 @@
 """
-Differentiable PyTorch atomic density splat, direct translation of the
+Differentiable PyTorch atomic density calculation, direct translation of the
 validated NumPy reference (validate_numpy.py / validate_multiatom.py),
 vectorized and grouped by element for large atom counts.
 
@@ -113,7 +113,7 @@ class ElementOffsets:
 
     Also caches the Cartesian offsets and their squared norms, which turn the
     per-atom-per-voxel distance into a single matrix multiply -- see
-    splat_density.
+    compute_density.
 
     Fields:
       offsets    (K,3) int32   grid-index offsets, sorted by |c_off|
@@ -183,7 +183,7 @@ def precompute_element_offsets(elem_radius_vox, elem_radius_ang, orth_matrix, gr
     """
     Call this ONCE per structure/unit-cell (e.g. in setup code, alongside
     building elem_A/elem_lam), not per frame. Returns a list of ElementOffsets,
-    one per element, for splat_density's elem_offsets arg.
+    one per element, for compute_density's elem_offsets arg.
     """
     Nu, Nv, Nw = grid_shape
     grid_dims = torch.tensor([Nu, Nv, Nw], device=device, dtype=orth_matrix.dtype)
@@ -194,7 +194,7 @@ def precompute_element_offsets(elem_radius_vox, elem_radius_ang, orth_matrix, gr
     ])
     safety_margin = 0.5 * spacing_approx.norm()
 
-    # splat_density's separable distance skips the minimum-image wrap, which is
+    # compute_density's separable distance skips the minimum-image wrap, which is
     # only valid while a local box stays well inside the cell. Check it here
     # rather than silently returning wrong distances for a pathologically small
     # cell (or an enormous B-factor).
@@ -203,7 +203,7 @@ def precompute_element_offsets(elem_radius_vox, elem_radius_ang, orth_matrix, gr
     if max_reach >= half_cell:
         raise ValueError(
             f"local box reach ({max_reach:.2f} A) is at least half the shortest cell "
-            f"axis ({half_cell:.2f} A); the minimum-image assumption in splat_density "
+            f"axis ({half_cell:.2f} A); the minimum-image assumption in compute_density "
             "no longer holds. Use a larger cell, a tighter density cutoff, or restore "
             "an explicit minimum-image wrap in the distance calculation."
         )
@@ -319,7 +319,7 @@ def _scatter_core(grid_flat, base_i, offsets, dens, Nu, Nv, Nw):
 
     The whole index is computed in int32 and converted once at the end
     (index_add_ requires int64). The largest value is Nu*Nv*Nw - 1, which
-    splat_density's assert keeps inside int32, and Horner's form folds the
+    compute_density's assert keeps inside int32, and Horner's form folds the
     strides into the accumulation.
 
     Wrapping uses torch.remainder rather than a compare-and-shift, even though
@@ -356,7 +356,7 @@ def _ensure_cuda_headers_visible():
     to say it.
 
     Done automatically because the cost of not doing it is large and easy to
-    miss: compiling the splat's elementwise core is worth 4.9x on CUDA
+    miss: compiling the density calculation's elementwise core is worth 4.9x on CUDA
     (tools/bench_aniso_core.py), and without the header inductor just fails and
     the pipeline runs eager. One pod did exactly that for an unknown length of
     time.
@@ -385,7 +385,7 @@ def _warn_compile_fallback(fn, exc):
     """One warning, naming the cost and -- on CUDA -- the usual cause.
 
     "Slower" undersells it: compiling this core is worth 4.9x on CUDA and
-    ~3.5x on CPU, against a splat that is ~94% of the frame. And the usual
+    ~3.5x on CPU, against a density calculation that is ~94% of the frame. And the usual
     CUDA cause is a missing include path rather than anything about the GPU,
     which is worth saying outright: the message that just says gcc failed
     invites the conclusion that the machine is broken.
@@ -400,7 +400,7 @@ def _warn_compile_fallback(fn, exc):
         "torch.compile failed for %s (%s: %s); falling back to the eager "
         "implementation for the rest of this process. Results are unaffected. "
         "The cost is not small -- compiling this core measures 4.9x on CUDA "
-        "and ~3.5x on CPU, on a splat that is ~94%% of the frame.%s Pass "
+        "and ~3.5x on CPU, on a density calculation that is ~94%% of the frame.%s Pass "
         "compile_core=False (xtraj.py: torch_compile=False) to skip the "
         "attempt entirely."
         % (fn.__name__, type(exc).__name__, first, hint),
@@ -463,7 +463,7 @@ def _resolve_compiled(fn, enable):
     def guarded(*args, **kwargs):
         global _COMPILE_FAILED
         # re-checked on every call, not just when the wrapper was built: a
-        # single splat_density invocation calls this once per CHUNK, and the
+        # single compute_density invocation calls this once per CHUNK, and the
         # other core's failure (or an earlier chunk's) must stop the retries
         # immediately rather than re-attempting a known-broken compile.
         if _COMPILE_FAILED:
@@ -483,7 +483,7 @@ def _resolve_compiled(fn, enable):
 def warmup_compile(elem_offsets, grid_shape, orth_matrix, taper_width,
                    max_atoms_per_batch=50_000, max_pairs_per_batch=4_000_000):
     """
-    Runs a minimal splat purely to populate torch.compile's on-disk cache.
+    Runs a minimal density calculation purely to populate torch.compile's on-disk cache.
 
     UNDER MPI THIS MUST BE DONE BY ONE RANK BEFORE THE OTHERS START. Every rank
     otherwise compiles the same kernels itself, and N concurrent compilations
@@ -542,7 +542,7 @@ def warmup_compile(elem_offsets, grid_shape, orth_matrix, taper_width,
         lam = torch.ones((n, 5), device=device, dtype=dtype)
         radius = reach[element_idx] * reach_fraction
         with torch.no_grad():
-            splat_density(
+            compute_density(
                 frac, element_idx, occ, A, lam, elem_offsets, radius,
                 grid_shape, orth_matrix, taper_width,
                 max_atoms_per_batch=max_atoms_per_batch,
@@ -570,7 +570,7 @@ def _chunk_length(K_sorted, start, n_left, max_atoms, max_pairs):
     return lo
 
 
-def splat_density(
+def compute_density(
     frac_coords: torch.Tensor,       # (n_atoms, 3), requires_grad=True, in [0,1)
     element_idx: torch.Tensor,       # (n_atoms,) long
     occ: torch.Tensor,               # (n_atoms,)
@@ -615,7 +615,7 @@ def splat_density(
     the curve is flat-ish from 2M to 12M and rises on both sides -- 4M gave
     0.86 s, 16M gave 1.00 s, 48M gave 1.25 s, and 0.5M gave 1.01 s as
     per-call overhead starts to dominate. The optimum tracks cache size, so
-    re-tune it with bench_splat.py on a new machine, and expect a GPU to prefer
+    re-tune it with bench_density.py on a new machine, and expect a GPU to prefer
     a larger value than this CPU-derived default.
 
     elem_offsets (from precompute_element_offsets) is only a candidate
@@ -654,7 +654,7 @@ def splat_density(
     must be disabled.
 
     stats, if given, is filled with the work actually done -- atoms, chunks,
-    pairs_ideal (each atom's own offset prefix, the figure bench_splat.py
+    pairs_ideal (each atom's own offset prefix, the figure bench_density.py
     reports) and pairs_actual (what the chunked batching evaluates, where every
     atom in a chunk pays the chunk's largest prefix). Their ratio is the
     padding overhead, which depends on how the per-atom reach is distributed
@@ -678,7 +678,7 @@ def splat_density(
         grid_flat = torch.zeros(Nu * Nv * Nw, device=device, dtype=dtype)
     else:
         assert not torch.is_grad_enabled(), (
-            "splat_density(out=...) reuses the caller's buffer in place, which "
+            "compute_density(out=...) reuses the caller's buffer in place, which "
             "would corrupt any autograd graph still holding it; use it only "
             "under torch.no_grad()")
         assert out.shape == (Nu * Nv * Nw,) and out.dtype == dtype and out.device == device, (
@@ -728,7 +728,7 @@ def splat_density(
         sorted, chunked, evaluated and scattered.
 
         Split out so the two kinds share every line except which core runs.
-        Splatting is a sum over atoms, so evaluating the two groups separately
+        Density placement is a sum over atoms, so evaluating the two groups separately
         and accumulating into the same grid is exact rather than an
         approximation, and an isotropic atom never touches the slower core.
         """
@@ -792,3 +792,11 @@ def splat_density(
             _run_group(atom_indices[kind], eo, True)
 
     return grid_flat.view(Nu, Nv, Nw)
+
+
+def splat_density(*args, **kwargs):
+    """Deprecated name for compute_density, kept so existing callers keep
+    working. Emits a DeprecationWarning and forwards every argument."""
+    warnings.warn("splat_density is deprecated; use compute_density",
+                  DeprecationWarning, stacklevel=2)
+    return compute_density(*args, **kwargs)

@@ -115,7 +115,7 @@ echo; echo "=== baseline: ${BASELINE} ==="
 
 echo; echo "=== current ==="
 ( cd "${REPO_ROOT}/lunus/command_line" && PYTHONPATH="${REPO_ROOT}" "${PY[@]}" xtraj.py \
-    "${common[@]}" expand_symmetry=True torch_splat_stats=True \
+    "${common[@]}" expand_symmetry=True torch_density_stats=True \
     fcalc="${LOGDIR}/f_after.mtz" icalc="${LOGDIR}/i_after.mtz" \
     diffuse="${LOGDIR}/d_after.hkl" ) 2>&1 | tee "${LOGDIR}/after.log" \
   | grep -E "processed chunk|^  [a-z].*[0-9]|TOTAL|frame loop|unaccounted|per frame" || true

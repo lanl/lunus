@@ -10,7 +10,7 @@ efficiency feature that must not change any number:
      just in aggregate. A bug that mixed up which configuration a gradient
      belonged to would leave the total unchanged.
   3. Checkpointing changes neither values nor gradients. It only decides
-     whether the splat's intermediates are retained or recomputed.
+     whether the density calculation's intermediates are retained or recomputed.
   4. Every member actually receives gradient. A member silently detached
      from the graph is the failure mode that matters for guidance, and it
      would not show up in a norm over the whole batch.

@@ -12,7 +12,7 @@ Fetches the model (<ID>.pdb) and the deposited structure factors
 R-free against them on the coordinates exactly as deposited -- no refinement,
 only the bulk-solvent and overall scales are fitted. Two ways:
 
-    torch    lunus.sf: splat -> symmetry-expand -> FFT, threshold solvent
+    torch    lunus.sf: density -> symmetry-expand -> FFT, threshold solvent
              mask, k_sol/b_sol/k_overall/B fitted by least squares. This is
              tools/fit_solvent_rfactor.py, and every one of its options can
              be passed through after a bare "--".

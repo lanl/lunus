@@ -108,10 +108,10 @@ if [ "${var}" = "torch" ]; then
 fi
 
 # Useful extra flags:
-#   torch_compile=False           skip the splat's ~1.5 s one-off compile
+#   torch_compile=False           skip the density calculation's ~1.5 s one-off compile
 #                                 (worth it for a single-frame run only)
 #   torch_max_pairs_per_batch=N   atom-voxel pair budget; re-tune on a new
-#                                 machine with tools/bench_splat.py
+#                                 machine with tools/bench_density.py
 #   save_density=True             dump frame 0's real-space grid for
 #                                 tools/compare_density.py (221 MB at this grid)
 

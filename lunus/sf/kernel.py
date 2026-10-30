@@ -97,7 +97,7 @@ Writing U = V diag(u) V^T and e = V^T r,
     rho(r) = sum_i A_i exp(-sum_k w_ik e_k^2)
 
 which is the cheap way to PRECOMPUTE the kernel. It is NOT the way to evaluate
-it in the splat, which was the natural inference and is measured false.
+it in the density calculation, which was the natural inference and is measured false.
 
 Rotating into the eigenbasis in the hot loop needs e = V^T d per atom-voxel
 pair, an (m,K,3) intermediate and a batched (m,3,3) matmul. Expanding the
@@ -252,7 +252,7 @@ def calculate_sf(coef9, stol2):
     Direct Cromer-Mann evaluation in reciprocal space:
         f(s) = sum_i a_i * exp(-b_i * s^2) + c
     stol2 = (sin(theta)/lambda)^2, in 1/A^2. Used only for the
-    independent analytic cross-check, not in the splat pipeline itself.
+    independent analytic cross-check, not in the density calculation pipeline itself.
     """
     a = np.asarray(coef9[0:4], dtype=np.float64)
     b = np.asarray(coef9[4:8], dtype=np.float64)
@@ -271,7 +271,7 @@ def build_atom_kernels_aniso(elements_per_atom, coeff_table, u_cart_per_atom,
     are measured in, which is NOT the u_star a PDB stores; convert first.
 
     Returns A (n,5), L6 (n,5,6) and radius (n,). L6 packs Lam_i as
-    (xx, yy, zz, xy, xz, yz), which is what the splat consumes.
+    (xx, yy, zz, xy, xz, yz), which is what the density calculation consumes.
     """
     coef = np.array([coeff_table[e] for e in elements_per_atom], dtype=np.float64)
     A, L6, w, _V = precalculate_density_aniso_batch(coef, u_cart_per_atom,

@@ -142,7 +142,7 @@ def main():
     args = p.parse_args()
 
     from lunus.sf.cell_utils import orth_matrix
-    from lunus.sf.density_torch import splat_density
+    from lunus.sf.density_torch import compute_density
     from lunus.sf.elements import IT92_COEFFS
     from lunus.sf.kernel_torch import build_atom_kernels_torch
     from lunus.sf.solvent_torch import (
@@ -192,7 +192,7 @@ def main():
         torch.cuda.reset_peak_memory_stats()
 
     def _one_pass():
-        d = splat_density(
+        d = compute_density(
             frac, element_idx, occ, atom_A, atom_lam, offsets, atom_r,
             grid, orth, taper_w, compile_core=False)
         if grid_ops:
@@ -207,13 +207,13 @@ def main():
         # one-time cost on first use -- cuFFT builds its plan, torch.linalg.inv
         # inside reciprocal_inv_d2 loads cuSOLVER, the allocator grows its pool
         # -- and timing a cold pipeline reports those as the cost of the model.
-        # Left uncorrected it read as a 3,165-atom splat taking 137.6 ms, which
+        # Left uncorrected it read as a 3,165-atom density calculation taking 137.6 ms, which
         # is twice what 135,834 atoms take warm.
         _one_pass()
         sync(dev)
 
         t = Timer(dev)
-        density = t("splat", lambda: splat_density(
+        density = t("density", lambda: compute_density(
             frac, element_idx, occ, atom_A, atom_lam, offsets, atom_r,
             grid, orth, taper_w, compile_core=False))
         if grid_ops:
@@ -279,7 +279,7 @@ def main():
           % (F_protein.abs().mean(), F_total.abs().mean(),
              float(F_total.abs().mean() / F_protein.abs().mean())))
 
-    # Repeat the solvent block alone, the way bench_splat times its kernel.
+    # Repeat the solvent block alone, the way bench_density times its kernel.
     if args.reps > 1:
         with torch.no_grad():
             times = []

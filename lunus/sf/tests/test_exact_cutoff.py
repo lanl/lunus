@@ -29,7 +29,7 @@ def sphere_offsets(du, dv, dw, radius_ang, safety_margin, M, grid_dims):
     return offsets[dist <= (radius_ang + safety_margin)]
 
 
-def splat(frac_coords, element_syms, occ, elem_kernels, grid_shape, M, exact_mask):
+def place_density(frac_coords, element_syms, occ, elem_kernels, grid_shape, M, exact_mask):
     Nu, Nv, Nw = grid_shape
     grid_dims = np.array([Nu, Nv, Nw])
     grid = np.zeros((Nu, Nv, Nw), dtype=np.float64)
@@ -112,7 +112,7 @@ def test_exact_cutoff_mask():
 
         print(f"\n=== cutoff = {cutoff} ===")
         for exact_mask, label in [(False, "margin-padded, unmasked (old)"), (True, "exact cutoff mask (new)")]:
-            grid = splat(frac_coords, element_syms, occ, elem_kernels, grid_shape, M, exact_mask)
+            grid = place_density(frac_coords, element_syms, occ, elem_kernels, grid_shape, M, exact_mask)
             Fgrid = np.conj(np.fft.ifftn(grid) * cell_volume)
             F_num = np.array([Fgrid[h % Nu, k % Nv, l % Nw] for h, k, l in hkl_test])
             max_rel_err = np.max(np.abs(F_num - F_ref) / np.maximum(np.abs(F_ref), 1e-8))

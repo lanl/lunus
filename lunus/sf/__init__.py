@@ -1,6 +1,6 @@
 """Differentiable structure factor / diffuse intensity calculator.
 
-A PyTorch implementation of a gemmi-like engine: splat atomic Gaussian
+A PyTorch implementation of a gemmi-like engine: place atomic Gaussian
 density onto a real-space grid -> symmetrize -> FFT -> extract F(hkl),
 differentiable with respect to atomic fractional coordinates.
 
@@ -58,8 +58,9 @@ _EXPORTS = {
     # torch kernels
     "build_element_kernels_torch": "kernel_torch",
     "build_atom_kernels_torch": "kernel_torch",
-    # the differentiable splat
-    "splat_density": "density_torch",
+    # the differentiable density calculation
+    "compute_density": "density_torch",
+    "splat_density": "density_torch",      # deprecated alias of compute_density
     "precompute_element_offsets": "density_torch",
     "taper_factor": "density_torch",
     "warmup_compile": "density_torch",

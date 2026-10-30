@@ -280,7 +280,7 @@ def build_density(xrs, elements, b_per_atom, occ, frac, grid, device, dtype,
     it symmetry-averages a model that was already complete.
     """
     from lunus.sf.cell_utils import orth_matrix
-    from lunus.sf.density_torch import splat_density
+    from lunus.sf.density_torch import compute_density
     from lunus.sf.kernel_torch import (build_atom_kernels_aniso_torch,
                                        build_atom_kernels_torch)
     from lunus.sf.symmetry_torch import build_grid_ops_from_cctbx, symmetrize_sum
@@ -313,7 +313,7 @@ def build_density(xrs, elements, b_per_atom, occ, frac, grid, device, dtype,
     occ_t = torch.tensor(occ, dtype=dtype, device=device)
     orth = torch.tensor(M_np, dtype=dtype, device=device)
 
-    density = splat_density(frac_t, element_idx, occ_t, atom_A, atom_lam,
+    density = compute_density(frac_t, element_idx, occ_t, atom_A, atom_lam,
                             offsets, atom_r, grid, orth, taper_w,
                             compile_core=False, atom_L6=atom_L6,
                             aniso_mask=aniso_mask)
@@ -789,7 +789,7 @@ def build_parser():
                    help="taper width as a fraction of the SOLVENT MASK cutoff")
     p.add_argument("--density-cutoff", type=float, default=1e-4, metavar="E",
                    help="atomic density below which an atom's contribution is "
-                        "dropped when splatting, e/A^3. Not the solvent mask "
+                        "dropped when placing density on the grid, e/A^3. Not the solvent mask "
                         "threshold above -- this is the same quantity xtraj "
                         "calls gemmi_cutoff, and shares its default. Pass 0.01 "
                         "for the old one. See docs/solvent-design.md, "

@@ -1,6 +1,6 @@
 """
 Builds the per-element (A, lam, offsets) tables as PyTorch tensors, ready
-for density_torch.splat_density -- including the sphere-restricted local
+for density_torch.compute_density -- including the sphere-restricted local
 offsets, computed ONCE here rather than per frame (see
 density_torch.precompute_element_offsets's docstring for why that
 matters for speed).
@@ -175,7 +175,7 @@ def build_atom_kernels_torch(
     using the MAXIMUM radius among all atoms of that element -- generous
     enough to safely contain every atom of that type, including the
     highest-B (most spread out) ones. This keeps the vectorized,
-    grouped-by-element splat structure in density_torch.py unchanged;
+    grouped-by-element density structure in density_torch.py unchanged;
     only the actual density formula and taper radius become per-atom
     (using each atom's own A/lam/radius, gathered via array indexing)
     rather than shared across a whole element group.

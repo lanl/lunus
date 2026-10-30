@@ -3,7 +3,7 @@ from lunus.sf.elements import IT92_COEFFS
 from lunus.sf.kernel import precalculate_density_iso, calculate_sf, cutoff_radius
 from lunus.sf.cell_utils import orth_matrix, reciprocal_inv_d2, grid_shape_for_resolution
 
-def splat_and_fft_sphere(pos_frac, A, lam, radius, grid_shape, M, cell_volume, safety_margin):
+def density_and_fft_sphere(pos_frac, A, lam, radius, grid_shape, M, cell_volume, safety_margin):
     Nu, Nv, Nw = grid_shape
     grid = np.zeros((Nu, Nv, Nw), dtype=np.float64)
     spacing = np.array([np.linalg.norm(M[:, 0]) / Nu, np.linalg.norm(M[:, 1]) / Nv, np.linalg.norm(M[:, 2]) / Nw])
@@ -45,7 +45,7 @@ def analytic_single_atom_F(coef9, b_iso, pos_frac, hkl, M):
     phase = np.exp(-2j * np.pi * (hkl @ pos_frac))
     return f * dwf * phase
 
-def test_sphere_masked_splat_matches_analytic():
+def test_sphere_masked_density_matches_analytic():
     """Restricting the local box to the cutoff SPHERE rather than its bounding
     cube must not change F(hkl): the dropped corner points lie beyond the
     cutoff radius, where the density is already negligible.
@@ -72,12 +72,12 @@ def test_sphere_masked_splat_matches_analytic():
     safety_margin = np.linalg.norm(spacing)
 
     print(f"\ncutoff radius: {radius:.3f} A, safety margin: {safety_margin:.3f} A")
-    Fgrid, n_kept, n_cube = splat_and_fft_sphere(
+    Fgrid, n_kept, n_cube = density_and_fft_sphere(
         pos_frac, A, lam, radius, grid_shape, M, cell_volume, safety_margin)
     F_num = np.array([Fgrid[h % Nu, k % Nv, l % Nw] for h, k, l in hkl_test])
     F_ana = analytic_single_atom_F(coef9, b_iso, pos_frac, hkl_test, M)
 
-    print("\nhkl            F_sphere_splat                F_analytic                   rel.err")
+    print("\nhkl            F_sphere_density                F_analytic                   rel.err")
     for (h, k, l), fn, fa in zip(hkl_test, F_num, F_ana):
         print(f"{h:3d}{k:3d}{l:3d}   {fn.real:8.4f}{fn.imag:+8.4f}i   "
               f"{fa.real:8.4f}{fa.imag:+8.4f}i   {abs(fn - fa) / max(abs(fa), 1e-8):.2e}")
@@ -85,7 +85,7 @@ def test_sphere_masked_splat_matches_analytic():
     np.testing.assert_allclose(
         F_num, F_ana,
         rtol=1e-4, atol=1e-4 * np.max(np.abs(F_ana)),
-        err_msg="sphere-masked splat does not match the analytic reference",
+        err_msg="sphere-masked density calculation does not match the analytic reference",
     )
 
     # The mask has to actually be doing something -- if a change made it keep

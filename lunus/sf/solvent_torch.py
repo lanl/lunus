@@ -8,7 +8,7 @@ where F_mask is the transform of a real-space solvent mask. The mask here is a
 DENSITY THRESHOLD -- solvent is wherever the model's density falls below a
 cutoff -- rather than the geometric (vdW radius + probe, then shrink) mask that
 Phenix and REFMAC build. That choice, and its consequences, are argued in
-docs/solvent-design.md; the short version is that splat_density() already
+docs/solvent-design.md; the short version is that compute_density() already
 produces exactly the grid a threshold needs, so F_mask costs one extra FFT and
 inherits the protein density's grid and symmetry conventions unchanged.
 
@@ -137,7 +137,7 @@ def blur_density(density, orth_matrix, blur_b, inv_d2_grid=None):
     A Gaussian avoids that, but the guarantee is asymptotic rather than exact,
     and the difference is worth stating because the obvious argument overshoots.
     The multiplier's inverse transform is a positive kernel, so a non-negative
-    density -- which splat_density's output is by construction -- would stay
+    density -- which compute_density's output is by construction -- would stay
     non-negative if the DFT summed over ALL frequencies. It does not: it stops
     at Nyquist, and discarding that tail is a truncation, in miniature. So the
     undershoot is bounded by how much Gaussian is left at the grid edge, and it
@@ -335,7 +335,7 @@ def f_total(F_protein, F_mask, inv_d2, k_sol=K_SOL_DEFAULT, b_sol=B_SOL_DEFAULT,
 
     The pipeline sets it from the supercell factors when it knows them. It
     CANNOT know them when the folding happens implicitly, through the modulo in
-    the splat's scatter, which is what happens if coordinates outside [0,1) are
+    the density calculation's scatter, which is what happens if coordinates outside [0,1) are
     passed with no supercell= argument -- pass density_scale explicitly there.
     """
     k_eff = _as_tensor(k_sol, inv_d2) * _as_tensor(density_scale, inv_d2)
@@ -454,11 +454,11 @@ class SolventModel:
         smoothed to a TOTAL of mask_blur.
 
         pipeline_blur is the blur already folded into the density by the
-        caller -- the FFT-artifact trick, where atoms are splatted with an
+        caller -- the FFT-artifact trick, where atoms are placed on the grid with an
         extra B and compute_fcalc removes it again in reciprocal space. THAT
         IS THE SAME OPERATION AS mask_blur. Adding B to an atomic form factor
         convolves that atom with a Gaussian, density is a linear sum of atoms,
-        and convolution is linear, so splatting with blur=B is exactly
+        and convolution is linear, so placing density with blur=B is exactly
         convolving the grid by B -- verified to 1e-4 of peak, the residual
         being the real-space taper truncation.
 

@@ -67,7 +67,7 @@ Two families are in use:
 - **Density threshold.** Solvent is wherever the protein density falls below a
   cutoff. This is what SFC_Torch does.
 
-**Recommendation: density threshold.** `splat_density()` already produces exactly
+**Recommendation: density threshold.** `compute_density()` already produces exactly
 that grid, and `compute_fcalc()` already FFTs and extracts Miller indices from an
 arbitrary grid — so `F_mask` is one call to existing code, and the mask inherits
 the same symmetry expansion and grid conventions as the protein density.
@@ -412,7 +412,7 @@ only where B is already least constrained by the data.
 
 **Recommendation: the mask should not see B by default.** Make the mask's
 density source explicit rather than implicitly "the grid `F_protein` used", and
-default to a detached grid (or one splatted at a fixed reference B):
+default to a detached grid (or one computed at a fixed reference B):
 
 ```python
 def solvent_mask(density, cutoff, taper_width):
@@ -809,8 +809,8 @@ mode this gate exists to catch, in miniature.
 Measured elsewhere, on the diffuse side:
 
 - gemmi's density calculator, CPU, 2 frames: 1.16x at d_min 1.5, 1.47x at 3.0.
-- the torch splat, CUDA, 2501 frames at d_min 1.8: 176 s -> 310 s, **1.76x**.
-  The splat's work goes as the cutoff radius cubed, so it pays more than gemmi
+- the torch density calculation, CUDA, 2501 frames at d_min 1.8: 176 s -> 310 s, **1.76x**.
+  The density calculation's work goes as the cutoff radius cubed, so it pays more than gemmi
   does; take the 1.76x, not the 1.16x, when budgeting a torch run.
 
 On the diffuse correlation against data it moved the third decimal place -- the
@@ -831,14 +831,14 @@ since xtraj sets `b_iso = 20*d_min^2` when it is not reading B from the model.
 
 ## The FFT-artifact blur is the same operation as `mask_blur`
 
-Atoms can be splatted with an extra B and the spread removed afterwards with
+Atoms can be placed on the grid with an extra B and the spread removed afterwards with
 `exp(+blur·s²/4)` — `compute_fcalc`'s `blur=`, which gemmi does by default.
 In exact arithmetic it cancels; what it buys is that a sharp Gaussian sampled
 on a finite grid is badly represented and a spread one is not.
 
 **It is literally the same operation as `mask_blur`.** Adding B to an atomic
 form factor convolves that atom with a Gaussian, density is a linear sum of
-atoms, and convolution is linear — so splatting with `blur=B` is exactly
+atoms, and convolution is linear — so placing density with `blur=B` is exactly
 convolving the grid by B. Verified to 1e-4 of peak, the residual being the
 real-space taper truncation.
 
@@ -1052,7 +1052,7 @@ at 1% of peak density per the parity recommendation.
 **The instrument, and what it is not.** Displace every configuration by the
 same sub-voxel vector. For the underlying model this multiplies every `F(h)` by
 one common phase, so `⟨|F|²⟩` and `|⟨F⟩|²` are both unchanged and diffuse is
-exactly invariant. The grid pipeline does not reproduce that: `splat_density`
+exactly invariant. The grid pipeline does not reproduce that: `compute_density`
 samples each atom at fixed voxel centres, so a displaced structure is
 *resampled* rather than shifted, and recovering the true shift would require
 interpolation. The residual is therefore **not a null test** and not a bound on
@@ -1147,7 +1147,7 @@ excluded), whole pipeline warmed before timing:
 
 | phase | ms, `mask_blur=0` | ms, `mask_blur=100` |
 |---|---|---|
-| splat (3,165 atoms) | 5.3 | 5.4 |
+| density (3,165 atoms) | 5.3 | 5.4 |
 | symmetrize | 0.6 | 0.6 |
 | fft+extract (protein) | 0.3 | 0.3 |
 | **solvent (whole `apply`)** | **0.9** | **1.1** |
@@ -1163,7 +1163,7 @@ build. Harmless before `mask_blur` (0.1 ms) and worth 1.5 ms after.
 **1.6× on the solvent path, against 2.7× on CPU** — because a GPU FFT on this
 grid is 0.3 ms where the CPU's is 20. On the 135,834-atom trajectory frame
 (≈70 ms) that is ~1.6% of a frame. The cost is **per-grid, not per-atom**: the
-mask, the blur and their FFTs scale with voxels while the splat scales with
+mask, the blur and their FFTs scale with voxels while the density calculation scales with
 atoms.
 
 **On GPU the blur's real cost is memory, not time.** Peak device memory goes
@@ -1211,7 +1211,7 @@ So a mask thresholded from the folded density describes a cell with no empty
 space left in it. The order has to be: build the density in the model's frame,
 **build the mask there**, then fold.
 
-`supercell=(na, nb, nc)` on both entry points does that. The atoms are splatted
+`supercell=(na, nb, nc)` on both entry points does that. The atoms are placed on the grid
 onto the larger grid, the mask is built on it, and density and mask are folded
 into the target cell separately — which is exact, because folding is linear, and
 which keeps `exp(−B_sol·s²/4)` in reciprocal space where it belongs rather than
@@ -1220,7 +1220,7 @@ forcing the mask to be blurred in real space before it is added.
 **Commensurate or refuse.** `symmetry_torch.supercell_factors()` derives the
 factors from the two cells and raises unless each axis ratio is an integer,
 because folding a density *grid* is only exact when the target tiles the source.
-(Folding *atoms* is always well defined — the modulo in the splat's scatter —
+(Folding *atoms* is always well defined — the modulo in the density calculation's scatter —
 which is why the constraint only appears once masks are folded.) A model
 spanning several cells already contains its symmetry copies, so `supercell=`
 refuses `grid_ops=` as well: expanding again would double-count, and summing a
@@ -1362,7 +1362,7 @@ One extra FFT per configuration, plus the mask evaluation over the grid.
 `symmetrize`, a comparable grid-wide pass, is 0.6 ms, in a frame whose
 per-frame work is ~70 ms. Directly measured on 7FPV, the solvent path costs
 **~1 ms** — one more FFT plus a pointwise taper. The earlier note here — "at
-300³ the FFT is not the cheap part" — was wrong; the splat is ~94% of the
+300³ the FFT is not the cheap part" — was wrong; the density calculation is ~94% of the
 per-frame work and everything else together is under 5 ms.
 
 Two caveats that survive the measurement. Under guidance the cost lands per

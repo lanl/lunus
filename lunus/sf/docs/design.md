@@ -1,6 +1,6 @@
 # Design: what matches gemmi, and what deliberately does not
 
-`lunus.sf` implements a gemmi-like engine — splat atomic Gaussian density onto
+`lunus.sf` implements a gemmi-like engine — place atomic Gaussian density onto
 a real-space grid, symmetrize, FFT, extract F(hkl) — in PyTorch,
 differentiable with respect to atomic fractional coordinates. Gemmi is the
 reference for what agreement is measured against, and the places where this
@@ -92,7 +92,7 @@ B may vary per atom, still assumed FIXED across configurations.
   `atom_A`/`atom_lam`/`atom_radius_ang`. The offset candidate list stays
   per-ELEMENT, sized using the MAXIMUM radius among that element's atoms so it
   safely contains every atom of that type.
-- `density_torch.py` — `splat_density` takes per-atom values gathered by atom
+- `density_torch.py` — `compute_density` takes per-atom values gathered by atom
   index within each element-grouped batch. For the uniform-B path
   (`build_element_kernels_torch`), callers broadcast with
   `atom_A = elem_A[element_idx]` first.
@@ -113,7 +113,7 @@ per-atom B or of this implementation.
 
 > **Caveat, worth fixing.** What would actually establish correctness here is a
 > grid-refinement convergence check — F(000) stable to <0.01% across a 6x
-> refinement, confirming the splat self-consistently implements the intended
+> refinement, confirming the density calculation self-consistently implements the intended
 > (truncated + tapered) physics. That check was performed manually during
 > development but is **not implemented in the test file**, which currently only
 > guards the characterized ~4.1e-02 number. Implementing it would be a real
@@ -128,8 +128,8 @@ does the same.
 
 This took three iterations, so the history is worth recording:
 
-1. The first version called `xrs_sel.expand_to_p1()` and re-splatted every
-   symmetry copy of every atom — correct in spirit but slow, since splatting
+1. The first version called `xrs_sel.expand_to_p1()` and placed every
+   symmetry copy of every atom on the grid — correct in spirit but slow, since placing density for
    costs `O(n_atoms * box_volume)` Gaussian evaluations per copy.
 2. The second removed symmetry handling altogether, reasoning that `xrs_sel`
    already held a complete atom set. That made the torch engine disagree with
@@ -259,7 +259,7 @@ Both engines take the cutoff from the same `gemmi_cutoff=` argument
 the configuration to run. **On this evidence `gemmi_cutoff` now defaults to
 1e-4**, and A is what `gemmi_cutoff=0.01` recovers -- which is what every
 number published before that change was measured under. The cost is the one
-`6099334` measured: **1.76× on the torch splat** (2501 frames, `d_min` 1.8,
+`6099334` measured: **1.76× on the torch density calculation** (2501 frames, `d_min` 1.8,
 CUDA, 176 s → 310 s), 1.16–1.47× for gemmi's calculator on CPU, since the work
 goes as the cutoff radius cubed. A Gaussian radius model — r ∝ √ln(ρ₀/c),
 work ∝ r³ — reproduces that 1.76× to within 5% and predicts ~1.40× for 1e-3,
@@ -325,7 +325,7 @@ The practical reading: at `gemmi_cutoff=1e-4` the torch engine is within
 
 Implemented: `precalculate_density_aniso[_batch]` in `kernel.py`,
 `build_atom_kernels_aniso_torch`, and `_density_core_aniso` behind
-`splat_density(atom_L6=..., aniso_mask=...)`. The derivation is in `kernel.py`
+`compute_density(atom_L6=..., aniso_mask=...)`. The derivation is in `kernel.py`
 and the conventions are pinned in `tests/test_adp_aniso.py`.
 
 **What it is worth**, which is why it was done: on 7FPV against deposited
@@ -342,8 +342,8 @@ scales anisotropically too, which is why `tools/pdb_rfactor.py` passes
 `--aniso` by default. Re-measured 2026-10-08 at 0.1312 / 0.1522, the
 density cutoff having moved from 0.01 to 1e-4 in between.
 
-**What it costs**: 2.37x on the splat for 7FPV as deposited, measured in situ
-by `tools/bench_aniso_splat.py`. Note that is close to the all-anisotropic
+**What it costs**: 2.37x on the density calculation for 7FPV as deposited, measured in situ
+by `tools/bench_aniso_density.py`. Note that is close to the all-anisotropic
 worst case of 2.45x — only 54% of atoms carry ANISOU, but they are the
 expensive ones (every non-hydrogen), **78% of the work** weighted by r³, which
 is what candidate-voxel count scales as. Hydrogens are 46% of the atoms and
@@ -375,10 +375,10 @@ reciprocal basis; the kernel measures displacements in Cartesian angstroms.
 They coincide only for a cubic cell with a = 1, so feeding `u_star` straight in
 gives a correct answer on a toy fixture and a wrong one on every real crystal.
 The conversion must also happen **before** `convert_to_isotropic()`, which
-discards it. `tests/test_adp_aniso.py` pins the convention by splatting one
-anisotropic atom and transforming it against the closed form — a check that a
+discards it. `tests/test_adp_aniso.py` pins the convention by placing one
+anisotropic atom's density and transforming it against the closed form — a check that a
 transposed `U`, eigenvectors as rows, or the wrong basis all fail, and that the
 isotropic-limit and total-charge checks all pass regardless.
 
-**Not yet wired into `xtraj.py`** — the kernel, the splat and the R-factor tool
+**Not yet wired into `xtraj.py`** — the kernel, the density calculation and the R-factor tool
 support it; the trajectory driver does not.

@@ -33,7 +33,7 @@ torch = pytest.importorskip("torch", reason="PyTorch not installed")
 pytest.importorskip("cctbx", reason="cctbx not installed (needed for the space group)")
 
 from lunus.sf.cell_utils import orth_matrix
-from lunus.sf.density_torch import splat_density
+from lunus.sf.density_torch import compute_density
 from lunus.sf.elements import IT92_COEFFS
 from lunus.sf.kernel_torch import build_element_kernels_torch
 from lunus.sf.solvent_torch import (
@@ -88,7 +88,7 @@ def system():
              for l in range(-3, 4) if (h, k, l) != (0, 0, 0)],
             dtype=torch.long),
     )
-    s["density_raw"] = splat_density(
+    s["density_raw"] = compute_density(
         s["frac"], s["element_idx"], s["occ"], s["atom_A"], s["atom_lam"],
         s["elem_offsets"], s["atom_radius_ang"], GRID, s["orth"],
         s["taper_width"], compile_core=False,

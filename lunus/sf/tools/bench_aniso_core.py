@@ -1,12 +1,12 @@
 #!/usr/bin/env python
 """
-Which anisotropic quadratic form belongs in the splat's inner loop.
+Which anisotropic quadratic form belongs in the density calculation's inner loop.
 
     OMP_NUM_THREADS=n python tools/bench_aniso_core.py [--device cuda]
 
-Only the elementwise core, at the shapes splat_density actually chunks to. No
+Only the elementwise core, at the shapes compute_density actually chunks to. No
 offsets, no scatter, no kernel build -- this isolates the one number the
-anisotropic-ADP splat depends on, before any of it is written.
+anisotropic-ADP density calculation depends on, before any of it is written.
 
 TWO FORMULATIONS of rho(r) = sum_i A_i exp(-r.Lam_i.r):
 

@@ -17,11 +17,11 @@ assumed throughout:
 | torch | 2.13.0 |
 | atom-voxel pairs | 348,765,878 ideal, 360,747,104 as batched in 95 chunks |
 
-Reproduce all of it with `tools/bench_splat.py`, which is the thing to trust
+Reproduce all of it with `tools/bench_density.py`, which is the thing to trust
 rather than the tables below:
 
 ```bash
-PYTHONPATH=<repo root> python tools/bench_splat.py \
+PYTHONPATH=<repo root> python tools/bench_density.py \
     examples/compare_gemmi/top_bfac.pdb.gz \
     --cell 34.196,45.558,99.044,90,90,90 --grid 120,160,360 [--device mps|cuda]
 ```
@@ -38,12 +38,12 @@ context it says so.
 ## Where this stands (2026-08-16)
 
 On CUDA, 135,834 atoms, `d_min` 0.9, steady state per frame. **Measured
-eager**; with `torch.compile` the splat drops to 25.5 ms and the frame to
+eager**; with `torch.compile` the density calculation drops to 25.5 ms and the frame to
 ~36 ms, which re-ranks everything below it — see the CUDA section:
 
 | phase | median ms/frame |
 |---|---|
-| **splat** | **65.9** |
+| **density** | **65.9** |
 | into cctbx | 1.9 |
 | accumulate | 0.8 |
 | host→device | 0.6 |
@@ -61,7 +61,7 @@ scales with frames. An earlier version of this note read the per-call figure as
 a fixed per-chunk cost and concluded that larger chunks would amortize it; they
 do not.
 
-The splat is 94% of the per-frame work and nothing else is above 2 ms. It is
+The density calculation is 94% of the per-frame work and nothing else is above 2 ms. It is
 also remarkably steady: over ten frames, median 65.9, min 65.8, max 65.9, with
 frame 0 at 195.0 — that first frame carries ~130 ms of one-time warmup, which
 is why the table reports a median as well as a mean.
@@ -78,13 +78,13 @@ device, trajectory and thread count, in one session:
 | `element idx` | 45.8 | 0.0 | 45.8 |
 | `xrs.select` | 26.0 | 0.0 | 26.0 |
 | `sites_frac+occ` | 22.7 | 0.0 | 22.7 |
-| splat | 78.8 | 79.7 | −0.9 |
+| density | 78.8 | 79.7 | −0.9 |
 | everything else | ~7 | ~7 | ~0 |
 | **per-frame work** | **368.3** | **87.2** | **281.1 → 4.2×** |
 | whole frame loop, 10 frames/chunk | 555.4 | 280.3 | 1.98× |
 
 **The transferable number is 281 ms/frame of host work removed**, all of it in
-the four rows that disappear. The splat does not move, which is the point: none
+the four rows that disappear. The density calculation does not move, which is the point: none
 of this touched it.
 
 Two ratios, because one of them is not a property of the code. The trajectory
@@ -122,7 +122,7 @@ were from the superseded configuration.
 **On CUDA it does work** — see the CUDA section below, including why the
 entry that said otherwise was measuring the eager fallback against itself.
 
-**On CPU, compiling is worth 2.35x on the real splat**: 135,834 atoms on the
+**On CPU, compiling is worth 2.35x on the real density calculation**: 135,834 atoms on the
 120 x 160 x 360 grid, 6 threads, **2.00 s eager against 0.85 s compiled**
 (174e6 against 410e6 atom-voxel pairs/s). The first call costs ~1.4 s extra
 for the compilation itself, which matters for short runs and not for a
@@ -130,12 +130,12 @@ trajectory.
 
 Read that against **3.5x on the isolated elementwise core** (15.1 → 4.3 ms,
 `tools/bench_aniso_core.py`). The microbenchmark overstates by ~1.5x, which is
-the usual direction and the reason this page keeps saying so: the real splat
+the usual direction and the reason this page keeps saying so: the real density calculation
 also pays the scatter, the offset prefixes and the allocator, none of which
 fusion touches.
 
 One trap that comes with it. Compiling on CUDA emits a suggestion to enable
-TF32 matmuls. **Do not take it without measuring.** The splat computes `r2`
+TF32 matmuls. **Do not take it without measuring.** The density calculation computes `r2`
 as `c_off_sq - 2*(c_rem @ c_off.T) + |c_rem|^2` — a difference of terms much
 larger than the result, which is why it carries a `clamp_min(0.0)` — and the
 anisotropic quadratic form cancels the same way. TF32 keeps 10 mantissa bits
@@ -161,10 +161,10 @@ multi-threaded process — not as a faster CPU replacement for gemmi.
 
 ## Apple GPU (MPS)
 
-`torch_device=mps` works end to end — splat, symmetrization, FFT and extraction
+`torch_device=mps` works end to end — density, symmetrization, FFT and extraction
 — and is the fastest single-process option here:
 
-| device | splat | vs gemmi | pairs/s |
+| device | density | vs gemmi | pairs/s |
 |---|---|---|---|
 | gemmi (C++, 1 core) | 1.42 s | 1.00x | — |
 | torch CPU, eager, 1 thread | 4.65 s | 3.27x | 75e6 |
@@ -194,15 +194,15 @@ Two things to know:
 
 Measured on a container with an NVIDIA card (driver CUDA 13.0), torch 2.13.0
 `cuda130_mkl` from conda-forge, on the same 135,834-atom system and
-120 × 160 × 360 grid. The splat *in isolation*:
+120 × 160 × 360 grid. The density calculation *in isolation*:
 
 > **One machine.** Every number in this section is that card -- a
 > high-bandwidth datacenter GPU on a Kubernetes pod. On GB10 (DGX Spark) the
-> splat is 68% of the frame rather than 94%, the FFT costs 33x this, and
+> the density calculation is 68% of the frame rather than 94%, the FFT costs 33x this, and
 > `torch.compile` breaks even at 3 frames rather than 210. See "A second
 > machine: GB10 (DGX Spark)" below before treating any of this as general.
 
-| device | splat | vs gemmi | pairs/s |
+| device | density | vs gemmi | pairs/s |
 |---|---|---|---|
 | gemmi (C++, 1 core) | 1.42 s | 1.00x | — |
 | torch CPU, eager, 6 threads | 2.02 s | 1.42x | 173e6 |
@@ -211,7 +211,7 @@ Measured on a container with an NVIDIA card (driver CUDA 13.0), torch 2.13.0
 
 About 21x faster than gemmi and 11x faster than MPS.
 
-In the frame loop the same splat takes **65.9 ms** — the isolated benchmark is
+In the frame loop the same density calculation takes **65.9 ms** — the isolated benchmark is
 0.07 s for one call on warm buffers, so the two now agree to within the
 difference between a benchmark and a loop. That gap used to be 4.6x and is the
 subject of the section after next; it closed when the container's thread count
@@ -246,7 +246,7 @@ Environment notes, all of which cost a round to discover:
   a compile failure now warns with its cost and likely cause instead of
   quietly halving throughput.
 
-  **Measured properly, compiling is worth 2.69x on the real CUDA splat**,
+  **Measured properly, compiling is worth 2.69x on the real CUDA density calculation**,
   135,834 atoms on the 120 x 160 x 360 grid:
 
   | | s | atom-voxel pairs/s |
@@ -263,11 +263,11 @@ Environment notes, all of which cost a round to discover:
   ~12 s on CUDA, which a trajectory amortizes and a two-frame smoke test does
   not.
 
-  **Confirmed in situ**, 251 frames, `torch_timing=True`: the splat's median
-  is **25.5 ms/frame against 65.9 eager, 2.58x**. `bench_splat`'s compiled
+  **Confirmed in situ**, 251 frames, `torch_timing=True`: the density calculation's median
+  is **25.5 ms/frame against 65.9 eager, 2.58x**. `bench_density`'s compiled
   0.02 s understated the real loop by 27%, which is the usual direction.
 
-  **Read the MEDIAN, not the mean.** The same run reports a splat mean of
+  **Read the MEDIAN, not the mean.** The same run reports a density calculation mean of
   61.6 ms, nearly the eager figure, because `torch.compile` spends **9.07 s on
   frame 0** and the mean spreads it over 251 frames. That very nearly produced
   the conclusion that compiling had done nothing.
@@ -310,7 +310,7 @@ Environment notes, all of which cost a round to discover:
   single-trace cost is simply what compiling this graph costs per process.
 
   **Conclusion, so this does not get re-litigated.** Compiling is worth 2.67x
-  on the splat and costs ~8.1 s per process that no cache or configuration
+  on the density calculation and costs ~8.1 s per process that no cache or configuration
   recovers. Break-even is ~196 frames. Turn it on for trajectories, leave it
   off for smoke tests, and do not expect a persistent cache to change that.
 
@@ -332,13 +332,13 @@ The two cards differ by roughly an order of magnitude in memory bandwidth, and
 since almost every phase here is bandwidth-bound, that one ratio explains most
 of what follows.
 
-### The frame is not 94% splat here
+### The frame is not 94% density here
 
 251 frames, compiled, `torch_timing=True`:
 
 | phase | ms/frame | share | same phase at `d_min` 0.9 on the other card |
 |---|---|---|---|
-| **splat** | **83.9** | **68.3%** | 25.0 compiled / 65.9 eager -- see below |
+| **density** | **83.9** | **68.3%** | 25.0 compiled / 65.9 eager -- see below |
 | into cctbx | 14.3 | 11.6% | 1.9 (**7.5x**) |
 | fft+extract | 10.0 | 8.1% | 0.3 (**33x**) |
 | traj read | 6.5 | 5.3% | ~12.8 |
@@ -349,7 +349,7 @@ of what follows.
 | host->device | 0.3 | 0.2% | 0.6 |
 | **total** | **122.9** | | |
 
-**Compare the splat like for like.** The two runs do different amounts of
+**Compare the density calculation like for like.** The two runs do different amounts of
 work -- GB10 has MORE atom-voxel pairs despite the coarser grid, 395,426,690
 against 348,765,878, because it ran the current 1e-4 cutoff against the 0.01
 of the tables above, and the larger radius more than cancels the coarser
@@ -361,17 +361,17 @@ grid. Per pair:
 | compiled | 25.0 ms -> 13,951e6 pairs/s | 77.4 ms -> 5,109e6 | **2.7x slower** |
 
 \* derived, not measured: the eager run was timed whole-loop only, so this is
-736.1 ms/frame less the 39.0 ms of non-splat phases from the compiled run.
-The agreement with `bench_splat` noted below is what justifies it.
+736.1 ms/frame less the 39.0 ms of non-density phases from the compiled run.
+The agreement with `bench_density` noted below is what justifies it.
 
-So the splat does NOT transfer either -- and the eager/compiled split is the
+So the density calculation does NOT transfer either -- and the eager/compiled split is the
 bandwidth story stated twice: 9.3x apart without fusion, 2.7x with it. (An
-earlier version of this section compared GB10's compiled splat against the
+earlier version of this section compared GB10's compiled density calculation against the
 other card's EAGER figure and concluded it was "only 1.3x slower". It was
 comparing a compiled run with an uncompiled one.)
 
 **The FFT needs a different normalisation, and is worse than it looks.** The
-splat scales with PAIRS, so per-pair handles the cutoff difference. FFT scales
+density calculation scales with PAIRS, so per-pair handles the cutoff difference. FFT scales
 with VOXELS, where the cutoff is irrelevant and GB10's grid is 2.6x SMALLER --
 so the raw ratio flatters it:
 
@@ -384,19 +384,19 @@ so the raw ratio flatters it:
 Even allowing an order of magnitude for bandwidth, ~8x is unexplained --
 cuFFT plan selection and the unified-memory path are the things to look at.
 At 8% of the frame for an operation the other card does in 0.3 ms, this is
-the clearest optimisation target in the profile, and unlike the splat it has
+the clearest optimisation target in the profile, and unlike the density calculation it has
 had no attention at all.
 
 The host phases cost ~7x on Grace ARM cores at one thread; those scale with
 reflection count, which the coarser grid reduces, so they are understated
 here too.
 
-One check worth keeping: the phase table implies an eager splat rate of
-567e6 pairs/s and `bench_splat` measured 567.5e6 independently. The eager
-splat is a case where the benchmark does not overstate the loop.
+One check worth keeping: the phase table implies an eager density calculation rate of
+567e6 pairs/s and `bench_density` measured 567.5e6 independently. The eager
+density calculation is a case where the benchmark does not overstate the loop.
 
-**So the splat is 68% of the frame, not the 94% recorded above, and non-splat
-work is 39.0 ms/frame. An infinitely fast splat would buy 3.15x and no more.**
+**So the density calculation is 68% of the frame, not the 94% recorded above, and non-density
+work is 39.0 ms/frame. An infinitely fast density calculation would buy 3.15x and no more.**
 That is the number to have in hand before optimizing this pipeline further on
 a machine of this shape, and it is the answer to why ten CPU ranks draw level
 with one GPU at high resolution: the GPU accelerates the 68%, and MPI
@@ -410,7 +410,7 @@ Both rows at `OMP_NUM_THREADS=10`, so the comparison is matched:
 |---|---|---|
 | whole frame loop, eager | 736 ms/frame | - |
 | whole frame loop, compiled | 133 ms/frame | - |
-| speedup | **5.53x** | 2.58x on the splat |
+| speedup | **5.53x** | 2.58x on the density calculation |
 | saved per frame | **603 ms** | 41.7 ms |
 | one-off (frame 0 minus median) | **1.66 s** | 8.77 s |
 | **break-even** | **2.8 frames** | ~210 frames |
@@ -429,7 +429,7 @@ contend for work that is not there. The inverse of the throttling story above.
 
 ### The pair budget is a sub-1% knob here
 
-`bench_splat.py`, same system and grid, sweeping `--max-pairs`:
+`bench_density.py`, same system and grid, sweeping `--max-pairs`:
 
 | max_pairs | MiB/buffer | eager Ge/s | compiled Ge/s | % of best | chunks | padding |
 |---|---|---|---|---|---|---|
@@ -453,8 +453,8 @@ kept on the numbers, not on the reasoning, and its docstring says so. Padding
 grows with the budget (1.010 -> 1.058), so going bigger trades 5.8% of wasted
 pair work for 1.8% of overhead; L2 sits near where those cross.
 
-Both figures are `bench_splat` numbers, which this page warns are upper
-bounds. The in-situ splat median at 6.29 M was 77.4 ms/frame against the
+Both figures are `bench_density` numbers, which this page warns are upper
+bounds. The in-situ density median at 6.29 M was 77.4 ms/frame against the
 benchmark's implied 52.5 ms for the same pair count -- the usual ~1.5x gap.
 
 ### GPU runs are not bit-reproducible
@@ -528,10 +528,10 @@ Do not trust `nproc`, `os.cpu_count()` or `sched_getaffinity` here: all three
 report the host's cores, because a CPU limit is enforced by accounting rather
 than by restricting which cores a process may use.
 
-### The "splat is slow in situ" mystery was the same throttling
+### The "density is slow in situ" mystery was the same throttling
 
-For weeks the splat cost ~255 ms/frame in the loop against 62.8 ms repeated
-back-to-back on the same tensors. The gap was the throttle: `bench_splat`
+For weeks the density calculation cost ~255 ms/frame in the loop against 62.8 ms repeated
+back-to-back on the same tensors. The gap was the throttle: `bench_density`
 reports `min()` over its repetitions, so it reported the repetition that was
 not frozen, while the loop paid on every frame. With the thread count fixed the
 two agree — 65.9 ms in the loop against 0.07 s for one benchmark call.
@@ -543,8 +543,8 @@ no visible reason:
 | hypothesis | test | result |
 |---|---|---|
 | cProfile overhead | run with `profile=False` | 255.4 vs 264.8 ms — 4% |
-| real vs random coordinates | `bench_splat --random-coords` | no difference |
-| GPU idle clocks between frames | `bench_splat --idle-gap 0.3` | no difference |
+| real vs random coordinates | `bench_density --random-coords` | no difference |
+| GPU idle clocks between frames | `bench_density --idle-gap 0.3` | no difference |
 | allocator churn from the per-frame FFT buffer | CUDA allocator stats | retries 0, segment frees 0 |
 | host-side contention | repeat with the host kept busy | 63.2 vs 62.8 ms |
 | kernel-launch overhead | `torch_max_pairs_per_batch=64000000` | 259 → 247 ms, 5% |
@@ -561,9 +561,9 @@ are not.
 Hard-won, in the order the mistakes were made.
 
 **cProfile misleads badly for torch.** It charges per *Python* call, and the
-splat makes ~90 batched calls per frame each issuing many ops, so it inflates
-the splat several-fold while the FFT — one call doing heavy GPU work — looks
-free. In a 251-frame run it showed `splat_density` at 65 s cumulative against a
+density calculation makes ~90 batched calls per frame each issuing many ops, so it inflates
+the density calculation several-fold while the FFT — one call doing heavy GPU work — looks
+free. In a 251-frame run it showed `compute_density` at 65 s cumulative against a
 real ~15 s. Its `tottime` column *is* trustworthy for low-call-count functions
 doing real work, which is how `miller.__add__` was correctly identified at 53 ms
 per call.
@@ -577,7 +577,7 @@ took to *enqueue* work, and the cost surfaces on whichever later call happens
 to block. Every phase timer synchronizes on both sides.
 
 **Back-to-back benchmarks measure a different problem than a real loop.** They
-keep caches warm, the device busy, and the allocator stable. `bench_splat`
+keep caches warm, the device busy, and the allocator stable. `bench_density`
 reported 63 ms for an operation that cost 255 ms in situ. That gap turned out
 not to be about the loop at all — the benchmark was short enough to fit inside
 one CPU-quota period and reports `min()` over its repetitions, so it never paid
@@ -590,7 +590,7 @@ number.** `nproc`, `os.cpu_count()` and `os.sched_getaffinity()` all report the
 host's cores; a CPU limit is enforced by quota accounting instead. The
 signature is visible in a profiler trace as stalls that all end at the same
 phase modulo 100 ms, and `tools/analyze_trace.py` tests for it. This one factor
-was worth 4.3× on the splat and had been distorting every number here.
+was worth 4.3× on the density calculation and had been distorting every number here.
 
 **Do not count `ProfilerStep` as device work.** torch projects it onto the GPU
 track as a `gpu_user_annotation` spanning the whole step, so summing that
@@ -598,7 +598,7 @@ category reports the device ~100% busy whatever it is doing — and hides the
 idle you are looking for. In `key_averages()` the tell is `ProfilerStep*` with
 a CUDA share above 100%.
 
-**Benchmark inputs must be the real thing.** `bench_splat` originally splatted
+**Benchmark inputs must be the real thing.** `bench_density` originally placed density at
 uniformly *random* coordinates, having discarded the structure's own — a
 materially easier problem for an atomic scatter than a clustered structure. Now
 fixed; `--random-coords` retains the old behaviour for comparison.
@@ -608,7 +608,7 @@ same command reached 25% on the 10-frame case. A single pair of runs once
 showed the numpy accumulation making things *slower*; three runs each showed
 the opposite, matching the microbenchmark's prediction.
 
-## How the splat got fast
+## How the density calculation got fast
 
 Starting point was 12.2 s (6 threads). Every step below is numerically neutral:
 density correlation against gemmi is unchanged at 0.99977378 and the sum ratio
@@ -679,7 +679,7 @@ Measured on the accumulation alone: 0.88 → 0.01 ms/frame at 6,388 reflections,
 Backpropagating through N configurations at once — a guided step over an
 ensemble, say — is limited by memory, and the limit is not what it looks like.
 
-The density grid is the obvious cost but the small one. The splat's working
+The density grid is the obvious cost but the small one. The density calculation's working
 buffers are `(atoms × voxels)` arrays, far larger than the grid, and autograd
 retains them for the backward pass. Do that for N members simultaneously and
 the retained intermediates, not the grids, are what fills memory. `xtraj.py`
@@ -688,7 +688,7 @@ immediately; guidance cannot, because every member's graph has to stay live
 until the loss is backward-ed.
 
 `structure_factors_batch(..., use_checkpoint=True)` recomputes each member's
-splat during backward instead of retaining it. Measured on a 3000-atom system
+density during backward instead of retaining it. Measured on a 3000-atom system
 at a 90³ grid, peak RSS above baseline:
 
 | N | retained | checkpointed |
@@ -722,7 +722,7 @@ at N=16 on a device with room for 8, half the penalty at the same peak. A
 to pick an extreme.
 
 Calibrate against measurement rather than arithmetic when doing this. The
-per-member cost is dominated by the splat, so the 2.4x recompute penalty
+per-member cost is dominated by the density calculation, so the 2.4x recompute penalty
 measured at one N on one device should not be assumed to hold generally.
 
 ## Compiling under MPI
@@ -747,16 +747,16 @@ specialized; and it has to pass both partial and full-length offset prefixes,
 because the guard is literally
 `c_off_sq._base.size()[0] == c_off_sq.size()[0]`. Both were found by reading
 `TORCH_LOGS=recompiles`, which is the tool to reach for if this ever regresses —
-the check is that a real splat immediately after the warmup adds no new graphs
+the check is that a real density calculation immediately after the warmup adds no new graphs
 to `torch._dynamo.utils.counters["stats"]["unique_graphs"]`.
 
 ## Tuning knobs
 
 | option | effect |
 |---|---|
-| `torch_device=cpu\|mps\|cuda` | where the splat, symmetrization and FFT run |
+| `torch_device=cpu\|mps\|cuda` | where the density calculation, symmetrization and FFT run |
 | `torch_compile=False` | skip the one-off compile: worth it below a couple of hundred frames **per process** on CUDA (~8.8 s one-off), on MPS where it cannot succeed, or to isolate a compile-related numerical difference. Not auto-selected -- see below. |
-| `torch_max_pairs_per_batch=N` | atom-voxel pair budget, the knob that actually sets intermediate tensor size. **Default is `auto`**; a forced value should be re-tuned on a new machine with `bench_splat.py`. |
+| `torch_max_pairs_per_batch=N` | atom-voxel pair budget, the knob that actually sets intermediate tensor size. **Default is `auto`**; a forced value should be re-tuned on a new machine with `bench_density.py`. |
 | `torch_num_threads=N` | threads per rank. Defaults to the cgroup CPU quota, or to 1 on a device run when no quota is discoverable. Set `OMP_NUM_THREADS` too — see "The container was CPU-throttled, which was worth more than the code". |
 | `torch_taper_width=W` | taper width in Å; narrower is closer to gemmi but harsher on gradients |
 
@@ -772,7 +772,7 @@ a knob that quietly picks a number is no easier to debug than one the user
 guessed at.
 
 `max_pairs_per_batch` defaults to 4M because that is ~16 MB, which stays
-resident in a CPU cache -- and `splat_density`'s docstring has always said to
+resident in a CPU cache -- and `compute_density`'s docstring has always said to
 expect a GPU to want more. The transferable rule is the criterion, not the
 number, so `auto` sizes the buffer to **the L2 the CUDA device reports**, then
 caps it so the live buffers stay inside a quarter of free memory. If the device
@@ -810,10 +810,10 @@ that wall-clock timing could not, and the same questions will come back.
 | option | what it answers |
 |---|---|
 | `torch_timing=True` | where the frame goes, host and device, plus the loop's wall time and the residual the phases do not account for. Read `ms/frame` against the `calls` column: `traj read` fires once per *chunk*. |
-| `torch_splat_stats=True` | is it more work or slower work? Counts atoms, chunks, and pairs both ideal and as batched, comparable directly with `bench_splat.py`. Also prints the splat's per-frame series with frame 0 separated, which distinguishes a one-time cost from a per-frame one. |
+| `torch_density_stats=True` | is it more work or slower work? Counts atoms, chunks, and pairs both ideal and as batched, comparable directly with `bench_density.py`. Also prints the density calculation's per-frame series with frame 0 separated, which distinguishes a one-time cost from a per-frame one. |
 | `torch_profile_frames=N` | records N frames with `torch.profiler` (CPU + CUDA), writes a Chrome trace and prints the per-operator table. Skips frame 0, warms on frame 1. Cannot be combined with `profile=True`, and perturbs what it measures. |
-| `torch_reuse_grid=True` | splat into one preallocated grid instead of a fresh allocation per frame. Measured: no effect, per-frame or one-time. |
-| `torch_free_early=True` | drop the previous frame's density and F before the splat. Measured: no effect. |
+| `torch_reuse_grid=True` | place density into one preallocated grid instead of a fresh allocation per frame. Measured: no effect, per-frame or one-time. |
+| `torch_free_early=True` | drop the previous frame's density and F before the density calculation. Measured: no effect. |
 | `profile=True` | cProfile. Misleads badly for torch — see "How to measure this pipeline". |
 
 `tools/analyze_trace.py <trace.json>` reads what `torch_profile_frames` writes:

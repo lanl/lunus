@@ -80,7 +80,7 @@ if [ -z "${OMP_NUM_THREADS:-}" ]; then
 OMP_NUM_THREADS is not set. On a CPU-limited container torch sizes its thread
 pool from the HOST's core count -- 104 threads on 3 CPUs, measured -- and the
 spinning threads exhaust the cgroup quota, freezing the process for most of
-every 100 ms period. That cost 4.3x on the splat and made every timing here a
+every 100 ms period. That cost 4.3x on the density calculation and made every timing here a
 measurement of the quota rather than of the code. Set it to the pod's real CPU
 count (`cat /sys/fs/cgroup/cpu.max`) and run again.
 MSG
@@ -131,11 +131,11 @@ echo
 
 step() { echo; echo "=== $* ==="; }
 
-# ---- 1. the splat, which is most of the frame -------------------------------
-step "1/4  splat benchmark  -> replaces the CPU / MPS / CUDA tables"
-"${PY[@]}" "${HERE}/bench_splat.py" "${TOP}" \
+# ---- 1. the density calculation, which is most of the frame -------------------------------
+step "1/4  density benchmark  -> replaces the CPU / MPS / CUDA tables"
+"${PY[@]}" "${HERE}/bench_density.py" "${TOP}" \
     --cell "${CELL}" --grid "${GRID}" --device "${DEVICE}" --no-gemmi \
-    2>&1 | tee "${LOGDIR}/1-bench_splat.log"
+    2>&1 | tee "${LOGDIR}/1-bench_density.log"
 
 # ---- 2. where the frame goes ------------------------------------------------
 step "2/4  frame budget  -> replaces 'Where the time actually goes'"
@@ -143,7 +143,7 @@ step "2/4  frame budget  -> replaces 'Where the time actually goes'"
     top="${TOP}" use_top_bfacs=True traj="${TRAJ}" first=0 last="${LAST}" \
     d_min="${D_MIN}" unit_cell="${CELL}" space_group="${SPACE_GROUP}" \
     expand_symmetry="${EXPAND}" engine=torch torch_compile=False \
-    torch_device="${DEVICE}" torch_timing=True torch_splat_stats=True \
+    torch_device="${DEVICE}" torch_timing=True torch_density_stats=True \
     fcalc="${LOGDIR}/f_budget.mtz" icalc="${LOGDIR}/i_budget.mtz" \
     diffuse="${LOGDIR}/d_budget.hkl" \
     2>&1 | tee "${LOGDIR}/2-frame_budget.log"
@@ -195,7 +195,7 @@ cat <<MSG
 Logs in ${LOGDIR}
 
 Into docs/performance.md:
-  1-bench_splat.log     the CPU / Apple GPU / NVIDIA GPU tables, and the
+  1-bench_density.log     the CPU / Apple GPU / NVIDIA GPU tables, and the
                         atom-voxel pair count in the configuration block
   2-frame_budget.log    'Where the time actually goes'. Read the median
                         column rather than the mean: one-time costs divide by

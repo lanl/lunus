@@ -1,5 +1,5 @@
 """
-Validates the full splat+FFT pipeline with DIFFERENT B-factors per atom
+Validates the full density+FFT pipeline with DIFFERENT B-factors per atom
 (not just per element), against an analytic reference where each atom's
 Debye-Waller factor uses its own B -- the actual target of this feature.
 """
@@ -27,7 +27,7 @@ def taper_factor(r, R, w):
     return t
 
 
-def splat_and_fft_per_atom_b(atoms, A_list, lam_list, R_list, w, grid_shape, M, cell_volume):
+def density_and_fft_per_atom_b(atoms, A_list, lam_list, R_list, w, grid_shape, M, cell_volume):
     Nu, Nv, Nw = grid_shape
     grid = np.zeros((Nu, Nv, Nw), dtype=np.float64)
     spacing = np.array([np.linalg.norm(M[:, 0]) / Nu, np.linalg.norm(M[:, 1]) / Nv, np.linalg.norm(M[:, 2]) / Nw])
@@ -57,11 +57,11 @@ def splat_and_fft_per_atom_b(atoms, A_list, lam_list, R_list, w, grid_shape, M, 
 
 
 def test_per_atom_b_factors():
-    """Full splat+FFT with a DIFFERENT B per atom, vs an analytic reference
+    """Full density+FFT with a DIFFERENT B per atom, vs an analytic reference
     where each atom's Debye-Waller factor uses its own B.
 
     The ~4% agreement asserted below is expected and is NOT a defect. The
-    reference here is fully UNTRUNCATED, while the splat applies a fixed
+    reference here is fully UNTRUNCATED, while the density calculation applies a fixed
     density-cutoff THRESHOLD: a high-B atom is more spread out, so the same
     threshold truncates a larger fraction of its charge (measured directly, a
     B=85 carbon loses ~9.3% of its charge to the cutoff before any taper,
@@ -108,11 +108,11 @@ def test_per_atom_b_factors():
     for (el, pos, occ, b_atom) in atoms_spec:
         F_ref += occ * analytic_atom_F(IT92_COEFFS[el], b_atom, pos, hkl_test, M)
 
-    atoms_for_splat = [(s[1], s[2]) for s in atoms_spec]
-    Fgrid = splat_and_fft_per_atom_b(atoms_for_splat, A_arr, lam_arr, R_arr, w, grid_shape, M, cell_volume)
+    atoms_for_density = [(s[1], s[2]) for s in atoms_spec]
+    Fgrid = density_and_fft_per_atom_b(atoms_for_density, A_arr, lam_arr, R_arr, w, grid_shape, M, cell_volume)
     F_num = np.array([Fgrid[h % Nu, k % Nv, l % Nw] for h, k, l in hkl_test])
 
-    print("hkl            F_splat (per-atom B)         F_analytic (per-atom B)      rel.err")
+    print("hkl            F_density (per-atom B)         F_analytic (per-atom B)      rel.err")
     max_rel_err = 0.0
     for (h, k, l), fn, fa in zip(hkl_test, F_num, F_ref):
         rel_err = abs(fn - fa) / max(abs(fa), 1e-8)

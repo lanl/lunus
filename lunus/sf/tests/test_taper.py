@@ -1,6 +1,6 @@
 """
 Extends the isolated real-space taper demonstration to the FULL
-splat -> FFT -> F(hkl) pipeline (with phase factors, not just a real
+density -> FFT -> F(hkl) pipeline (with phase factors, not just a real
 scalar sum), confirming the gradient is well-behaved (converges cleanly
 across shrinking eps) with the smooth taper, unlike the hard cutoff's
 erratic finite-difference behavior shown in demo_taper_gradient.py.
@@ -20,7 +20,7 @@ def taper_factor(r, R, w):
     return t
 
 
-def splat_and_fft_tapered(pos_frac, A, lam, R, w, grid_shape, M, cell_volume):
+def density_and_fft_tapered(pos_frac, A, lam, R, w, grid_shape, M, cell_volume):
     Nu, Nv, Nw = grid_shape
     grid = np.zeros((Nu, Nv, Nw), dtype=np.float64)
     spacing = np.array([np.linalg.norm(M[:, 0]) / Nu, np.linalg.norm(M[:, 1]) / Nv, np.linalg.norm(M[:, 2]) / Nw])
@@ -91,8 +91,8 @@ def test_tapered_gradient_converges():
     for eps in eps_values:
         pos_p = pos_frac.copy(); pos_p[0] += eps
         pos_m = pos_frac.copy(); pos_m[0] -= eps
-        Fp = splat_and_fft_tapered(pos_p, A, lam, R, w, grid_shape, M, cell_volume)[hkl[0] % Nu, hkl[1] % Nv, hkl[2] % Nw]
-        Fm = splat_and_fft_tapered(pos_m, A, lam, R, w, grid_shape, M, cell_volume)[hkl[0] % Nu, hkl[1] % Nv, hkl[2] % Nw]
+        Fp = density_and_fft_tapered(pos_p, A, lam, R, w, grid_shape, M, cell_volume)[hkl[0] % Nu, hkl[1] % Nv, hkl[2] % Nw]
+        Fm = density_and_fft_tapered(pos_m, A, lam, R, w, grid_shape, M, cell_volume)[hkl[0] % Nu, hkl[1] % Nv, hkl[2] % Nw]
         dF = (Fp - Fm) / (2 * eps)
         dF_values.append(dF)
         print(f"  eps={eps:.0e}: dF/d(frac_x) = {dF:.4f}")
