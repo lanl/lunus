@@ -143,11 +143,23 @@ they bound what the scheme can do:
    the cost ratio. With the switch at 30 iterations and a 0.03 Å taper the
    two-stage run reached 1e-4 in 1.97 s against 2.42 s.
 
+A coarse cutoff of 1e-3 (same settings, switch at 30) moved the switch
+point from 3.2e-4 to 2.6e-4 and the time from 3.3 to 3.0 s against
+one-stage, a 10% saving, with the taper; without it the coarse stage
+handed over 3.5e-4. And the per-evaluation traces settle what the coarse
+stage is doing: after the same number of evaluations the one-stage fine
+run was at 2.75e-4 where the 1e-2 coarse stage was at 3.8–4.3e-4 under the
+fine model and the 1e-3 stage at 2.6e-4. **The coarse model does not
+converge in fewer iterations; the landscape has the same shape at every
+cutoff.** Its only advantage is a cheaper evaluation, so the saving can
+never exceed one minus the cost ratio over the iterations spent coarse,
+and at 1e-2 it is partly given back as slower progress per iteration.
+
 So the recipe is sound, the taper is what makes it reproducible, and its
-payoff is set by where the coarse floor lies relative to the target
-precision and by how much of a frame the density step is. An intermediate
-coarse cutoff (1e-3) would lower the floor at intermediate cost and has not
-been tried.
+payoff is bounded by the per-evaluation cost ratio, which is ∼0.5 here and
+approaches the r³ value only when the density step dominates the frame.
+On 3,341 atoms at 2 Å it is a 10–20% effect; the 135,834-atom system is
+where it would be worth measuring next.
 
 ## Assumptions carried over from xtraj.py
 
