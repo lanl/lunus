@@ -369,8 +369,9 @@ def build_parser():
                    help="for the optimize stage; fidelity and roughness always "
                         "use float64 unless this is float32")
     p.add_argument("--deterministic", action="store_true",
-                   help="torch.use_deterministic_algorithms(True); slower on "
-                        "CUDA but makes finite differences trustworthy there")
+                   help="torch.use_deterministic_algorithms(True), with the "
+                        "CUBLAS_WORKSPACE_CONFIG it needs; slower on CUDA but "
+                        "makes finite differences trustworthy there")
     p.add_argument("--compile", action="store_true",
                    help="torch.compile the density core; worth it only for a "
                         "long optimize stage")
@@ -382,6 +383,11 @@ def main():
     args = build_parser().parse_args()
     log = sys.stdout
     if args.deterministic:
+        # cuBLAS is only deterministic with a fixed workspace, and it reads
+        # this variable when its handle is created, i.e. at the first matmul,
+        # so it must be set here and not merely documented. Without it the
+        # very first cart_to_frac_delta() raises on CUDA.
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
         torch.use_deterministic_algorithms(True)
     dtype = dict(float32=torch.float32, float64=torch.float64)[args.dtype]
     if args.device == "mps" and dtype is torch.float64:

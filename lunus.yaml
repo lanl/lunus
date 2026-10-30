@@ -1,9 +1,11 @@
 name: lunus
 channels:
   - conda-forge
+  - pytorch
 dependencies:
   - python == 3.12
-  - dacase::ambertools-dac=25
+  - pytorch
+  - ambertools
   - parmed
   - cctbx
   - nexusformat
