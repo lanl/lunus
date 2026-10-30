@@ -73,6 +73,17 @@ no cutoff, no taper -- which is the realistic case and includes the
 taper's forward-model error in the residual. Run both and read them
 against each other.
 
+Which atoms move. --free takes a cctbx atom selection ("protein",
+"protein and not element H", default "all"): only those atoms are
+displaced, sampled for finite differences, walked and refined, while every
+atom contributes density. That is the realistic parameterization for an MD
+box -- 51,690 of the 135,834 atoms in examples/compare_gemmi/top_bfac.pdb.gz
+are water, whose positions Bragg amplitudes do not determine -- and it is
+also the right cost test, since the waters still have to be placed on the
+grid at every evaluation. For that system use --target self: direct
+summation over 135k atoms is not practical, and the 1e-4 model was exact on
+7FPV anyway.
+
 Precision. On CUDA the atomic scatter is not bit-reproducible (4e-5
 relative on Icalc, docs/performance.md), which a finite difference at a
 1e-4 A step would measure instead of the gradient. The fidelity and
@@ -116,13 +127,21 @@ def width_label(w):
 
 
 # --------------------------------------------------------------------- setup
-def load_system(pdb, d_min, device, dtype, log):
+def load_system(pdb, d_min, device, dtype, log, free="all"):
     """Everything about the crystal that does not depend on the taper or the
-    cutoff: coordinates, B, occupancies, grid, symmetry operations and the
-    full reflection list to d_min."""
+    cutoff: coordinates, B, occupancies, grid, symmetry operations, the full
+    reflection list to d_min, and which atoms are free to move."""
     from cctbx import miller
+    from iotbx.pdb import hierarchy
 
     xrs, elements, b_per_atom, occ, frac, _, _, _ = read_model(pdb, log)
+    h = hierarchy.input(file_name=pdb, sort_atoms=False).hierarchy
+    free_np = np.array(h.atom_selection_cache().selection(free), dtype=bool)
+    assert len(free_np) == len(elements)
+    if not free_np.any():
+        raise SystemExit("--free %r selects no atoms" % free)
+    print("%d of %d atoms free to move (--free %r)"
+          % (free_np.sum(), len(free_np), free), file=log)
     cell = xrs.unit_cell().parameters()
     M_np = orth_matrix(*cell)
     sg = xrs.space_group()
@@ -159,7 +178,17 @@ def load_system(pdb, d_min, device, dtype, log):
         volume=float(np.linalg.det(M_np)),
         hkl=torch.tensor(hkl_np, dtype=torch.long, device=device),
         spacing=spacing, device=device, dtype=dtype,
+        free=torch.tensor(np.flatnonzero(free_np), dtype=torch.long, device=device),
+        free_np=free_np,
     )
+
+
+def displaced(s, frac_start, delta_free):
+    """frac_start with a (n_free, 3) Cartesian displacement applied to the
+    free atoms; the fixed atoms do not move. Differentiable in delta_free."""
+    d_full = torch.zeros_like(frac_start)
+    d_full = d_full.index_put((s["free"],), cart_to_frac_delta(s, delta_free))
+    return frac_start + d_full
 
 
 def build_kernels(s, cutoff, width):
@@ -294,7 +323,7 @@ def run_adam(s, k, frac_start, disp_cart, target, lr, steps, reach, log):
     hist, L_first, hit = [], None, None
     for it in range(steps):
         opt.zero_grad()
-        L = loss_fn(forward(s, k, frac_start + cart_to_frac_delta(s, delta)), target)
+        L = loss_fn(forward(s, k, displaced(s, frac_start, delta)), target)
         L.backward()
         opt.step()
         hist.append((float(L), rmsd_to_truth(delta.detach(), disp_cart)))
@@ -326,7 +355,7 @@ def run_lbfgs(s, k, frac_start, disp_cart, target, steps, reach, log,
 
     def closure():
         opt.zero_grad()
-        L = loss_fn(forward(s, k, frac_start + cart_to_frac_delta(s, delta)), target)
+        L = loss_fn(forward(s, k, displaced(s, frac_start, delta)), target)
         L.backward()
         evals.append((float(L), rmsd_to_truth(delta.detach(), disp_cart)))
         return L
@@ -335,7 +364,7 @@ def run_lbfgs(s, k, frac_start, disp_cart, target, steps, reach, log,
     st = opt.state[opt._params[0]]
     n_iter, n_evals = int(st.get("n_iter", 0)), int(st.get("func_evals", len(evals)))
     with torch.no_grad():
-        final_L = float(loss_fn(forward(s, k, frac_start + cart_to_frac_delta(s, delta)), target))
+        final_L = float(loss_fn(forward(s, k, displaced(s, frac_start, delta)), target))
     final_rmsd = rmsd_to_truth(delta.detach(), disp_cart)
     hit = next((i for i, e in enumerate(evals) if e[0] < reach * evals[0][0]), None)
     # L-BFGS with max_iter=steps stops early only on a failed line search
@@ -390,7 +419,7 @@ def stage_schedule(s, frac_start, disp_cart, exact_target, width, coarse,
         label="stage 1 (coarse) %s" % tag))
     with torch.no_grad():                   # where the coarse optimum sits,
         L_switch = float(loss_fn(forward(   # seen by the fine model
-            s, k_f, frac_start + cart_to_frac_delta(s, delta1)), target))
+            s, k_f, displaced(s, frac_start, delta1)), target))
     (st2, _), t_f = timed(lambda: run_lbfgs(
         s, k_f, frac_start, disp_cart, target, steps - coarse_steps, reach, log,
         delta_init=delta1, label="stage 2 (fine) %s" % tag))
@@ -428,6 +457,10 @@ def build_parser():
     p.add_argument("--displace", type=float, default=0.3,
                    help="RMS displacement of the starting structure, A")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--free", default="all",
+                   help="cctbx atom selection of the atoms that move; the rest "
+                        "contribute density but are held fixed (e.g. "
+                        "'protein', 'protein and not element H')")
     # fidelity
     p.add_argument("--fd-atoms", type=int, default=30,
                    help="atoms sampled for the finite-difference check")
@@ -488,18 +521,23 @@ def main():
     torch.manual_seed(args.seed)
     rng = np.random.default_rng(args.seed)
 
-    s = load_system(args.pdb, args.d_min, args.device, dtype, log)
+    s = load_system(args.pdb, args.d_min, args.device, dtype, log, free=args.free)
     n_atoms = s["frac0"].shape[0]
+    free_idx = np.flatnonzero(s["free_np"])
+    n_free = len(free_idx)
 
     # One displacement and one walk direction, shared by every configuration
-    # so the sweep compares like with like.
-    disp_np = rng.normal(size=(n_atoms, 3)) * (args.displace / math.sqrt(3.0))
+    # so the sweep compares like with like. Both live on the free atoms only;
+    # disp_cart is (n_free, 3), the shape every optimizer's delta has.
+    disp_np = rng.normal(size=(n_free, 3)) * (args.displace / math.sqrt(3.0))
     disp_cart = torch.tensor(disp_np, dtype=dtype, device=args.device)
-    frac_start = (s["frac0"] + cart_to_frac_delta(s, disp_cart)).detach()
-    direction_np = rng.normal(size=(n_atoms, 3))
-    direction_np /= np.sqrt((direction_np ** 2).sum(axis=1).mean())   # RMS 1 A per unit t
+    frac_start = displaced(s, s["frac0"], disp_cart).detach()
+    direction_np = np.zeros((n_atoms, 3))
+    direction_np[free_idx] = rng.normal(size=(n_free, 3))
+    direction_np /= np.sqrt((direction_np[free_idx] ** 2).sum(axis=1).mean())  # RMS 1 A per unit t over the free atoms
     direction_cart = torch.tensor(direction_np, dtype=dtype, device=args.device)
-    fd_atoms = sorted(rng.choice(n_atoms, size=args.fd_atoms, replace=False).tolist())
+    fd_atoms = sorted(rng.choice(free_idx, size=min(args.fd_atoms, n_free),
+                                 replace=False).tolist())
     walk_length = args.walk_length or s["spacing"]
     print("starting structure displaced by %.3f A rms; walk of %.3f A in %d steps; "
           "%d atoms in the finite-difference sample"
@@ -507,7 +545,7 @@ def main():
 
     exact_target = exact_amplitudes(s, log) if args.target == "exact" else None
 
-    results = dict(args=vars(args), grid=list(s["grid"]), n_atoms=n_atoms,
+    results = dict(args=vars(args), grid=list(s["grid"]), n_atoms=n_atoms, n_free=n_free,
                    n_refl=int(s["hkl"].shape[0]), voxel=s["spacing"], runs=[])
     sweep_stages = [st for st in args.stages if st != "schedule"]
     for cutoff in (args.cutoffs if sweep_stages else []):
