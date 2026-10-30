@@ -46,6 +46,25 @@ literal zero is not available.
              methods assume a smooth gradient and stall on a kinked one,
              where Adam averages over the noise.
 
+  schedule   The two-stage refinement the first sweep suggested. On 7FPV
+             with the self-consistent target the taper was decisive at a
+             1e-2 cutoff (L-BFGS stalled without it) and immaterial at
+             1e-4, because the density jump at the boundary IS the cutoff
+             value. But an evaluation at 1e-2 costs about a quarter of one
+             at 1e-4 (mean radius 1.93 against 3.14 A, work ~ r^3), and the
+             tapered 1e-2 optimum was as good as the 1e-4 one. So: L-BFGS
+             at the coarse cutoff for a budget of iterations, then rebuild
+             the kernels at the fine cutoff, reset the optimizer (its
+             curvature pairs describe the coarse surface) and continue.
+             Compared against a one-stage run at the fine cutoff with the
+             same total iterations, by final loss, rmsd and wall time. The
+             target is the FINE model's own amplitudes, or the exact ones
+             with --target exact, so both schedules aim at the same point;
+             the loss under the fine model at the switch says how far the
+             coarse optimum sits from it. Run with and without the taper,
+             since the claim is that the taper is what makes stage one
+             usable.
+
 The target amplitudes are by default computed with the SAME kernels as the
 model (`--target self`), so that the only difference between runs is the
 gradient, and the optimum is exactly recoverable. `--target exact` uses
@@ -293,8 +312,13 @@ def run_adam(s, k, frac_start, disp_cart, target, lr, steps, reach, log):
                 steps_to_reach=hit)
 
 
-def run_lbfgs(s, k, frac_start, disp_cart, target, steps, reach, log):
-    delta = torch.zeros_like(disp_cart, requires_grad=True)
+def run_lbfgs(s, k, frac_start, disp_cart, target, steps, reach, log,
+              delta_init=None, label=None):
+    """One L-BFGS run of `steps` iterations. delta_init continues from an
+    earlier run's displacement (the schedule stage); the optimizer state is
+    always fresh. Returns (record, delta)."""
+    delta = (torch.zeros_like(disp_cart) if delta_init is None
+             else delta_init.detach().clone()).requires_grad_(True)
     opt = torch.optim.LBFGS([delta], lr=1.0, max_iter=steps, history_size=20,
                             line_search_fn="strong_wolfe",
                             tolerance_grad=0.0, tolerance_change=0.0)
@@ -319,13 +343,68 @@ def run_lbfgs(s, k, frac_start, disp_cart, target, steps, reach, log):
     # short of the budget are the stall count that this stage exists to see.
     print("  %-28s L-BFGS  loss %.3e -> %.3e  rmsd %.3f -> %.3f A  "
           "iterations %d of %d  evaluations %d  reached %gx start at eval %s%s"
-          % (k["label"], evals[0][0], final_L, evals[0][1], final_rmsd,
+          % (label or k["label"], evals[0][0], final_L, evals[0][1], final_rmsd,
              n_iter, steps, n_evals, reach, hit,
              "  STOPPED EARLY" if n_iter < steps else ""), file=log)
     return dict(loss=[e[0] for e in evals], rmsd=[e[1] for e in evals],
                 final_loss=final_L, final_rmsd=final_rmsd, iterations=n_iter,
                 evaluations=n_evals, stopped_early=n_iter < steps,
-                evals_to_reach=hit)
+                evals_to_reach=hit), delta.detach()
+
+
+def sync(device):
+    if str(device).startswith("cuda"):
+        torch.cuda.synchronize()
+    elif str(device) == "mps":
+        torch.mps.synchronize()
+
+
+# ------------------------------------------------------------------ schedule
+def stage_schedule(s, frac_start, disp_cart, exact_target, width, coarse,
+                   fine, coarse_steps, steps, reach, log):
+    """One-stage L-BFGS at `fine` against two-stage coarse-then-fine, same
+    total iteration budget, same target, timed."""
+    k_c = build_kernels(s, coarse, width)
+    k_f = build_kernels(s, fine, width)
+    with torch.no_grad():
+        target = exact_target if exact_target is not None else \
+            forward(s, k_f, s["frac0"]).abs()
+    tag = "width=%s fine=%g" % (width_label(width), fine)
+    print("\n== schedule %s: coarse %g (radius %.2f A) -> fine %g (radius %.2f A), "
+          "work ratio ~%.1fx" % (tag, coarse, float(k_c["r"].mean()), fine,
+                                 float(k_f["r"].mean()),
+                                 (float(k_f["r"].mean()) / float(k_c["r"].mean())) ** 3),
+          file=log)
+
+    def timed(fn):
+        sync(s["device"]); t0 = time.time()
+        out = fn()
+        sync(s["device"]); return out, time.time() - t0
+
+    (one, _), t_one = timed(lambda: run_lbfgs(
+        s, k_f, frac_start, disp_cart, target, steps, reach, log,
+        label="one-stage %s" % tag))
+
+    (st1, delta1), t_c = timed(lambda: run_lbfgs(
+        s, k_c, frac_start, disp_cart, target, coarse_steps, reach, log,
+        label="stage 1 (coarse) %s" % tag))
+    with torch.no_grad():                   # where the coarse optimum sits,
+        L_switch = float(loss_fn(forward(   # seen by the fine model
+            s, k_f, frac_start + cart_to_frac_delta(s, delta1)), target))
+    (st2, _), t_f = timed(lambda: run_lbfgs(
+        s, k_f, frac_start, disp_cart, target, steps - coarse_steps, reach, log,
+        delta_init=delta1, label="stage 2 (fine) %s" % tag))
+    print("  %-28s one-stage %.3e / %.3f A in %.1f s;  two-stage %.3e / %.3f A "
+          "in %.1f s (%.1f + %.1f);  loss under the fine model at the switch %.3e"
+          % (tag, one["final_loss"], one["final_rmsd"], t_one,
+             st2["final_loss"], st2["final_rmsd"], t_c + t_f, t_c, t_f, L_switch),
+          file=log)
+    return dict(width=width, width_label=width_label(width), coarse=coarse,
+                fine=fine, coarse_steps=coarse_steps, steps=steps,
+                radius_coarse=float(k_c["r"].mean()), radius_fine=float(k_f["r"].mean()),
+                one_stage=dict(one, seconds=t_one),
+                stage1=dict(st1, seconds=t_c), loss_at_switch_fine=L_switch,
+                stage2=dict(st2, seconds=t_f), two_stage_seconds=t_c + t_f)
 
 
 # ---------------------------------------------------------------------- main
@@ -340,7 +419,9 @@ def build_parser():
     p.add_argument("--cutoffs", type=float, nargs="+", default=DEFAULT_CUTOFFS,
                    help="density cutoffs, e/A^3 (default %s)" % DEFAULT_CUTOFFS)
     p.add_argument("--stages", nargs="+", default=["fidelity", "roughness", "optimize"],
-                   choices=["fidelity", "roughness", "optimize"])
+                   choices=["fidelity", "roughness", "optimize", "schedule"],
+                   help="schedule is not in the default set; it ignores "
+                        "--widths/--cutoffs and uses the --schedule-* options")
     p.add_argument("--target", default="self", choices=["self", "exact"],
                    help="amplitudes to fit: the model's own kernels on the true "
                         "coordinates (self), or cctbx direct summation (exact)")
@@ -363,6 +444,17 @@ def build_parser():
     p.add_argument("--no-lbfgs", action="store_true")
     p.add_argument("--reach", type=float, default=0.1,
                    help="loss fraction of the start that counts as 'reached'")
+    # schedule
+    p.add_argument("--schedule-widths", type=float, nargs="+", default=[HARD, 0.1],
+                   help="taper widths for the schedule stage (default: hard "
+                        "and 0.1, since the claim is that the taper makes "
+                        "the coarse stage usable)")
+    p.add_argument("--schedule-coarse", type=float, default=1e-2,
+                   help="stage-one cutoff, e/A^3")
+    p.add_argument("--schedule-fine", type=float, nargs="+", default=[1e-4, 1e-5],
+                   help="stage-two cutoffs, each also run one-stage for comparison")
+    p.add_argument("--schedule-coarse-steps", type=int, default=None,
+                   help="L-BFGS iterations in stage one (default: half of --steps)")
     # machinery
     p.add_argument("--device", default="cpu")
     p.add_argument("--dtype", default="float64", choices=["float32", "float64"],
@@ -417,7 +509,8 @@ def main():
 
     results = dict(args=vars(args), grid=list(s["grid"]), n_atoms=n_atoms,
                    n_refl=int(s["hkl"].shape[0]), voxel=s["spacing"], runs=[])
-    for cutoff in args.cutoffs:
+    sweep_stages = [st for st in args.stages if st != "schedule"]
+    for cutoff in (args.cutoffs if sweep_stages else []):
         for width in args.widths:
             k = build_kernels(s, cutoff, width)
             with torch.no_grad():
@@ -446,12 +539,24 @@ def main():
                                         args.steps, args.reach, log)
                                for lr in args.lrs]
                 if not args.no_lbfgs:
-                    run["lbfgs"] = run_lbfgs(s, k, frac_start, disp_cart, target,
-                                             args.steps, args.reach, log)
+                    run["lbfgs"], _ = run_lbfgs(s, k, frac_start, disp_cart,
+                                                target, args.steps, args.reach, log)
                 print("  optimize: %.0f s" % (time.time() - t0), file=log)
             results["runs"].append(run)
             with open(args.out, "w") as f:          # after every run, so a
                 json.dump(results, f, indent=1)     # killed sweep keeps its data
+
+    if "schedule" in args.stages:
+        coarse_steps = args.schedule_coarse_steps or args.steps // 2
+        results["schedule"] = []
+        for width in args.schedule_widths:
+            for fine in args.schedule_fine:
+                results["schedule"].append(stage_schedule(
+                    s, frac_start, disp_cart, exact_target, width,
+                    args.schedule_coarse, fine, coarse_steps, args.steps,
+                    args.reach, log))
+                with open(args.out, "w") as f:
+                    json.dump(results, f, indent=1)
 
     # ---- summary tables -------------------------------------------------
     runs = results["runs"]
@@ -486,6 +591,21 @@ def main():
                     cell += "/%.3f(%d)" % (r["lbfgs"]["final_rmsd"], r["lbfgs"]["iterations"])
                 cells.append("%18s" % cell)
             print("  %-10g" % c + "".join(cells), file=log)
+    if "schedule" in args.stages:
+        print("\nSchedule: L-BFGS, %d iterations total; two-stage spends %d at "
+              "cutoff %g first" % (args.steps, coarse_steps, args.schedule_coarse),
+              file=log)
+        print("  %-6s %-7s %14s %14s %12s %14s" % (
+            "width", "fine", "one-stage", "two-stage", "at switch", "seconds"), file=log)
+        print("  %-6s %-7s %14s %14s %12s %14s" % (
+            "", "", "loss / rmsd", "loss / rmsd", "fine loss", "one / two"), file=log)
+        for r in results["schedule"]:
+            print("  %-6s %-7g %8.2e/%.3f %8.2e/%.3f %12.2e %6.1f / %6.1f"
+                  % (r["width_label"], r["fine"],
+                     r["one_stage"]["final_loss"], r["one_stage"]["final_rmsd"],
+                     r["stage2"]["final_loss"], r["stage2"]["final_rmsd"],
+                     r["loss_at_switch_fine"], r["one_stage"]["seconds"],
+                     r["two_stage_seconds"]), file=log)
     print("\nwrote %s" % args.out, file=log)
 
 
