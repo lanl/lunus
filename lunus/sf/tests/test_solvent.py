@@ -32,7 +32,7 @@ import pytest
 
 torch = pytest.importorskip("torch", reason="PyTorch not installed")
 
-from lunus.sf.density_torch import splat_density
+from lunus.sf.density_torch import compute_density
 from lunus.sf.kernel_torch import build_element_kernels_torch
 from lunus.sf.elements import IT92_COEFFS
 from lunus.sf.cell_utils import orth_matrix
@@ -86,7 +86,7 @@ def _sf(sys, **kw):
 
 
 def _density(sys):
-    return splat_density(
+    return compute_density(
         sys["frac"], sys["element_idx"], sys["occ"],
         sys["atom_A"], sys["atom_lam"], sys["elem_offsets"],
         sys["atom_radius_ang"], sys["grid_shape"], sys["orth"],
@@ -195,7 +195,7 @@ def test_detached_mask_carries_no_gradient():
     density depends on -- B in particular, once B is differentiable."""
     sys = _system()
     frac = sys["frac"].clone().requires_grad_(True)
-    rho = splat_density(
+    rho = compute_density(
         frac, sys["element_idx"], sys["occ"],
         sys["atom_A"], sys["atom_lam"], sys["elem_offsets"],
         sys["atom_radius_ang"], sys["grid_shape"], sys["orth"],
@@ -310,7 +310,7 @@ def test_per_configuration_masks_reach_diffuse_and_a_shared_one_does_not():
 
 
 def test_checkpointing_gives_the_same_answer_with_solvent():
-    """use_checkpoint recomputes the splat in backward; the mask FFT lives
+    """use_checkpoint recomputes the density calculation in backward; the mask FFT lives
     inside the checkpointed region, so the result must be unchanged."""
     sys = _system()
     batch = sys["frac"].unsqueeze(0).repeat(2, 1, 1)
@@ -344,7 +344,7 @@ def test_solvent_diffuse_signal_dominates_grid_alignment_noise():
     averaging out. The instrument is translation non-commutation: displacing
     every configuration by the same sub-voxel vector leaves the MODEL's diffuse
     exactly unchanged (one common phase on every F), but not the grid
-    calculation's, since splat_density resamples at fixed voxel centres rather
+    calculation's, since compute_density resamples at fixed voxel centres rather
     than shifting. Whatever comes out is grid alignment, not structure.
 
     What must hold is that the solvent's contribution is well clear of it.
@@ -399,7 +399,7 @@ def test_solvent_diffuse_signal_dominates_grid_alignment_noise():
         )
         return mean_and_diffuse(F)[1]
 
-    rho = splat_density(
+    rho = compute_density(
         torch.tensor(batch[0] @ np.linalg.inv(M_np).T, dtype=DTYPE),
         common["element_idx"], common["occ"], common["atom_A"],
         common["atom_lam"], common["elem_offsets"], common["atom_radius_ang"],
@@ -561,7 +561,7 @@ def test_float32_matches_float64_below_the_pipelines_own_noise(cut_frac):
     out = {}
     for dtype in (torch.float32, torch.float64):
         s = _system_dtype(dtype)
-        rho = splat_density(
+        rho = compute_density(
             s["frac"], s["element_idx"], s["occ"], s["atom_A"], s["atom_lam"],
             s["elem_offsets"], s["atom_radius_ang"], s["grid_shape"],
             s["orth"], s["taper_width"], compile_core=False)
@@ -685,7 +685,7 @@ def test_mask_blur_smooths_the_mask_boundary_on_a_dense_model():
         ["C"], IT92_COEFFS, 20.0, 0.0, grid, M_np, cutoff=0.01,
         device="cpu", dtype=DTYPE)
     idx = torch.zeros(n_atoms, dtype=torch.long)
-    rho = splat_density(frac, idx, torch.ones(n_atoms, dtype=DTYPE),
+    rho = compute_density(frac, idx, torch.ones(n_atoms, dtype=DTYPE),
                         A[idx], lam[idx], offsets, radius[idx], grid, orth,
                         taper_w, compile_core=False)
     target = 0.5
@@ -762,7 +762,7 @@ def test_mask_blur_is_a_length_and_so_survives_a_change_of_grid():
             ["C"], IT92_COEFFS, 20.0, 0.0, grid, M_np, cutoff=0.01,
             device="cpu", dtype=DTYPE)
         idx = torch.zeros(frac.shape[0], dtype=torch.long)
-        rho = splat_density(frac, idx, torch.ones(frac.shape[0], dtype=DTYPE),
+        rho = compute_density(frac, idx, torch.ones(frac.shape[0], dtype=DTYPE),
                             A[idx], lam[idx], offsets, radius[idx], grid,
                             orth, taper_w, compile_core=False)
         model = SolventModel(cutoff=cutoff, taper_width=0.5 * cutoff,
@@ -796,7 +796,7 @@ def test_mask_blur_undershoot_is_bounded_and_vanishes_with_the_grid():
 
     sys = _system(n_atoms=40, seed=7)
     rho = _density(sys)
-    assert float(rho.min()) >= 0.0          # splat_density's own guarantee
+    assert float(rho.min()) >= 0.0          # compute_density's own guarantee
 
     # This fixture is 24^3 on a ~22 A cell: 0.9 A voxels, which barely resolve
     # a 1.13 A sigma, so it sits at the WORST end of the table below.
@@ -814,7 +814,7 @@ def test_mask_blur_undershoot_is_bounded_and_vanishes_with_the_grid():
     A, lam, offsets, radius, taper_w, _ = build_element_kernels_torch(
         ["C"], IT92_COEFFS, 20.0, 0.0, fine, M_np, cutoff=0.01,
         device="cpu", dtype=DTYPE)
-    rho_fine = splat_density(frac, idx, torch.ones(40, dtype=DTYPE),
+    rho_fine = compute_density(frac, idx, torch.ones(40, dtype=DTYPE),
                              A[idx], lam[idx], offsets, radius[idx], fine,
                              orth, taper_w, compile_core=False)
     fine_blurred = blur_density(rho_fine, orth, 100.0)
@@ -868,7 +868,7 @@ def test_detach_mask_hides_most_of_the_occupancy_gradient():
               cell_volume=float(np.linalg.det(M_np)), hkl=hkl,
               taper_width=taper_w, compile_core=False)
 
-    rho = splat_density(frac[0], idx, occ0[0], A[idx], lam[idx], offsets,
+    rho = compute_density(frac[0], idx, occ0[0], A[idx], lam[idx], offsets,
                         radius[idx], grid, orth, taper_w, compile_core=False)
     reference = SolventModel(cutoff=1.0, taper_width=0.5, mask_blur=0.0,
                              check_occupancy=False)
@@ -898,7 +898,7 @@ def test_mask_blur_is_a_total_and_absorbs_the_pipeline_blur():
     not both apply.
 
     Adding B to an atomic form factor convolves that atom with a Gaussian;
-    density is a linear sum of atoms and convolution is linear; so splatting
+    density is a linear sum of atoms and convolution is linear; so placing density for
     with blur=B is exactly convolving the grid by B. A pipeline running
     blur=40 with the default mask_blur=100 would therefore hand the mask 140
     A^2 of smoothing -- 1.4x the probe radius calibrated against two crystals,

@@ -1,6 +1,6 @@
 # lunus.sf — differentiable structure factors and diffuse scattering
 
-A PyTorch implementation of a **gemmi-like** engine: splat atomic Gaussian
+A PyTorch implementation of a **gemmi-like** engine: place atomic Gaussian
 density onto a real-space grid → symmetrize → FFT → extract F(hkl), made
 differentiable with respect to atomic fractional coordinates.
 
@@ -94,7 +94,7 @@ python ../../tools/compare_icalc_mtz.py icalc_gemmi.mtz icalc_torch.mtz
 | `elements.py` | Reads IT92 neutral-atom Cromer-Mann coefficients from gemmi or cctbx at run time. Stores no table of its own, so any element those libraries know works without a code change. |
 | `kernel.py` | The real-space density kernel: reciprocal-space coefficients + effective B → the 5-Gaussian real-space form, derived from the closed-form Fourier transform of the Cromer-Mann sum (derivation in the module docstring). Also the per-atom (batched) variants. |
 | `cell_utils.py` | Orthogonalization matrix, 1/d², grid-size-from-resolution (matches gemmi's `requested_grid_spacing() = d_min / (2*rate)`). |
-| `density_torch.py` | The differentiable splat. Grouped by element, batched by atom-voxel PAIRS, restricted to the cutoff sphere rather than its bounding cube, with the hot blocks factored for `torch.compile` fusion. |
+| `density_torch.py` | The differentiable density calculation. Grouped by element, batched by atom-voxel PAIRS, restricted to the cutoff sphere rather than its bounding cube, with the hot blocks factored for `torch.compile` fusion. |
 | `kernel_torch.py` | Builds per-element or per-atom (A, lam, radius) as torch tensors. Not differentiated — B and blur are fixed hyperparameters. |
 | `symmetry_torch.py` | Space group → validated integer **grid** operations, applied differentiably. Also `adjust_grid_for_symmetry()` for the grid-size constraints those operations impose. |
 | `structure_factor_torch.py` | FFT + Miller-index extraction, matching xtraj.py's `ifftn(...) * volume` then `conjugate(...)` convention including the optional blur-undo. `structure_factors_batch()` runs N configurations in one call with gradients to all N (optionally gradient-checkpointed, so memory stays flat in N), and `mean_and_diffuse()` does the `<F>` / `<\|F\|²> − \|<F>\|²` ensemble reduction. `occ` may be `(n_atoms,)` or `(N, n_atoms)` for per-configuration occupancies, differentiable either way — see docs/solvent-design.md for what the occupancy gradient omits when `detach_mask=True`. |
@@ -112,7 +112,7 @@ behaviour changing in either direction trips them.
 
 | file | what it pins |
 |---|---|
-| `test_numpy_reference.py` | splat+FFT vs a closed-form single-atom F(hkl), values and gradients. The NumPy ground truth the torch code is a translation of. |
+| `test_numpy_reference.py` | density+FFT vs a closed-form single-atom F(hkl), values and gradients. The NumPy ground truth the torch code is a translation of. |
 | `test_torch_pipeline.py` | torch reproduces the NumPy reference; autograd matches a finite difference of the analytic formula. |
 | `test_multiatom.py` | multi-element superposition, and that chunk size changes nothing (chunking is a pure memory optimization). |
 | `test_sphere_mask.py` | restricting the box to the cutoff sphere is lossless, and actually discards ~37% of the cube. |
@@ -133,7 +133,7 @@ torch/cctbx/gemmi/mpi4py, so a partial environment skips rather than errors.
 
 | | |
 |---|---|
-| `tools/bench_splat.py` | splat benchmark, gemmi vs torch, CPU/MPS/CUDA. The thing to re-run rather than trusting docs/performance.md. |
+| `tools/bench_density.py` | density benchmark, gemmi vs torch, CPU/MPS/CUDA. The thing to re-run rather than trusting docs/performance.md. |
 | `tools/compare_icalc_mtz.py` | two Icalc MTZs → correlation and R-factor, overall and by resolution shell. |
 | `tools/fit_solvent_rfactor.py` | fits `k_sol`/`b_sol`/overall scale against deposited amplitudes and reports R and R-free by shell, with and without solvent. The bulk-solvent model's only test against measurements; `--reference` prints what mmtbx reaches on the same model, which is the number to judge it by. See docs/solvent-design.md. |
 | `tools/pdb_rfactor.py` | R and R-free for a deposited entry by PDB ID: fetches `<ID>.pdb` and `<ID>-sf.cif` from the wwPDB (cached in `--dir`), then runs `fit_solvent_rfactor.py` (`--method torch`), `mmtbx.f_model` on the same amplitudes and free set (`--method mmtbx`), or both (the default) and tabulates them side by side. Options after a bare `--` pass through to the torch fit. |
@@ -158,7 +158,7 @@ repo so those numbers stay reproducible. Both `iotbx.pdb` and `mdtraj` read
   expansion, and measured agreement with gemmi.
 - **[docs/performance.md](docs/performance.md)** — benchmarks (all labelled with
   the configuration they were measured on), Apple MPS and NVIDIA CUDA, where
-  the per-frame time actually goes, how the in-loop splat discrepancy turned
+  the per-frame time actually goes, how the in-loop density-calculation discrepancy turned
   out to be CPU throttling, how to
   measure this pipeline without fooling yourself, and the tuning knobs.
 - **[docs/bugfixes.md](docs/bugfixes.md)** — bugs found and fixed, several of
@@ -168,7 +168,7 @@ repo so those numbers stay reproducible. Both `iotbx.pdb` and `mdtraj` read
 ## Not yet built
 
 - **Tune `structure_factors_batch()` for speed within a memory budget.**
-  `use_checkpoint` is currently all-or-nothing: retain every member's splat
+  `use_checkpoint` is currently all-or-nothing: retain every member's density
   intermediates (fastest, memory linear in N) or recompute all of them
   (memory flat in N, ~2.4x slower). It was built to make large N *possible*,
   not fast, so it takes the memory-minimising extreme whenever N does not fit.
@@ -181,12 +181,12 @@ repo so those numbers stay reproducible. Both `iotbx.pdb` and `mdtraj` read
   `torch.cuda.mem_get_info()`) would let it pick automatically instead of
   making the caller choose between two extremes.
 
-  Worth measuring first: the per-member cost is dominated by the splat, and the
+  Worth measuring first: the per-member cost is dominated by the density calculation, and the
   2.4x recompute penalty was measured at one N on one device, so calibrate
   against real timings rather than assuming it holds generally.
-- **Fuse the batched splat into a single kernel.** `structure_factors_batch()`
-  currently shares setup across members and loops the splat; fusing the N
-  splats into one launch would help GPU throughput for small systems, where
+- **Fuse the batched density calculation into a single kernel.** `structure_factors_batch()`
+  currently shares setup across members and loops the density calculation; fusing the N
+  density placements into one launch would help GPU throughput for small systems, where
   per-launch overhead is significant. It would not help memory — the
   checkpointing path already makes that flat in N — and it would touch the
   carefully tuned `_density_core` / `_scatter_core` fast path, so it is worth
@@ -195,11 +195,11 @@ repo so those numbers stay reproducible. Both `iotbx.pdb` and `mdtraj` read
   data-parallelism over configurations.
 - **Wire up a real loss** against experimental diffuse data; `example_usage.py`
   currently has a placeholder.
-- **Wire anisotropic ADPs into `xtraj.py`.** The kernel, the splat and
+- **Wire anisotropic ADPs into `xtraj.py`.** The kernel, the density calculation and
   `tools/fit_solvent_rfactor.py --aniso-adp` support them; the trajectory
   driver does not yet. The hard part is done: on 7FPV this takes R-work from
   0.1810 to 0.1322 against a 0.1298 reference, closing what was the pipeline's
-  largest single error, at 2.37x on the splat. See docs/design.md.
+  largest single error, at 2.37x on the density calculation. See docs/design.md.
 - **A frozen-mask mode.** `detach_mask=True` is the correct gradient of a model
   where the mask is held fixed and refreshed per macro-cycle, which is what
   Phenix and REFMAC do; nothing can pin a mask across calls here, so the

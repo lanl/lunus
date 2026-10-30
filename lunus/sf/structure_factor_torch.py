@@ -6,7 +6,7 @@ convention exactly:
     (optionally: F(hkl) *= exp(blur * 0.25 * inv_d2)  -- undoes gemmi's blur)
 
 torch.fft.ifftn is a standard differentiable linear operator, so this
-composes with density_torch.splat_density to give end-to-end gradients
+composes with density_torch.compute_density to give end-to-end gradients
 from F(hkl) all the way back to atomic fractional coordinates.
 """
 
@@ -56,7 +56,7 @@ def structure_factors_one_config(
     hkl, taper_width, blur=0.0, max_atoms_per_batch=50_000,
     grid_ops=None, compile_core=True, solvent=None, supercell=None,
 ):
-    """One configuration, start to finish: splat -> symmetrize -> FFT ->
+    """One configuration, start to finish: density -> symmetrize -> FFT ->
     extract F(hkl). Differentiable with respect to frac_coords. atom_A/atom_lam/
     atom_radius_ang are PER-ATOM (n_atoms, 5)/(n_atoms, 5)/(n_atoms,) --
     for the uniform-B path (kernel_torch.build_element_kernels_torch),
@@ -68,7 +68,7 @@ def structure_factors_one_config(
     grid_ops: from symmetry_torch.build_grid_ops(); when given, the density
     grid is symmetry-expanded before the FFT, exactly as gemmi's
     put_model_density_on_grid() does via symmetrize_sum(). Pass None (or an
-    empty list, which is what a P1 space group produces) to splat the atoms
+    empty list, which is what a P1 space group produces) to place the atoms' density
     as given with no symmetry expansion.
 
     solvent: a solvent_torch.SolventModel, or None. None is the default and
@@ -81,7 +81,7 @@ def structure_factors_one_config(
 
     supercell: (na, nb, nc), when the MODEL's own cell is an integer supercell
     of the cell being calculated on -- an MD box holding several
-    crystallographic cells, say. The atoms are then splatted onto the larger
+    crystallographic cells, say. The atoms are then placed onto the larger
     grid, ANY SOLVENT MASK IS BUILT THERE, and density and mask are folded into
     the target cell afterwards.
 
@@ -93,15 +93,15 @@ def structure_factors_one_config(
     separately and combining them in reciprocal space afterwards is exact and
     keeps exp(-b_sol*s^2/4) where it belongs.
 
-    Without solvent, supercell= changes nothing observable: splatting atoms
+    Without solvent, supercell= changes nothing observable: placing atoms
     into the small grid already folds them, via the modulo in the scatter.
     symmetry_torch.supercell_factors() derives the factors and rejects a
     non-integer ratio, for which no exact grid folding exists."""
-    from .density_torch import splat_density
+    from .density_torch import compute_density
     from .symmetry_torch import fold_supercell, symmetrize_sum
 
     if supercell is None:
-        splat_grid, splat_orth, splat_frac = grid_shape, orth_matrix, frac_coords
+        dens_grid, dens_orth, dens_frac = grid_shape, orth_matrix, frac_coords
     else:
         if grid_ops:
             raise ValueError(
@@ -111,26 +111,26 @@ def structure_factors_one_config(
                 "summing a MASK over the symmetry orbit does not give a mask. "
                 "Pass grid_ops=None for a supercell model.")
         n = tuple(int(x) for x in supercell)
-        splat_grid = tuple(g * f for g, f in zip(grid_shape, n))
+        dens_grid = tuple(g * f for g, f in zip(grid_shape, n))
         # Same voxel size, so the precomputed offset lists stay valid: the
         # supercell's axes are longer by exactly the repeat factors.
         scale = torch.tensor(n, dtype=orth_matrix.dtype, device=orth_matrix.device)
-        splat_orth = orth_matrix * scale            # columns are the axis vectors
-        splat_frac = frac_coords / scale
+        dens_orth = orth_matrix * scale            # columns are the axis vectors
+        dens_frac = frac_coords / scale
 
-    density = splat_density(
-        splat_frac, element_idx, occ,
+    density = compute_density(
+        dens_frac, element_idx, occ,
         atom_A, atom_lam, elem_offsets, atom_radius_ang,
-        splat_grid, splat_orth, taper_width,
+        dens_grid, dens_orth, taper_width,
         max_atoms_per_batch=max_atoms_per_batch, compile_core=compile_core,
     )
 
     # The mask is built BEFORE folding, where the boundary still exists.
     mask = None
     if solvent is not None and supercell is not None:
-        # splat_orth, not orth_matrix: the mask is built in the SUPERCELL's
+        # dens_orth, not orth_matrix: the mask is built in the SUPERCELL's
         # frame, so the blur's frequency grid has to be the supercell's too.
-        mask = solvent.build_mask(density, splat_orth, pipeline_blur=blur)
+        mask = solvent.build_mask(density, dens_orth, pipeline_blur=blur)
 
     if supercell is not None:
         density = fold_supercell(density, n)
@@ -194,9 +194,9 @@ def structure_factors_batch(
     stay continuous; in the gradient they do not. See docs/solvent-design.md,
     "Per-configuration occupancies, and what their gradient leaves out".
 
-    use_checkpoint (default False) recomputes each configuration's splat
+    use_checkpoint (default False) recomputes each configuration's density
     during backward instead of retaining its intermediates. This is usually
-    the difference between "runs" and "out of memory": the splat holds
+    the difference between "runs" and "out of memory": the density calculation holds
     (atoms x voxels) working buffers whose size dwarfs the density grid, and
     without checkpointing they are retained for all N simultaneously.
     Measured on a 3000-atom / 90^3 case, peak RSS above baseline:
@@ -298,7 +298,7 @@ def structure_factors_batch(
     # closure is exactly the thing that breaks when someone later switches
     # use_reentrant, and the coordinates are already passed this way.
     #
-    # preserve_rng_state=False: the splat draws no random numbers, so there is
+    # preserve_rng_state=False: the density calculation draws no random numbers, so there is
     # no RNG state worth saving and restoring per configuration.
     return torch.stack(
         [checkpoint(one, fc, oc, use_reentrant=False, preserve_rng_state=False)

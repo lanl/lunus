@@ -32,7 +32,7 @@ def sphere_offsets(du, dv, dw, radius_ang, safety_margin, M, grid_dims):
     return offsets[dist <= (radius_ang + safety_margin)]
 
 
-def splat_grouped_chunked(frac_coords, element_syms, occ, elem_kernels, grid_shape, M, chunk_size):
+def density_grouped_chunked(frac_coords, element_syms, occ, elem_kernels, grid_shape, M, chunk_size):
     """Mirrors density_torch.py's algorithm exactly: grouped by element,
     chunked atoms within each group, sphere-restricted offsets."""
     Nu, Nv, Nw = grid_shape
@@ -70,7 +70,7 @@ def splat_grouped_chunked(frac_coords, element_syms, occ, elem_kernels, grid_sha
 
 
 def test_multiatom_matches_analytic_and_is_chunk_invariant():
-    """Grouped/chunked/sphere-masked splat vs a multi-atom analytic reference.
+    """Grouped/chunked/sphere-masked density calculation vs a multi-atom analytic reference.
 
     Two claims, and the second is the one this file exists for:
 
@@ -129,7 +129,7 @@ def test_multiatom_matches_analytic_and_is_chunk_invariant():
     scale = np.max(np.abs(F_ref))
     by_chunk = {}
     for chunk_size in [1, 2, 100]:
-        grid = splat_grouped_chunked(frac_coords, element_syms, occ, elem_kernels, grid_shape, M, chunk_size)
+        grid = density_grouped_chunked(frac_coords, element_syms, occ, elem_kernels, grid_shape, M, chunk_size)
         Fgrid = np.conj(np.fft.ifftn(grid) * cell_volume)
         F_num = np.array([Fgrid[h % Nu, k % Nv, l % Nw] for h, k, l in hkl_test])
         by_chunk[chunk_size] = F_num

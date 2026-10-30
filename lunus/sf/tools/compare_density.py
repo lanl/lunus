@@ -2,7 +2,7 @@
 Direct comparison of the real-space electron density grids saved by
 xtraj.py's gemmi and torch engines (density_gemmi.npy / density_torch.npy),
 sharper than comparing F(hkl) because it isolates whether a discrepancy
-is in atom placement/splatting versus the FFT/extraction step.
+is in atom density placement versus the FFT/extraction step.
 
 Usage: python compare_density.py [gemmi_path] [torch_path]
 Defaults to density_gemmi.npy / density_torch.npy in the current directory.

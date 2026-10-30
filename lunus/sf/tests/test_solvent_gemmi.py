@@ -3,7 +3,7 @@ Parity between our density-threshold solvent mask and gemmi's geometric one.
 
 This compares two DIFFERENT MODELS -- gemmi's SolventMasker excludes everything
 within (vdW radius + rprobe) of an atom and then erodes by rshrink, while ours
-thresholds the density that splat_density already computed -- so the target is
+thresholds the density that compute_density already computed -- so the target is
 agreement at the level of the model difference, not to machine precision. The
 question the test answers is "is the threshold mask a defensible stand-in for a
 geometric one", and the yardstick is calibrated rather than invented:
@@ -33,7 +33,7 @@ torch = pytest.importorskip("torch", reason="PyTorch not installed")
 gemmi = pytest.importorskip("gemmi", reason="gemmi not installed")
 
 from lunus.sf.cell_utils import orth_matrix
-from lunus.sf.density_torch import splat_density
+from lunus.sf.density_torch import compute_density
 from lunus.sf.elements import IT92_COEFFS
 from lunus.sf.kernel_torch import build_element_kernels_torch
 from lunus.sf.solvent_torch import (
@@ -96,7 +96,7 @@ def our_density(cart, b_iso=B_ISO):
         device="cpu", dtype=torch.float64,
     )
     idx = torch.zeros(n, dtype=torch.long)
-    return splat_density(
+    return compute_density(
         torch.tensor(frac), idx, torch.ones(n, dtype=torch.float64),
         A[idx], lam[idx], offsets, radius[idx], GRID,
         torch.tensor(M_NP), taper_w, compile_core=False,
@@ -297,7 +297,7 @@ def test_mask_blur_moves_the_mask_toward_the_geometric_one():
     atom_A, atom_lam, offsets, atom_r, taper_w, e2i = build_atom_kernels_torch(
         elements, sorted(set(elements)), IT92_COEFFS, b, 0.0, grid, M,
         cutoff=0.01, device="cpu", dtype=torch.float64)
-    density = splat_density(
+    density = compute_density(
         torch.tensor(frac), torch.tensor([e2i[e] for e in elements]),
         torch.tensor(occ), atom_A, atom_lam, offsets, atom_r, grid, orth,
         taper_w, compile_core=False)

@@ -70,9 +70,23 @@ def test_sf_public_api_is_importable():
     import lunus.sf as sf
 
     for name in ["structure_factors_batch", "structure_factors_one_config",
-                 "mean_and_diffuse", "splat_density", "orth_matrix",
+                 "mean_and_diffuse", "compute_density", "orth_matrix",
                  "it92_coefficients", "symmetrize_sum"]:
         assert hasattr(sf, name), f"lunus.sf does not expose {name}"
+
+
+def test_deprecated_splat_density_alias_warns():
+    """The old name still resolves from the package root and says it is old."""
+    import warnings
+
+    pytest.importorskip("torch")
+    import lunus.sf as sf
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with pytest.raises(TypeError):        # no arguments: warns, then forwards
+            sf.splat_density()
+    assert any(issubclass(w.category, DeprecationWarning) for w in caught)
 
 
 def test_sf_unknown_attribute_raises_attribute_error():

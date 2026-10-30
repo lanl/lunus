@@ -59,9 +59,9 @@ def grid_shape_for_resolution(a, b, c, d_min, rate=1.5):
 def recommended_blur(b_min, grid_shape, orth_matrix_np, safety=1.0,
                      d_min=None):
     """
-    How much extra B to splat with so the grid samples the atoms adequately.
+    How much extra B to place density with so the grid samples the atoms adequately.
 
-    THE FFT-ARTIFACT TRICK. Atoms are splatted with B + blur, which spreads
+    THE FFT-ARTIFACT TRICK. Atoms are placed on the grid with B + blur, which spreads
     them, and compute_fcalc removes it again with exp(+blur * s^2 / 4). The
     answer is unchanged in exact arithmetic; what changes is that a sharp
     Gaussian sampled on a coarse grid is badly represented, and a spread one is

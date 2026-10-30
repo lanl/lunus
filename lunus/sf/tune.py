@@ -1,15 +1,15 @@
 """Automatic selection of the torch engine's performance knobs.
 
-`max_pairs_per_batch`'s default was fitted to a CPU cache, and the splat's own
+`max_pairs_per_batch`'s default was fitted to a CPU cache, and the density calculation's own
 docstring says to expect a GPU to want more -- so on a GPU the shipped default
-is knowingly wrong and the user is left to discover that with `bench_splat.py`.
+is knowingly wrong and the user is left to discover that with `bench_density.py`.
 This module picks it instead, from things known before the frame loop starts:
 grid shape, atom count, and what the device reports about itself.
 
 Keep its worth in proportion. Swept on GB10, the whole 8x range of budgets
-spans 1.089x on the compiled splat, so this is a sub-1% knob there -- it is
+spans 1.089x on the compiled density calculation, so this is a sub-1% knob there -- it is
 here to stop a GPU silently inheriting a CPU-shaped default, not because
-tuning it is where the time goes. On that machine the splat was 68% of the
+tuning it is where the time goes. On that machine the density calculation was 68% of the
 frame and the FFT and host phases were the rest; see docs/performance.md,
 "A second machine".
 
@@ -33,11 +33,11 @@ from torch when torch is in hand.
 
 from collections import namedtuple
 
-# What the splat's (m, K) working buffers cost per atom-voxel pair. float32,
+# What the density calculation's (m, K) working buffers cost per atom-voxel pair. float32,
 # and the fused kernel is float32 by design -- MPS has no float64 at all.
 BYTES_PER_PAIR = 4
 
-# docs/performance.md, "How the splat got fast" / splat_density's docstring:
+# docs/performance.md, "How the density calculation got fast" / compute_density's docstring:
 # 4M pairs is ~16 MB per buffer, chosen to stay cache-resident. The curve is
 # flat from 2M to 12M on the 135k-atom CPU case and rises on both sides --
 # 0.86 s at 4M, 1.00 s at 16M, 1.25 s at 48M, 1.01 s at 0.5M.
@@ -91,7 +91,7 @@ def describe_device(device, torch_module=None):
 
 
 def recommended_max_pairs(info, bytes_per_pair=BYTES_PER_PAIR):
-    """Atom-voxel pair budget for splat_density. Returns (pairs, why).
+    """Atom-voxel pair budget for compute_density. Returns (pairs, why).
 
     On CUDA, size the buffer to the L2 the device reports, then clamp so
     LIVE_PAIR_BUFFERS of them fit in PAIR_BUDGET_FRACTION of free memory. If
@@ -105,7 +105,7 @@ def recommended_max_pairs(info, bytes_per_pair=BYTES_PER_PAIR):
     It was written from MAX_PAIRS_CPU's criterion -- "one working buffer stays
     resident in cache across the fused kernel's passes" -- on the assumption
     that it transferred to a GPU with L2 in place of L3. Swept on GB10 (24 MiB
-    L2) the COMPILED splat is monotonically faster with a bigger budget, right
+    L2) the COMPILED density calculation is monotonically faster with a bigger budget, right
     past 2x the L2, with no optimum: 91.8 / 95.6 / 97.4 / 98.2 / 100% of peak
     at 1.5 / 3.1 / 4.0 / 6.3 / 12.6 M pairs. Fusion keeps the intermediates
     out of memory, so whole-buffer residency is not what binds; per-chunk
@@ -132,7 +132,7 @@ def recommended_max_pairs(info, bytes_per_pair=BYTES_PER_PAIR):
     if not info.l2_bytes:
         return MAX_PAIRS_CPU, (
             "device did not report an L2 size, so the measured CPU default is "
-            "kept; calibrate with tools/bench_splat.py --device cuda")
+            "kept; calibrate with tools/bench_density.py --device cuda")
 
     pairs = int(info.l2_bytes // bytes_per_pair)
     why = "sized to the device L2 of %.0f MB" % (info.l2_bytes / 1e6)
@@ -155,7 +155,7 @@ def recommended_max_pairs(info, bytes_per_pair=BYTES_PER_PAIR):
 
 def estimated_peak_bytes(n_atoms, grid_shape, max_pairs,
                          bytes_per_pair=BYTES_PER_PAIR):
-    """Rough peak device bytes for one forward splat + FFT.
+    """Rough peak device bytes for one forward density+FFT.
 
     This is the term that grows with the system and the resolution, which is
     what makes a run at a finer d_min fail where a coarser one fits: the grid

@@ -95,7 +95,7 @@ Most of these detect MPI by checking `'OMPI_COMM_WORLD_SIZE' in os.environ` and 
 
 ### `lunus/sf/` — differentiable structure factors
 
-A PyTorch implementation of a **gemmi-like** engine: differentiable splat → symmetrize → FFT → F(hkl) with respect to atomic coordinates. Gemmi-like rather than a clone — the density cutoff is tapered smoothly rather than truncated hard, so that gradients are well behaved, and that taper is the main source of the (measured, understood) difference from gemmi. See `docs/design.md`.
+A PyTorch implementation of a **gemmi-like** engine: differentiable density → symmetrize → FFT → F(hkl) with respect to atomic coordinates. Gemmi-like rather than a clone — the density cutoff is tapered smoothly rather than truncated hard, so that gradients are well behaved, and that taper is the main source of the (measured, understood) difference from gemmi. See `docs/design.md`.
 
 It installs as an ordinary Python package (`pip install -e ".[sf]"`, or via pixi — see the repo-root `pyproject.toml`, which packages the pure-Python tree only and leaves the SCons/libtbx builds untouched). The public API resolves lazily from the package root, so `from lunus.sf import structure_factors_batch` works and a bare `import lunus.sf` does not import torch. Working from a clone with the repository root on `sys.path` also works. Only `xtraj.py` and the cctbx-based tools in `tools/` require cctbx; the rest needs numpy and torch alone. `lunus/__init__.py` imports the `lunus_ext` Boost extension inside a try/except with a PEP 562 `__getattr__` fallback specifically so that stays true, and so `lunus.md` (pure Python) is importable without a cctbx module build. Code that needs `Process`/`LunusDIFFIMAGE` still fails loudly, at first use.
 

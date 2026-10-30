@@ -6,7 +6,7 @@ aniso.py / test_aniso.py, which are the isotropic-background removal that
 produces the anisotropic COMPONENT of a diffuse map -- an unrelated operation
 that happens to share the word.
 
-Stage 1 of the anisotropic work: numpy only, no splat and no torch, so a
+Stage 1 of the anisotropic work: numpy only, no density placement and no torch, so a
 mistake in the algebra surfaces here rather than inside a fused kernel.
 
 The checks:
@@ -14,7 +14,7 @@ The checks:
      path is a strict generalization, so anything else is an algebra error.
   2. integral rho d^3r = f(0) = Z, the same normalization the isotropic kernel
      is held to.
-  3. Splat + FFT of one anisotropic atom against the closed-form
+  3. Density + FFT of one anisotropic atom against the closed-form
      f(s) exp(-2 pi^2 s.U.s) exp(-2 pi i h.x). This is the one that pins the
      CONVENTIONS -- a transposed U, eigenvectors as rows instead of columns, or
      U taken in the fractional rather than Cartesian frame all reproduce checks
@@ -89,8 +89,8 @@ def test_total_charge_is_f_zero_whatever_the_adp(u):
 # --------------------------------------------------------------------------
 # 3. the convention test
 
-def splat_and_fft_aniso(pos_frac, A, w, V, radius, grid_shape, M, cell_volume):
-    """One anisotropic atom, occupancy 1, splatted by brute force. Same
+def density_and_fft_aniso(pos_frac, A, w, V, radius, grid_shape, M, cell_volume):
+    """One anisotropic atom, occupancy 1, placed by brute force. Same
     conventions as tests/test_numpy_reference.py's isotropic version:
     conjugated, volume-scaled ifft."""
     Nu, Nv, Nw = grid_shape
@@ -123,7 +123,7 @@ def analytic_single_atom_F_aniso(coef9, u_cart, pos_frac, hkl, M):
     return calculate_sf(coef9, stol2) * dwf * phase
 
 
-def test_splat_and_fft_matches_the_closed_form():
+def test_density_and_fft_matches_the_closed_form():
     """Two independently derived expressions for the same quantity: a
     real-space ellipsoidal Gaussian summed onto a grid and transformed, against
     the reciprocal-space Debye-Waller form. Agreement is only possible if U,
@@ -134,13 +134,13 @@ def test_splat_and_fft_matches_the_closed_form():
     radius = cutoff_radius_aniso(A, w, V, cutoff=1e-6)
     pos_frac = np.array([0.2137, 0.3391, 0.4523])
 
-    Fgrid = splat_and_fft_aniso(pos_frac, A, w, V, radius, GRID, M_NP, VOLUME)
+    Fgrid = density_and_fft_aniso(pos_frac, A, w, V, radius, GRID, M_NP, VOLUME)
 
     hkl = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1], [2, 1, 0],
                     [1, 2, 3], [3, -2, 1], [4, 4, 4], [-5, 2, 3]])
     got = np.array([Fgrid[h % GRID[0], k % GRID[1], l % GRID[2]]
                     for h, k, l in hkl])
-    # The splat carries the blur; the closed form does not, so undo it the way
+    # The density calculation carries the blur; the closed form does not, so undo it the way
     # compute_fcalc does.
     got = got * np.exp(blur * 0.25 * reciprocal_inv_d2(M_NP, hkl))
     want = analytic_single_atom_F_aniso(COEF, U, pos_frac, hkl, M_NP)
@@ -226,9 +226,9 @@ def test_batched_matches_the_single_atom_path():
 
 
 def test_l6_reproduces_the_eigenbasis_quadratic_form():
-    """The equivalence the splat depends on. The hot loop expands
+    """The equivalence the density calculation depends on. The hot loop expands
     d.Lam_i.d from the six unique components; the derivation is stated in the
-    eigenbasis. If these ever disagree the splat computes a different -- and
+    eigenbasis. If these ever disagree the density calculation computes a different -- and
     entirely plausible-looking -- density."""
     coef, U, (A, L6, w, V), blur = _batch()
     r = np.random.default_rng(4).normal(size=(20, 3))
@@ -264,9 +264,9 @@ def test_batched_npd_says_how_many_and_which():
 
 
 # --------------------------------------------------------------------------
-# 7. the splat: dispatch, and what it must not cost an isotropic model
+# 7. the density calculation: dispatch, and what it must not cost an isotropic model
 
-def _splat_system(n_atoms=24, grid=(28, 30, 32), seed=2):
+def _density_system(n_atoms=24, grid=(28, 30, 32), seed=2):
     import torch
     from lunus.sf.kernel_torch import (
         build_atom_kernels_aniso_torch, build_atom_kernels_torch)
@@ -295,33 +295,33 @@ def test_isotropic_model_is_bit_identical_to_before_the_aniso_path():
     merely give the same answer -- it must run none of the new code, including
     the compile of a core it will never call."""
     import torch
-    from lunus.sf.density_torch import splat_density
+    from lunus.sf.density_torch import compute_density
 
-    s = _splat_system()
+    s = _density_system()
     A, lam, offs, rad, tw, _ = s["iso"]
     args = (s["frac"], s["element_idx"], s["occ"], A, lam, offs, rad,
             s["grid"], torch.tensor(M_NP), tw)
-    before = splat_density(*args, compile_core=False)
-    after = splat_density(*args, compile_core=False, atom_L6=None,
+    before = compute_density(*args, compile_core=False)
+    after = compute_density(*args, compile_core=False, atom_L6=None,
                           aniso_mask=None)
     assert torch.equal(before, after)
 
 
 def test_an_isotropic_adp_through_the_aniso_path_matches_the_isotropic_one():
-    """End to end on the grid, not just in the core: U = u*I splatted through
-    the anisotropic dispatch must reproduce the isotropic splat."""
+    """End to end on the grid, not just in the core: U = u*I placed through
+    the anisotropic dispatch must reproduce the isotropic density calculation."""
     import torch
-    from lunus.sf.density_torch import splat_density
+    from lunus.sf.density_torch import compute_density
 
-    s = _splat_system()
+    s = _density_system()
     A_i, lam, offs_i, rad_i, tw, _ = s["iso"]
     A_a, L6, offs_a, rad_a, _, _ = s["ani"]
     n = s["frac"].shape[0]
 
-    iso = splat_density(s["frac"], s["element_idx"], s["occ"], A_i, lam,
+    iso = compute_density(s["frac"], s["element_idx"], s["occ"], A_i, lam,
                         offs_i, rad_i, s["grid"], torch.tensor(M_NP), tw,
                         compile_core=False)
-    ani = splat_density(s["frac"], s["element_idx"], s["occ"], A_a, None,
+    ani = compute_density(s["frac"], s["element_idx"], s["occ"], A_a, None,
                         offs_a, rad_a, s["grid"], torch.tensor(M_NP), tw,
                         compile_core=False, atom_L6=L6,
                         aniso_mask=torch.ones(n, dtype=torch.bool))
@@ -332,28 +332,28 @@ def test_mixed_model_is_the_sum_of_its_two_halves():
     """A real structure is mixed -- 7FPV is 1,814 anisotropic of 3,341. The
     dispatch splits by kind WITHIN each element group, so this checks the two
     halves land in one grid correctly rather than one overwriting the other or
-    an atom being splatted twice."""
+    an atom having its density placed twice."""
     import torch
-    from lunus.sf.density_torch import splat_density
+    from lunus.sf.density_torch import compute_density
 
-    s = _splat_system()
+    s = _density_system()
     A_i, lam, offs, rad, tw, _ = s["iso"]
     A_a, L6, _, rad_a, _, _ = s["ani"]
     n = s["frac"].shape[0]
     mask = torch.zeros(n, dtype=torch.bool)
     mask[::2] = True                       # every other atom anisotropic
 
-    mixed = splat_density(s["frac"], s["element_idx"], s["occ"], A_a, lam,
+    mixed = compute_density(s["frac"], s["element_idx"], s["occ"], A_a, lam,
                           offs, rad, s["grid"], torch.tensor(M_NP), tw,
                           compile_core=False, atom_L6=L6, aniso_mask=mask)
 
-    # Same thing built as two splats, with the other half's occupancies zeroed.
+    # Same thing built as two density placements, with the other half's occupancies zeroed.
     zero = torch.zeros_like(s["occ"])
-    half_a = splat_density(s["frac"], s["element_idx"],
+    half_a = compute_density(s["frac"], s["element_idx"],
                            torch.where(mask, s["occ"], zero), A_a, lam, offs,
                            rad, s["grid"], torch.tensor(M_NP), tw,
                            compile_core=False, atom_L6=L6, aniso_mask=mask)
-    half_i = splat_density(s["frac"], s["element_idx"],
+    half_i = compute_density(s["frac"], s["element_idx"],
                            torch.where(mask, zero, s["occ"]), A_a, lam, offs,
                            rad, s["grid"], torch.tensor(M_NP), tw,
                            compile_core=False, atom_L6=L6, aniso_mask=mask)
@@ -362,16 +362,16 @@ def test_mixed_model_is_the_sum_of_its_two_halves():
 
 def test_dispatch_rejects_an_incoherent_call():
     import torch
-    from lunus.sf.density_torch import splat_density
+    from lunus.sf.density_torch import compute_density
 
-    s = _splat_system()
+    s = _density_system()
     A, lam, offs, rad, tw, _ = s["iso"]
     n = s["frac"].shape[0]
     args = (s["frac"], s["element_idx"], s["occ"], A, lam, offs, rad,
             s["grid"], torch.tensor(M_NP), tw)
 
     with pytest.raises(ValueError, match="without atom_L6"):
-        splat_density(*args, compile_core=False,
+        compute_density(*args, compile_core=False,
                       aniso_mask=torch.ones(n, dtype=torch.bool))
 
     # atom_lam=None is only allowed when nothing is isotropic.
@@ -379,6 +379,6 @@ def test_dispatch_rejects_an_incoherent_call():
     partial = torch.zeros(n, dtype=torch.bool)
     partial[0] = True
     with pytest.raises(ValueError, match="atom_lam is required"):
-        splat_density(s["frac"], s["element_idx"], s["occ"], A_a, None, offs,
+        compute_density(s["frac"], s["element_idx"], s["occ"], A_a, None, offs,
                       rad, s["grid"], torch.tensor(M_NP), tw,
                       compile_core=False, atom_L6=L6, aniso_mask=partial)

@@ -19,7 +19,7 @@ Two instruments, neither of which is a null test:
   TRANSLATION NON-COMMUTATION. Displace every configuration by the SAME
   sub-voxel vector. For the underlying model this multiplies every F(h) by one
   phase, so <|F|^2> and |<F>|^2 -- and therefore diffuse -- are unchanged
-  exactly. The grid pipeline does not reproduce that: splat_density samples
+  exactly. The grid pipeline does not reproduce that: compute_density samples
   each atom at fixed voxel centres, so a displaced structure is RESAMPLED
   rather than shifted, and recovering the true shift would need interpolation.
   What comes out is therefore not zero, and its size is how far the discretized
@@ -46,7 +46,7 @@ import numpy as np
 import torch
 
 from lunus.sf.cell_utils import orth_matrix
-from lunus.sf.density_torch import splat_density
+from lunus.sf.density_torch import compute_density
 from lunus.sf.elements import IT92_COEFFS
 from lunus.sf.kernel_torch import build_element_kernels_torch
 from lunus.sf.solvent_torch import (
@@ -154,7 +154,7 @@ def main():
     voxel = CELL[0] / args.grid
 
     s = setup(grid, batch)
-    rho0 = splat_density(
+    rho0 = compute_density(
         s["frac"][0], s["element_idx"], s["occ"], s["atom_A"], s["atom_lam"],
         s["elem_offsets"], s["atom_radius_ang"], grid, s["orth"],
         s["taper_width"], compile_core=False,
@@ -180,7 +180,7 @@ def main():
     shifted = batch + args.shift * voxel
     s_shift = setup(grid, shifted)
     s_fine = setup((args.fine_grid,) * 3, batch)
-    rho_fine = splat_density(
+    rho_fine = compute_density(
         s_fine["frac"][0], s_fine["element_idx"], s_fine["occ"],
         s_fine["atom_A"], s_fine["atom_lam"], s_fine["elem_offsets"],
         s_fine["atom_radius_ang"], (args.fine_grid,) * 3, s_fine["orth"],

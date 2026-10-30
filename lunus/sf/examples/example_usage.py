@@ -69,7 +69,7 @@ def main():
     ]).clone().detach().requires_grad_(True)
 
     # --- forward: F(hkl) for every configuration in one call ---
-    # use_checkpoint=True recomputes each member's splat during backward
+    # use_checkpoint=True recomputes each member's density during backward
     # instead of retaining it. Memory then stays flat as n_configs grows,
     # which is what makes a large ensemble feasible at production grid sizes;
     # the cost is roughly 2.4x the time, and gradients are bit-identical.

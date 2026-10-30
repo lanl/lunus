@@ -1,13 +1,13 @@
 """
 Differentiable PyTorch equivalent of gemmi's ``Grid::symmetrize_sum()``.
 
-This is how the gemmi engine builds a full unit cell of density: splat only
+This is how the gemmi engine builds a full unit cell of density: compute density for only
 the atoms it was given, then sum the density over the space group's
 symmetry operations, rather than replicating the ATOMS by symmetry and
-splatting every copy. gemmi's ``put_model_density_on_grid()`` is exactly
+placing density for every copy. gemmi's ``put_model_density_on_grid()`` is exactly
 ``initialize_grid(); add_model_density_to_grid(model); symmetrize_sum()``.
 
-Doing it this way is much cheaper than expanding atoms: splatting costs
+Doing it this way is much cheaper than expanding atoms: density placement costs
 O(n_atoms * box_volume) Gaussian evaluations per symmetry copy, while
 symmetrizing the finished grid costs O(n_grid) integer index arithmetic
 per operation -- and for the signed-permutation operations that make up
@@ -26,7 +26,7 @@ DIFFERENTIABILITY: every operation used here (permute/flip/roll for the
 fast path, advanced indexing for the general path, and the final sum) is
 a standard differentiable PyTorch primitive whose backward is a gather or
 scatter-add. Gradients flow back through the symmetrization to the atomic
-coordinates exactly as they do through the splat itself.
+coordinates exactly as they do through the density calculation itself.
 """
 
 import numpy as np
@@ -284,7 +284,7 @@ def symmetrize_sum(grid: torch.Tensor, grid_ops) -> torch.Tensor:
     Differentiable equivalent of gemmi's Grid::symmetrize_sum().
 
     grid:      (Nu, Nv, Nw) real density, typically straight out of
-               density_torch.splat_density()
+               density_torch.compute_density()
     grid_ops:  list from build_grid_ops() (identity excluded; empty for P1)
 
     Returns a new grid holding, at every point, the sum of the density over
@@ -312,7 +312,7 @@ def supercell_factors(model_cell, target_cell, tol=1e-3):
     non-integer ratio has no exact meaning for the operations that follow:
     folding a density GRID from one cell into another is only exact when the
     target tiles the source. (Folding ATOMS is always well defined -- that is
-    what the modulo in the splat's scatter does -- which is why this constraint
+    what the modulo in the density calculation's scatter does -- which is why this constraint
     appears only once densities, and therefore solvent masks, are folded.)
 
     tol is a relative tolerance on each axis ratio, and angles must match.
@@ -353,7 +353,7 @@ def fold_supercell(grid: torch.Tensor, factors):
     Sum a supercell density grid into one target cell: (na*Nu, nb*Nv, nc*Nw)
     -> (Nu, Nv, Nw), adding the contents of every image.
 
-    This is the density-level equivalent of the modulo the splat's scatter
+    This is the density-level equivalent of the modulo the density calculation's scatter
     applies to atom positions, and it is exact for the same reason: with the
     supercell sampled at na*Nu points along a, grid point i sits at the target
     cell's point i % Nu, so folding is a reshape and a sum over the image axes

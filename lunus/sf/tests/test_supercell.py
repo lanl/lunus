@@ -4,9 +4,9 @@ calculated on.
 
 Two separate claims:
 
-  1. Folding is EXACT and changes nothing without solvent. Splatting atoms
+  1. Folding is EXACT and changes nothing without solvent. Placing atoms
      into the small grid already folds them, via the modulo in the scatter, so
-     splatting onto the supercell grid and folding the density afterwards must
+     placing density onto the supercell grid and folding the density afterwards must
      give the same answer. If it does not, the two foldings disagree and every
      supercell result is suspect.
 
@@ -27,7 +27,7 @@ import pytest
 torch = pytest.importorskip("torch", reason="PyTorch not installed")
 
 from lunus.sf.cell_utils import orth_matrix
-from lunus.sf.density_torch import splat_density
+from lunus.sf.density_torch import compute_density
 from lunus.sf.elements import IT92_COEFFS
 from lunus.sf.kernel_torch import build_element_kernels_torch
 from lunus.sf.solvent_torch import SolventModel, mask_occupancy, solvent_mask
@@ -107,10 +107,10 @@ def test_folding_conserves_and_is_linear():
 
 
 # --------------------------------------------------------------------------
-# 1. exactness against the folding the splat already does
+# 1. exactness against the folding the density calculation already does
 
 def test_supercell_without_solvent_changes_nothing():
-    """Splatting into the small grid folds the atoms by modulo; splatting into
+    """Placing density into the small grid folds the atoms by modulo; placing density into
     the supercell grid and folding the density does it afterwards. Same
     answer, or the two paths disagree about what folding means."""
     s = _model()
@@ -141,7 +141,7 @@ def test_folding_destroys_the_boundary_that_the_mask_needs():
     scale = torch.tensor(n, dtype=DTYPE)
     big_grid = tuple(g * f for g, f in zip(GRID, n))
 
-    rho_super = splat_density(
+    rho_super = compute_density(
         s["frac"] / scale, s["element_idx"], s["occ"], s["atom_A"],
         s["atom_lam"], s["elem_offsets"], s["atom_radius_ang"], big_grid,
         s["orth"] * scale, s["taper_width"], compile_core=False)
@@ -164,7 +164,7 @@ def test_the_pipeline_masks_before_folding():
     scale = torch.tensor(n, dtype=DTYPE)
     big_grid = tuple(g * f for g, f in zip(GRID, n))
 
-    rho_super = splat_density(
+    rho_super = compute_density(
         s["frac"] / scale, s["element_idx"], s["occ"], s["atom_A"],
         s["atom_lam"], s["elem_offsets"], s["atom_radius_ang"], big_grid,
         s["orth"] * scale, s["taper_width"], compile_core=False)

@@ -5,7 +5,7 @@ Where the GPU idle time in a torch.profiler Chrome trace actually sits.
     python tools/analyze_trace.py torch_trace_rank0.json
 
 Written for one question: xtraj's frame loop spends ~290 ms per frame doing
-54 ms of GPU work, while bench_splat.py does the identical work -- same pair
+54 ms of GPU work, while bench_density.py does the identical work -- same pair
 count, same 90 chunks -- in 62.6 ms wall. So ~240 ms per frame is device idle,
 and the shape of that idle says what is causing it:
 
@@ -14,10 +14,10 @@ and the shape of that idle says what is causing it:
            (raise max_pairs_per_batch, or CUDA graphs)
   * a handful of large gaps
         -> the loop is blocking on something. Look at what CPU op each gap
-           lands in: splat_density does one K_needed.detach().to("cpu") per
+           lands in: compute_density does one K_needed.detach().to("cpu") per
            element per frame, which is a synchronizing device->host copy
   * one long gap at the start or end of the step
-        -> the cost is outside the splat entirely
+        -> the cost is outside the density calculation entirely
 
 The distinction is not visible in the profiler's summary table, which reports
 totals per operator with no notion of when the device was doing nothing.
