@@ -243,7 +243,7 @@ def stage_roughness(s, k, frac_start, target, direction_cart, t_max, n_steps, lo
         L = loss_fn(forward(s, k, frac), target)
         L.backward()
         g_cart = frac_grad_to_cart(s, frac.grad)
-        losses.append(float(L))
+        losses.append(float(L.detach()))
         dd.append(float((g_cart * direction_cart).sum()))
     losses, dd = np.array(losses), np.array(dd)
     h = ts[1] - ts[0]
