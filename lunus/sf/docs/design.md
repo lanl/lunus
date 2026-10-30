@@ -56,13 +56,25 @@ implementations' differing radius conventions are then the **largest** source
 of disagreement with gemmi — larger than the taper below. See "Of those two
 terms, the cutoff dominates".
 
-**The taper.** A hard cutoff is unusable for gradients: atoms crossing the
-boundary make the density discontinuous, so the finite-difference derivative
-swings erratically. A smooth taper over the outermost 0.1 Å fixes that at the
-cost of a small, deliberate deviation from an untruncated reference.
-`examples/demo_taper_gradient.py` shows the contrast directly, and
-`tests/test_taper.py` asserts that the tapered gradient converges monotonically
-as eps shrinks. See `density_torch.py`'s module docstring for the full argument.
+**The taper.** A hard cutoff is differentiable almost everywhere, so it is
+not what stands between the gemmi method and a gradient. What it does is make
+two derivatives disagree: autograd differentiates the Gaussian with each
+atom's cutoff sphere held fixed, so the gradient it returns omits the voxels
+that cross the boundary as the atom moves, while the true derivative of the
+loss includes them. With thousands of truncated atoms those crossings are
+frequent, and a hard edge is also a sharp feature for the FFT to represent.
+The smooth taper over the outermost 0.1 Å makes the autograd and true
+gradients agree and removes the edge, at the cost of a small, deliberate
+deviation from an untruncated reference. It is an accuracy measure, not a
+requirement for differentiability. The genuine obstacle to differentiating
+the gemmi method is its geometric solvent mask, which `lunus.sf` replaces
+with a density threshold (docs/solvent-design.md).
+`examples/demo_taper_gradient.py` shows the autograd-versus-finite-difference
+gap directly, `tests/test_taper.py` asserts that the tapered gradient
+converges as eps shrinks, and `tools/study_taper.py` measures what the taper
+buys on a real crystal: gradient fidelity, the roughness of the loss along a
+walk, and optimizer convergence, over a sweep of widths and cutoffs. See
+`density_torch.py`'s module docstring for the autograd argument in full.
 
 ## Assumptions carried over from xtraj.py
 

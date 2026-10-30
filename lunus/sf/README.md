@@ -137,12 +137,13 @@ torch/cctbx/gemmi/mpi4py, so a partial environment skips rather than errors.
 | `tools/compare_icalc_mtz.py` | two Icalc MTZs → correlation and R-factor, overall and by resolution shell. |
 | `tools/fit_solvent_rfactor.py` | fits `k_sol`/`b_sol`/overall scale against deposited amplitudes and reports R and R-free by shell, with and without solvent. The bulk-solvent model's only test against measurements; `--reference` prints what mmtbx reaches on the same model, which is the number to judge it by. See docs/solvent-design.md. |
 | `tools/pdb_rfactor.py` | R and R-free for a deposited entry by PDB ID: fetches `<ID>.pdb` and `<ID>-sf.cif` from the wwPDB (cached in `--dir`), then runs `fit_solvent_rfactor.py` (`--method torch`), `mmtbx.f_model` on the same amplitudes and free set (`--method mmtbx`), or both (the default) and tabulates them side by side. Options after a bare `--` pass through to the torch fit. |
+| `tools/study_taper.py` | what the taper buys an optimizer, measured on a real crystal over a sweep of taper widths and density cutoffs: autograd against finite differences (`fidelity`), the loss and its derivative along a sub-voxel walk of the whole structure (`roughness`), and Adam and L-BFGS recovery from a displaced start (`optimize`). Targets from the model's own kernels or from cctbx direct summation. Writes JSON. |
 | `tools/compare_density.py` | two real-space density grids (needs `save_density=True`). |
 | `tools/make_random_bfacs.py` | writes a PDB with a random B per residue, for exercising the per-atom-B path. Seeded. |
 | `tools/analyze_trace.py` | a `torch.profiler` Chrome trace (from `torch_profile_frames=N`) → GPU busy vs idle, the gap size distribution, what each large gap was blocked in, and a test for cgroup CPU-throttling. Standard library only. |
 | `examples/example_usage.py` | several configurations → `<F>`/diffuse → scalar loss → `backward()` → gradients on every atom. |
 | `examples/example_mpi_training.py` | the same under `mpirun`, via `training_mpi.py`. |
-| `examples/demo_taper_gradient.py` | why a hard cutoff is unusable for gradients. |
+| `examples/demo_taper_gradient.py` | how far the autograd gradient of a hard-truncated density departs from the finite-difference one, and that the taper closes the gap. |
 | `examples/compare_gemmi/` | end-to-end torch-vs-gemmi run, with its tracked input data. |
 
 `examples/compare_gemmi/` carries `top_bfac.pdb.gz` (135,834 atoms) and

@@ -44,6 +44,7 @@ lunus/sf/examples/compare_gemmi/*.npy
 lunus/sf/examples/compare_gemmi/*.ndx
 lunus/sf/examples/compare_gemmi/deleted_frames.txt
 lunus/sf/examples/compare_gemmi/*.log
+lunus/sf/examples/compare_gemmi/*.json
 lunus/sf/examples/compare_gemmi/time_*.txt
 # tools/remeasure.sh writes a timestamped directory of logs and
 # reflection files per run; the numbers land in docs/, not in git.
