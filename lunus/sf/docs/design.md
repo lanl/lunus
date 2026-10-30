@@ -76,6 +76,79 @@ buys on a real crystal: gradient fidelity, the roughness of the loss along a
 walk, and optimizer convergence, over a sweep of widths and cutoffs. See
 `density_torch.py`'s module docstring for the autograd argument in full.
 
+### What the taper study measured
+
+`tools/study_taper.py` on 7FPV, 3,341 atoms, one asymmetric unit expanded on
+the grid, `d_min` 2.0, grid 54×72×150, 11,011 reflections, float64 on CUDA,
+the structure displaced by 0.3 Å rms and refined back. Taper widths hard
+(1e-6 Å), 0.01, 0.03, 0.1, 0.3 Å; cutoffs 1e-2 and 1e-4 e/Å³; targets the
+model's own amplitudes (`self`) and cctbx direct summation (`exact`). JSON
+in `examples/compare_gemmi/taper_*.json`, gitignored; 2026-10-30.
+
+**The taper's value depends on the cutoff, because the density jump at the
+boundary is the cutoff value itself.**
+
+| cutoff | width | walk: rms jump in dL/dt | L-BFGS, 200 it., exact target | at 0.001 Å step: max \|fd−auto\|/\|auto\| |
+|---|---|---|---|---|
+| 1e-2 | hard | 0.33 | **stalled at 122**, 5.8e-4 | 10 |
+| 1e-2 | 0.01–0.1 | 0.009 | ran out, 2.3–2.7e-4 | 0.1–0.01 |
+| 1e-2 | 0.3 | 0.009 | ran out, 4.5e-4 | 1e-4 |
+| 1e-4 | hard | 0.010 | ran out, **5.3e-5** | 0.19 |
+| 1e-4 | 0.01–0.3 | 0.009 | ran out, 5.7e-5 | 0.005 |
+
+- **At 1e-2** the hard cutoff's gradient disagrees with the loss's actual
+  slope along a collective walk by 23% rms, and L-BFGS fails its line search
+  before the budget is spent. Any taper from 0.01 Å up removes that: the
+  roughness falls 35-fold to the walk's own resolution and L-BFGS runs to
+  completion at a tenth of the loss. Adam does not care either way; its loss
+  trajectories are identical across widths, which is the usual first-order
+  indifference to a kinked gradient, and why a result obtained only with
+  Adam says nothing about the taper.
+- **At 1e-4** the jump is a hundredfold smaller and the optimizer cannot see
+  it: hard and tapered are the same to within noise, and the hard cutoff's
+  L-BFGS run is in fact marginally the best. What the taper still fixes is
+  pointwise: the worst sampled atom's autograd error at a 0.001 Å step is 19%
+  of the gradient without it and 0.5% with it.
+- **The 1e-4 model is exact at this resolution.** Every 1e-4 number is the
+  same against direct-summation amplitudes as against the model's own. At
+  1e-2 the forward error sets a floor of 2.3–2.7e-4 against the exact
+  target, four times the fine model's, and it grows with taper width (0.3 Å
+  removes enough density to cost a further factor of two). A 1e-5 final
+  cutoff bought nothing over 1e-4 in any run.
+- **The tapered floor is identical everywhere**, 0.009, independent of width
+  and cutoff: that is the walk's own central difference at 0.005 Å steps,
+  not the taper. The taper has pushed the kink below what the walk resolves.
+
+**Two-stage refinement, measured** (`--stages schedule`): L-BFGS at 1e-2 for
+a budget, then kernels rebuilt at 1e-4, optimizer reset, continued; against
+one-stage at 1e-4 with the same total iterations and target. The proposal
+was that the taper makes the cheap coarse stage usable, and it does: with
+the taper, stage one hands over the same point every time (fine-model loss
+3.2e-4 at the switch in every run); without it, a different one each run
+(4.6e-4, 5.6e-4, 5.3e-4), because the handover point is wherever the line
+search happened to fail. But the saving on this system is small, 0–20% in
+time to a loss of 1e-4, for two reasons that are worth stating because
+they bound what the scheme can do:
+
+1. A coarse evaluation cost 0.4–0.6 of a fine one here, not the 0.23 that
+   the radius ratio (1.93 against 3.14 Å, work ∼ r³) predicts, because at
+   3,341 atoms the GPU frame is dominated by the FFT and launch overhead,
+   which the cutoff does not touch. The r³ ratio applies when the density
+   step dominates, i.e. large systems and high resolution.
+2. The coarse model plateaus at its forward-error floor of ∼3e-4 within
+   ∼30 iterations, and every coarse iteration past that is wasted. From
+   the switch the fine stage needs ∼50 evaluations to reach 1e-4, against
+   ∼75 from the displaced start, so the coarse stage buys about 25 fine
+   evaluations' worth of progress, and the saving is that times one minus
+   the cost ratio. With the switch at 30 iterations and a 0.03 Å taper the
+   two-stage run reached 1e-4 in 1.97 s against 2.42 s.
+
+So the recipe is sound, the taper is what makes it reproducible, and its
+payoff is set by where the coarse floor lies relative to the target
+precision and by how much of a frame the density step is. An intermediate
+coarse cutoff (1e-3) would lower the floor at intermediate cost and has not
+been tried.
+
 ## Assumptions carried over from xtraj.py
 
 - **B-factors.** One uniform B across the structure (matching
