@@ -155,11 +155,31 @@ cutoff.** Its only advantage is a cheaper evaluation, so the saving can
 never exceed one minus the cost ratio over the iterations spent coarse,
 and at 1e-2 it is partly given back as slower progress per iteration.
 
-So the recipe is sound, the taper is what makes it reproducible, and its
-payoff is bounded by the per-evaluation cost ratio, which is ∼0.5 here and
-approaches the r³ value only when the density step dominates the frame.
-On 3,341 atoms at 2 Å it is a 10–20% effect; the 135,834-atom system is
-where it would be worth measuring next.
+**On the large system the schedule is worth 5% and the taper is worth the
+refinement.** `top_bfac.pdb.gz` with `--select "protein and not element H"`
+(39,040 heavy protein atoms, all free; the waters dropped because Bragg
+amplitudes do not determine them and the hydrogens because moving heavy
+atoms under fixed hydrogens is not a model anyone uses), P1 box, `d_min`
+2.0, float32 on CUDA, coarse 1e-3 for 30 of 100 iterations, self target:
+
+| width | one-stage loss / rmsd | two-stage loss / rmsd | fine loss at switch | s one / two |
+|---|---|---|---|---|
+| hard | 5.4e-6 / 0.052 Å | **2.6e-4 / 0.144 Å** | 1.0e-3 | 20.5 / 18.6 |
+| 0.03 | 4.7e-6 / 0.050 | 4.9e-6 / 0.050 | 1.2e-4 | 19.9 / 19.0 |
+| 0.1 | 4.8e-6 / 0.050 | 5.2e-6 / 0.052 | 1.3e-4 | 20.1 / 19.0 |
+
+Twelve times the atoms means boundary crossings twelve times as frequent
+per step, and the hard cutoff's coarse stage no longer stalls late enough
+to be rescued: it hands over eight times worse than the tapered one and
+seventy fine iterations do not recover. Both tapered widths match
+one-stage. The 5% saving is inside the bound above.
+
+So the recipe is sound but minor: the coarse model takes as many
+iterations as the fine one, and 1e-3 against 1e-4 is at most a factor of
+two in density work, so 5–20% is all a coarse stage can return. What the
+study establishes is about the taper. At the shipped cutoff of 1e-4 it is
+an atom-level correctness measure the optimizer cannot see; at any coarser
+cutoff, on a protein-sized system, L-BFGS does not converge without it.
 
 ## Assumptions carried over from xtraj.py
 
