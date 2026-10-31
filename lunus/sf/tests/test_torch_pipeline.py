@@ -118,14 +118,15 @@ def test_values_match_numpy_reference(torch_system):
         max_rel_err = max(max_rel_err, rel_err)
         print(f"{h:3d}{k:3d}{l:3d}   {fn.real:8.4f}{fn.imag:+8.4f}i   {fa.real:8.4f}{fa.imag:+8.4f}i   {rel_err:.2e}")
     print(f"\nMax relative error (values, torch vs analytic): {max_rel_err:.2e}")
-    # Threshold accounts for the taper's real, deliberate, already-measured
+    # Threshold accounts for the cutoff's real, deliberate, already-measured
     # deviation from this fully-UNTRUNCATED analytic reference -- not just
     # grid discretization. Directly confirmed via radial integration for
-    # these exact parameters (b_iso=80, cutoff=1e-5, taper_width=0.1): the
-    # hard cutoff alone loses ~0.018% of total charge (unavoidable with any
-    # finite radius), the taper adds a bit more on top, totaling ~2.1e-4 --
-    # matching what's observed here to within grid-discretization noise.
-    # This is the correct, intentional tradeoff for gradient correctness
+    # these exact parameters (b_iso=80, cutoff=1e-5): the hard cutoff alone
+    # loses ~0.018% of total charge, unavoidable with any finite radius.
+    # Measured here 1.56e-4; it was ~2.1e-4 while the taper window sat
+    # inside the cutoff radius and removed density on top of the cutoff.
+    # With the window outside (kernel_torch.py) the width adds nothing
+    # measurable. This is the intentional tradeoff for gradient correctness
     # (see density_torch.py's module docstring), not a regression.
     assert max_rel_err < 5e-4, "torch pipeline does not match the analytic reference"
 

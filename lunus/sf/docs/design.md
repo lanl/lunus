@@ -63,10 +63,14 @@ atom's cutoff sphere held fixed, so the gradient it returns omits the voxels
 that cross the boundary as the atom moves, while the true derivative of the
 loss includes them. With thousands of truncated atoms those crossings are
 frequent, and a hard edge is also a sharp feature for the FFT to represent.
-The smooth taper over the outermost 0.1 Å makes the autograd and true
-gradients agree and removes the edge, at the cost of a small, deliberate
-deviation from an untruncated reference. It is an accuracy measure, not a
-requirement for differentiability. The genuine obstacle to differentiating
+The smooth taper, a raised-cosine window of width 0.1 Å, makes the autograd
+and true gradients agree and removes the edge. **The window sits outside the
+cutoff radius**, on [R, R + w] where R is the radius at which the density
+equals the cutoff (since 2026-10-30; it used to sit inside, on [R − w, R]).
+Nothing above the cutoff density is attenuated, so the width does not affect
+forward accuracy, only the candidate-voxel count (+9% at 1e-4, +13% at 1e-2,
+measured on 7FPV). It is an accuracy measure, not a requirement for
+differentiability. The genuine obstacle to differentiating
 the gemmi method is its geometric solvent mask, which `lunus.sf` replaces
 with a density threshold (docs/solvent-design.md).
 `examples/demo_taper_gradient.py` shows the autograd-versus-finite-difference
@@ -80,7 +84,10 @@ walk, and optimizer convergence, over a sweep of widths and cutoffs. See
 
 `tools/study_taper.py` on 7FPV, 3,341 atoms, one asymmetric unit expanded on
 the grid, `d_min` 2.0, grid 54×72×150, 11,011 reflections, float64 on CUDA,
-the structure displaced by 0.3 Å rms and refined back. Taper widths hard
+the structure displaced by 0.3 Å rms and refined back. **Measured with the
+density window inside the cutoff radius**, the convention before 2026-10-30;
+the conclusions about where the taper matters do not depend on which side of
+R the window sits, the width-dependence of the 1e-2 forward floor does. Taper widths hard
 (1e-6 Å), 0.01, 0.03, 0.1, 0.3 Å; cutoffs 1e-2 and 1e-4 e/Å³; targets the
 model's own amplitudes (`self`) and cctbx direct summation (`exact`). JSON
 in `examples/compare_gemmi/taper_*.json`, gitignored; 2026-10-30.
@@ -112,9 +119,12 @@ boundary is the cutoff value itself.**
 - **The 1e-4 model is exact at this resolution.** Every 1e-4 number is the
   same against direct-summation amplitudes as against the model's own. At
   1e-2 the forward error sets a floor of 2.3–2.7e-4 against the exact
-  target, four times the fine model's, and it grows with taper width (0.3 Å
-  removes enough density to cost a further factor of two). A 1e-5 final
-  cutoff bought nothing over 1e-4 in any run.
+  target, four times the fine model's, and it grew with taper width (0.3 Å
+  removed enough density to cost a further factor of two). That last effect
+  was the inward window removing density above the cutoff; with the window
+  outside R the removed density is bounded by the cutoff whatever the width,
+  and the 1e-2 sweep should be re-run to confirm the dependence is gone.
+  A 1e-5 final cutoff bought nothing over 1e-4 in any run.
 - **The tapered floor is identical everywhere**, 0.009, independent of width
   and cutoff: that is the walk's own central difference at 0.005 Å steps,
   not the taper. The taper has pushed the kink below what the walk resolves.
@@ -300,7 +310,11 @@ docs/performance.md.
 System: `examples/compare_gemmi/top_bfac.pdb.gz`, 135,834 atoms, per-residue B
 on [10, 100], cell 88.451, 88.451, 39.823, space group P4₃ (superseded; see
 docs/performance.md), `d_min` 0.9, grid
-300 × 300 × 144, cutoff 0.01.
+300 × 300 × 144, cutoff 0.01. Every number in this section and the next was
+measured with the density window INSIDE the cutoff radius; it moved outside
+on 2026-10-30, and gemmi truncates hard at R, so the two now differ only by
+density below the cutoff. The corrected-cell parity figure has been
+re-measured with the outward window — see the note after the table.
 
 **Read the first row carefully**: it is torch NOT expanding while gemmi does,
 i.e. a genuine mismatch, and not a description of `expand_symmetry=False`.

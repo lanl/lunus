@@ -24,7 +24,9 @@ def hard_mask_density(atom_pos, grid_points, A, lam, R):
 
 def smooth_taper_density(atom_pos, grid_points, A, lam, R, w):
     """Same Gaussian sum, but multiplied by a C^1 raised-cosine taper
-    that goes from 1 at r=R-w to 0 at r=R, instead of a hard step."""
+    that goes from 1 at r=R-w to 0 at r=R, instead of a hard step. The
+    pipeline places that window OUTSIDE the cutoff radius, so main() hands
+    this R_cut + w: nothing above the cutoff density is attenuated."""
     d = grid_points - atom_pos
     r = np.sqrt(np.sum(d * d, axis=-1))
     dens = np.sum(A * np.exp(-lam * r[..., None] ** 2), axis=-1)
@@ -90,8 +92,9 @@ def main():
     A, lam = precalculate_density_iso(coef9, b_iso)
     R = cutoff_radius(A, lam, cutoff=0.01)
     w = 0.4  # taper transition width, Angstrom -- modest fraction of R
+    R_outer = R + w   # the window occupies [R, R + w], as in kernel_torch.py
 
-    print(f"cutoff radius R = {R:.3f} A, taper width w = {w} A")
+    print(f"cutoff radius R = {R:.3f} A, taper width w = {w} A, window on [{R:.3f}, {R_outer:.3f}]")
 
     # Much finer grid than the production grid (0.3 A) -- this is a
     # deliberately over-resolved quadrature grid purely to get a clean,
@@ -132,10 +135,10 @@ def main():
         direction = rng.normal(size=3)
         direction /= np.linalg.norm(direction)
 
-        f_p = total_density(atom_pos + eps * direction, grid_points, A, lam, R, "taper", w)
-        f_m = total_density(atom_pos - eps * direction, grid_points, A, lam, R, "taper", w)
+        f_p = total_density(atom_pos + eps * direction, grid_points, A, lam, R_outer, "taper", w)
+        f_m = total_density(atom_pos - eps * direction, grid_points, A, lam, R_outer, "taper", w)
         fd_grad = (f_p - f_m) / (2 * eps)
-        ag_grad = analytic_taper_gradient(atom_pos, grid_points, A, lam, R, w) @ direction
+        ag_grad = analytic_taper_gradient(atom_pos, grid_points, A, lam, R_outer, w) @ direction
         rel_diff = abs(fd_grad - ag_grad) / max(abs(fd_grad), 1e-8)
         rel_diffs_t.append(rel_diff)
         print(f"  trial {trial}: finite-diff = {fd_grad:10.5f}   "
