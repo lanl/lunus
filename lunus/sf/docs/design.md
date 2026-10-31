@@ -210,29 +210,48 @@ iterations, CPU checks on 2026-10-31):
    (0.069 Å), which are statements about how far the degenerate
    directions let it drift, not about the basin of a well-posed problem.
 
-With the single-conformer heavy-atom model, 11,011 reflections against
-3,810 coordinates (2.9 per parameter, the box's ratio), the cutoff and
-width table is being measured and goes here. The earlier 7FPV tables at
-2 Å with everything free (`lbfgs_7fpv.json`) and at 1.2 Å with and without
-the alternates (`lbfgs_7fpv_1p2*.json`) are superseded.
+With the single-conformer heavy-atom model (1,270 atoms, `--occ-one`
+restoring the 220 kept A conformers to full occupancy), 11,011 reflections
+against 3,810 coordinates, 2.9 per parameter, the box's ratio
+(`lbfgs_7fpv_single.json`):
+
+| cutoff | width | final rmsd (Å) | final loss | iterations of 300 |
+|---|---|---|---|---|
+| 1e-2 | hard | 0.034 | 5.4e-6 | 141, line search failed, after converging |
+| 1e-2 | 0.1 | 0.042 | 6.9e-5 | 300 |
+| 1e-3 | hard | 0.038 | 3.9e-5 | 165, line search failed, after converging |
+| 1e-3 | 0.1 | 0.036 | 3.0e-5 | 300 |
+| 1e-4 | hard | 0.040 | 6.5e-5 | 244, line search failed, after converging |
+| 1e-4 | 0.1 | 0.034 | 2.5e-5 | 300 |
+
+Every run reaches 0.034 to 0.042 Å, with or without the taper, at every
+cutoff. The hard-cutoff runs do end on failed line searches, but at
+iteration 141 to 244, by which point their rmsd had stopped moving: the
+failure is the optimizer finding no descent direction on a kinked surface
+at the minimum, not a failure to reach it. The earlier 7FPV tables, at 2 Å
+with everything free (`lbfgs_7fpv.json`) and at 1.2 Å with and without
+the alternates (`lbfgs_7fpv_1p2*.json`), are superseded.
 
 **What this says about optimization at different density thresholds**,
-which is the conclusion the study is for. On the 39,040-atom box, judged
-by rmsd, L-BFGS recovers the structure as well without the taper as with
-it at the 1e-4 cutoff, 0.019 against 0.018 Å, and does not recover it
-without the taper at 1e-3 (0.149 Å) or 1e-2 (0.307 Å, the starting
-distance, after 52 iterations), stopping on a failed line search both
-times, while every tapered run reaches 0.014 to 0.018 Å; 0.03 and 0.1 Å
-behave the same. The 7FPV rows are to be restated from the
-single-conformer run above; the runs so far, with the alternates in, put
-its threshold between 1e-3 and 1e-2 rather than the box's between 1e-4 and
-1e-3, and a system-dependent threshold is expected, since the
-boundary-crossing rate grows with the number of atoms and the density jump
-at the boundary is the cutoff value itself. The finding is that cases
-exist, within the range of cutoffs the code accepts and on a protein-sized
-system, where the taper decides whether L-BFGS recovers the structure,
-that where it sets in depends on the system, and that there may well be
-other cases.
+which is the conclusion the study is for, judged by the rmsd of the
+refined coordinates from the true structure. On the 1,270-atom
+single-conformer 7FPV model, L-BFGS recovers the structure as well
+without the taper as with it at every cutoff tested, 1e-4 to 1e-2. On
+the 39,040-atom box it does so at 1e-4 (0.019 against 0.018 Å) and does
+not at 1e-3 (0.149 Å) or 1e-2 (0.307 Å, the starting distance, after 52
+iterations), stopping on a failed line search while still far from the
+minimum, while every tapered run reaches 0.014 to 0.018 Å; 0.03 and 0.1 Å
+behave the same. So whether the taper matters depends on the system: it
+did not on the small one at any cutoff, and on the large one it decided
+the outcome at 1e-3 and 1e-2. That is the direction expected, since the
+rate of voxels crossing cutoff spheres per step grows with the number of
+atoms, thirty times more on the box, and the density jump at each
+crossing is the cutoff value itself; the two systems also differ in B
+distribution and symmetry, and nothing here separates those. The finding
+is that cases exist, within the range of cutoffs the code accepts and on
+a protein-sized system, where the taper decides whether L-BFGS recovers
+the structure, that where it sets in depends on the system, and that
+there may well be other cases.
 
 ## Assumptions carried over from xtraj.py
 
