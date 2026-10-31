@@ -57,8 +57,8 @@ of disagreement with gemmi — larger than the taper below. See "Of those two
 terms, the cutoff dominates".
 
 **The taper.** A hard cutoff is differentiable almost everywhere, so it is
-not what stands between the gemmi method and a gradient. What it does is make
-two derivatives disagree: autograd differentiates the Gaussian with each
+not what makes a density-on-grid calculation non-differentiable. What it
+does is make two derivatives disagree: autograd differentiates the Gaussian with each
 atom's cutoff sphere held fixed, so the gradient it returns omits the voxels
 that cross the boundary as the atom moves, while the true derivative of the
 loss includes them. With thousands of truncated atoms those crossings are
@@ -74,9 +74,13 @@ hard cutoff's; that was an error in how the method worked, and the record
 of what it cost is kept below. Nothing above the threshold is attenuated
 now, so the width does not affect forward accuracy, only the
 candidate-voxel count (+9% at 1e-4, +13% at 1e-2, measured on 7FPV). It is an accuracy measure, not a requirement for
-differentiability. The genuine obstacle to differentiating
-the gemmi method is its geometric solvent mask, which `lunus.sf` replaces
-with a density threshold (docs/solvent-design.md).
+differentiability. The one component of the standard method whose gradient
+with respect to the coordinates is genuinely useless is a geometric solvent
+mask: it is piecewise constant in the atom positions, so its derivative is
+zero almost everywhere and undefined at the boundary. That is a property of
+geometric masks as such, in gemmi, cctbx, Phenix and REFMAC alike, and it is
+why `lunus.sf` builds its mask from the density instead
+(docs/solvent-design.md).
 `examples/demo_taper_gradient.py` shows the autograd-versus-finite-difference
 gap directly, `tests/test_taper.py` asserts that the tapered gradient
 converges as eps shrinks, and `tools/study_taper.py` measures what the taper
