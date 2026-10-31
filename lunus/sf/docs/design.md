@@ -147,27 +147,57 @@ boundary is the cutoff value itself.**
   and cutoff: that is the walk's own central difference at 0.005 Å steps,
   not the taper. The taper has pushed the kink below what the walk resolves.
 
-(A two-stage coarse-then-fine experiment, `--stages schedule`, was tried
-here and then set aside: switching models and resetting the optimizer
-midway confused the question of whether L-BFGS converges at a given cutoff.
-Its JSON files remain in `examples/compare_gemmi/`; nothing below rests on
-them.)
+**L-BFGS alone, one stage, at every cutoff** (`--stages optimize --no-adam
+--steps 300`, 2026-10-31). The clean test of whether the optimizer
+converges at a given cutoff with and without the taper: nine refinements
+per system from the same displaced start to the same target, one per
+cutoff and width, nothing switched midway. (A two-stage coarse-then-fine
+experiment, `--stages schedule`, was tried before this and set aside: a
+model switch and an optimizer reset in the middle of every run confused
+the question. Its JSON files remain in `examples/compare_gemmi/`; nothing
+here rests on them.)
+
+7FPV, 3,341 atoms, exact target (cctbx direct summation), float64:
+
+| cutoff | width | final loss | iterations of 300 | note |
+|---|---|---|---|---|
+| 1e-2 | hard | 4.7e-4 | **165, line search failed** | |
+| 1e-2 | 0.03 / 0.1 | 2.0e-4 / 1.6e-4 | 300 | at the 1e-2 forward floor, flat |
+| 1e-3 | hard | 8.3e-5 | **229, line search failed** | still descending when it stopped |
+| 1e-3 | 0.03 / 0.1 | 4.8e-5 / 4.6e-5 | 300 | |
+| 1e-4 | hard | 5.2e-5 | 300 | 351 evaluations: more backtracking than the tapered 307–309 |
+| 1e-4 | 0.03 / 0.1 | 5.0e-5 / 5.0e-5 | 300 | |
+
+`top_bfac.pdb.gz`, `--select "protein and not element H"`, 39,040 heavy
+protein atoms all free, no waters (Bragg amplitudes do not determine them)
+and no hydrogens (moving heavy atoms under fixed hydrogens is not a model
+anyone uses), P1 box, `d_min` 2.0, self target, float32:
+
+| cutoff | width | final loss | iterations of 300 | note |
+|---|---|---|---|---|
+| 1e-2 | hard | 4.5e-3 | **52, line search failed** | four orders of magnitude short |
+| 1e-2 | 0.03 / 0.1 | 2.1e-7 / 1.3e-7 | 300 | still descending, halving every 50 |
+| 1e-3 | hard | 7.1e-5 | **279, line search failed** | slowing (0.83 per 50) before it stopped |
+| 1e-3 | 0.03 / 0.1 | 9.1e-8 / 9.1e-8 | 300 | still descending, halving every 50 |
+| 1e-4 | hard | 1.1e-7 | 300 | still descending, same rate as tapered |
+| 1e-4 | 0.03 / 0.1 | 9.2e-8 / 9.1e-8 | 300 | |
 
 **What this says about optimization at different density thresholds**,
-which is the conclusion the study is for. For the systems examined,
-one-stage L-BFGS refinement works with or without the taper at the 1e-4
-cutoff. On 7FPV at the 1e-2 cutoff it does not work without the taper:
-L-BFGS stops on a failed line search a little past halfway through its
-budget, at ten times the loss the tapered runs reach. Whether the same
-holds at 1e-3, and on the 39,040-atom protein-only system, is being
-re-measured with one-stage runs and a long budget (the two-stage
-experiment had suggested so, but could not separate the taper from the
-model switch). The thresholds at which the taper starts to matter will
-differ between systems, since the boundary-crossing rate grows with the
-number of atoms and the density jump at the boundary is the cutoff value
-itself; the finding is that cases exist, within the range of cutoffs the
-code accepts and on a protein-sized system, where the taper decides whether
-L-BFGS converges, and there may well be others.
+which is the conclusion the study is for. For the two systems examined,
+L-BFGS refinement converges with or without the taper at the 1e-4 cutoff:
+the hard-cutoff run ends within a few percent of the tapered ones on 7FPV,
+and within 20% on the large system, still descending at the same rate. At
+1e-3 and at 1e-2 it does not converge without the taper, on either system:
+L-BFGS stops on a failed line search before its budget, at 1.8× and 2.5×
+the tapered loss on 7FPV, and at 800× and 20,000× on the 39,040-atom
+system, where the hard-cutoff run at 1e-2 gave up after 52 iterations.
+With the taper, 0.03 and 0.1 Å behave the same everywhere. The thresholds
+at which the taper starts to matter will differ between systems, since the
+boundary-crossing rate grows with the number of atoms and the density jump
+at the boundary is the cutoff value itself; here it set in between 1e-4
+and 1e-3 on both. The finding is that cases exist, within the range of
+cutoffs the code accepts and on a protein-sized system, where the taper
+decides whether L-BFGS converges, and there may well be others.
 
 ## Assumptions carried over from xtraj.py
 
