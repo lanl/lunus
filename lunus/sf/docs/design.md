@@ -195,17 +195,19 @@ drifted away from the truth while its loss kept falling. Its JSON,
 | 1e-4 | hard | 0.106 | 2.9e-5 | 300 |
 | 1e-4 | 0.1 | 0.128 | 4.7e-5 | 300 |
 
-No 7FPV run recovers the structure the way the box does; all level off at
-0.11 to 0.13 Å from evaluation 200 on, whatever the cutoff, and the losses
-of 3 to 5e-5 are far from the zero the self target makes attainable. The
-same runs against cctbx direct summation of the true structure
-(`lbfgs_7fpv_1p2.json`) gave the same floors to within 0.01 Å, so the
-floor is not the grid model's forward error. The likely reason is the
-radius of convergence: a 0.3 Å rms displacement at 1.2 Å resolution leaves
-many atoms outside the basin of the true minimum, where at 2.0 Å on the
-box the same displacement was well inside it. That is a hypothesis; a run
-with a smaller displacement would test it. It does not bear on the taper,
-which is compared within one row.
+The 7FPV rows above were refined with every deposited atom free, including
+1,527 hydrogens and ∼350 waters, and the rmsd averaged over all of them.
+That is why they level off at 0.11 to 0.13 Å while the box reaches 0.014 Å:
+the amplitudes barely constrain a hydrogen's position, so the hydrogens
+drift and dominate the average. Refining the box's way, `--select "protein
+and not element H"`, the same 1e-4 run reaches 0.069 Å and a loss of
+8.9e-7 in 150 iterations (CPU check, 2026-10-31), against 0.118 Å and
+5.3e-5 with everything free — on course for the box's result. The
+hydrogens should not be in the model without a riding scheme, for the
+reason given above for the box; the table is being repeated with that
+selection, and the rows above stand only until it lands. (The same runs
+against cctbx direct summation, `lbfgs_7fpv_1p2.json`, gave the same
+floors, which rules out the forward model as the cause.)
 
 **What this says about optimization at different density thresholds**,
 which is the conclusion the study is for. At the 1e-4 cutoff L-BFGS does
