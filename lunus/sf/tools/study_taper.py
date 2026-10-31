@@ -491,6 +491,8 @@ def build_parser():
     p.add_argument("--lrs", type=float, nargs="+", default=[0.003, 0.01, 0.03],
                    help="Adam learning rates, A per step")
     p.add_argument("--no-lbfgs", action="store_true")
+    p.add_argument("--no-adam", action="store_true",
+                   help="optimize stage runs L-BFGS only")
     p.add_argument("--reach", type=float, default=0.1,
                    help="loss fraction of the start that counts as 'reached'")
     # schedule
@@ -590,9 +592,10 @@ def main():
                 print("  roughness: %.0f s" % (time.time() - t0), file=log)
             if "optimize" in args.stages:
                 t0 = time.time()
-                run["adam"] = [run_adam(s, k, frac_start, disp_cart, target, lr,
-                                        args.steps, args.reach, log)
-                               for lr in args.lrs]
+                run["adam"] = [] if args.no_adam else [
+                    run_adam(s, k, frac_start, disp_cart, target, lr,
+                             args.steps, args.reach, log)
+                    for lr in args.lrs]
                 if not args.no_lbfgs:
                     run["lbfgs"], _ = run_lbfgs(s, k, frac_start, disp_cart,
                                                 target, args.steps, args.reach, log)
@@ -640,8 +643,8 @@ def main():
             for r in runs:
                 if r["cutoff"] != c:
                     continue
-                best = min(a["final_rmsd"] for a in r["adam"])
-                cell = "%.3f" % best
+                cell = ("%.3f" % min(a["final_rmsd"] for a in r["adam"])
+                        if r["adam"] else "-")
                 if not args.no_lbfgs:
                     cell += "/%.3f(%d)" % (r["lbfgs"]["final_rmsd"], r["lbfgs"]["iterations"])
                 cells.append("%18s" % cell)

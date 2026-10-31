@@ -147,65 +147,27 @@ boundary is the cutoff value itself.**
   and cutoff: that is the walk's own central difference at 0.005 Å steps,
   not the taper. The taper has pushed the kink below what the walk resolves.
 
-**An exploratory two-stage experiment** (`--stages schedule`): L-BFGS at a
-coarse cutoff for part of the budget, then the kernels rebuilt at 1e-4, the
-optimizer reset and the refinement continued, against one-stage at 1e-4
-with the same total iterations and target. It was tried because the sweep
-above suggested the taper might make a cheap coarse stage usable. The
-measurements are kept here as data; no general conclusion about how much
-time such a scheme saves is drawn from them, because the saving depends on
-the per-evaluation cost ratio between the two cutoffs, on where the switch
-is placed and on the system, and only a few points of that space were
-visited.
-
-7FPV, exact target, coarse 1e-2 for 100 of 200 iterations: the tapered
-stage one handed over the same point every run (fine-model loss 3.2e-4 at
-the switch), the hard-cutoff stage one a different point each run (4.6e-4,
-5.6e-4, 5.3e-4), because its handover is wherever the line search happened
-to fail. Two-stage matched one-stage in final loss. Time to a loss of 1e-4
-was 0 to 20% shorter two-stage, depending on width and switch point. A
-coarse evaluation cost 0.4 to 0.6 of a fine one on this system, not the
-0.23 the radius ratio predicts, since at 3,341 atoms the FFT and launch
-overhead dominate the frame. With coarse 1e-3 and the switch at 30 of 100,
-the handover was 2.6e-4 tapered and 3.5e-4 hard. Per-evaluation traces
-showed the coarse stage making no more progress per iteration than the
-fine one: the landscape has the same shape at every cutoff, and what a
-coarse stage changes is the cost of an evaluation, not the number needed.
-
-**The large system**, `top_bfac.pdb.gz` with
-`--select "protein and not element H"` (39,040 heavy protein atoms, all
-free; the waters dropped because Bragg amplitudes do not determine them and
-the hydrogens because moving heavy atoms under fixed hydrogens is not a
-model anyone uses), P1 box, `d_min` 2.0, float32 on CUDA, coarse 1e-3 for
-30 of 100 iterations, self target:
-
-| width | one-stage loss / rmsd | two-stage loss / rmsd | fine loss at switch | s one / two |
-|---|---|---|---|---|
-| hard | 5.4e-6 / 0.052 Å | **2.6e-4 / 0.144 Å** | 1.0e-3 | 20.5 / 18.6 |
-| 0.03 | 4.7e-6 / 0.050 | 4.9e-6 / 0.050 | 1.2e-4 | 19.9 / 19.0 |
-| 0.1 | 4.8e-6 / 0.050 | 5.2e-6 / 0.052 | 1.3e-4 | 20.1 / 19.0 |
-
-Here the cost ratio was the r³ one (radii 3.34 and 4.01 Å; predicted 0.58,
-measured 0.66 from 0.123 against 0.187 s per evaluation), and the
-two-stage run was 5% faster. The row that matters is the first: at the
-1e-3 cutoff on this system, L-BFGS without the taper made far less
-progress in its 30 iterations, handing over eight times worse than with
-it, and seventy iterations at 1e-4 did not recover; with the taper, both
-widths matched one-stage. The one-stage runs at 1e-4, hard or tapered,
-all converged.
+(A two-stage coarse-then-fine experiment, `--stages schedule`, was tried
+here and then set aside: switching models and resetting the optimizer
+midway confused the question of whether L-BFGS converges at a given cutoff.
+Its JSON files remain in `examples/compare_gemmi/`; nothing below rests on
+them.)
 
 **What this says about optimization at different density thresholds**,
-which is the conclusion the study supports and the only one drawn from it.
-For the systems examined, refinement with L-BFGS works with or without the
-taper at the 1e-4 cutoff. At coarser cutoffs it does not work without the
-taper: on 7FPV at 1e-2 L-BFGS stops on a failed line search a little past
-halfway through its budget, and on the 39,040-atom system at 1e-3 it
-converges so slowly that the refinement fails. The thresholds at which
-this sets in will differ between systems, since the boundary-crossing rate
-grows with the number of atoms and the density jump at the boundary is the
-cutoff value itself. The finding is that cases exist, within the range of
-cutoffs the code accepts and on a protein-sized system, where the taper
-decides whether L-BFGS converges, and there may well be others.
+which is the conclusion the study is for. For the systems examined,
+one-stage L-BFGS refinement works with or without the taper at the 1e-4
+cutoff. On 7FPV at the 1e-2 cutoff it does not work without the taper:
+L-BFGS stops on a failed line search a little past halfway through its
+budget, at ten times the loss the tapered runs reach. Whether the same
+holds at 1e-3, and on the 39,040-atom protein-only system, is being
+re-measured with one-stage runs and a long budget (the two-stage
+experiment had suggested so, but could not separate the taper from the
+model switch). The thresholds at which the taper starts to matter will
+differ between systems, since the boundary-crossing rate grows with the
+number of atoms and the density jump at the boundary is the cutoff value
+itself; the finding is that cases exist, within the range of cutoffs the
+code accepts and on a protein-sized system, where the taper decides whether
+L-BFGS converges, and there may well be others.
 
 ## Assumptions carried over from xtraj.py
 
