@@ -147,48 +147,37 @@ boundary is the cutoff value itself.**
   and cutoff: that is the walk's own central difference at 0.005 Å steps,
   not the taper. The taper has pushed the kink below what the walk resolves.
 
-**Two-stage refinement, measured** (`--stages schedule`): L-BFGS at 1e-2 for
-a budget, then kernels rebuilt at 1e-4, optimizer reset, continued; against
-one-stage at 1e-4 with the same total iterations and target. The proposal
-was that the taper makes the cheap coarse stage usable, and it does: with
-the taper, stage one hands over the same point every time (fine-model loss
-3.2e-4 at the switch in every run); without it, a different one each run
-(4.6e-4, 5.6e-4, 5.3e-4), because the handover point is wherever the line
-search happened to fail. But the saving on this system is small, 0–20% in
-time to a loss of 1e-4, for two reasons that are worth stating because
-they bound what the scheme can do:
+**An exploratory two-stage experiment** (`--stages schedule`): L-BFGS at a
+coarse cutoff for part of the budget, then the kernels rebuilt at 1e-4, the
+optimizer reset and the refinement continued, against one-stage at 1e-4
+with the same total iterations and target. It was tried because the sweep
+above suggested the taper might make a cheap coarse stage usable. The
+measurements are kept here as data; no general conclusion about how much
+time such a scheme saves is drawn from them, because the saving depends on
+the per-evaluation cost ratio between the two cutoffs, on where the switch
+is placed and on the system, and only a few points of that space were
+visited.
 
-1. A coarse evaluation cost 0.4–0.6 of a fine one here, not the 0.23 that
-   the radius ratio (1.93 against 3.14 Å, work ∼ r³) predicts, because at
-   3,341 atoms the GPU frame is dominated by the FFT and launch overhead,
-   which the cutoff does not touch. The r³ ratio applies when the density
-   step dominates, i.e. large systems and high resolution.
-2. The coarse model plateaus at its forward-error floor of ∼3e-4 within
-   ∼30 iterations, and every coarse iteration past that is wasted. From
-   the switch the fine stage needs ∼50 evaluations to reach 1e-4, against
-   ∼75 from the displaced start, so the coarse stage buys about 25 fine
-   evaluations' worth of progress, and the saving is that times one minus
-   the cost ratio. With the switch at 30 iterations and a 0.03 Å taper the
-   two-stage run reached 1e-4 in 1.97 s against 2.42 s.
+7FPV, exact target, coarse 1e-2 for 100 of 200 iterations: the tapered
+stage one handed over the same point every run (fine-model loss 3.2e-4 at
+the switch), the hard-cutoff stage one a different point each run (4.6e-4,
+5.6e-4, 5.3e-4), because its handover is wherever the line search happened
+to fail. Two-stage matched one-stage in final loss. Time to a loss of 1e-4
+was 0 to 20% shorter two-stage, depending on width and switch point. A
+coarse evaluation cost 0.4 to 0.6 of a fine one on this system, not the
+0.23 the radius ratio predicts, since at 3,341 atoms the FFT and launch
+overhead dominate the frame. With coarse 1e-3 and the switch at 30 of 100,
+the handover was 2.6e-4 tapered and 3.5e-4 hard. Per-evaluation traces
+showed the coarse stage making no more progress per iteration than the
+fine one: the landscape has the same shape at every cutoff, and what a
+coarse stage changes is the cost of an evaluation, not the number needed.
 
-A coarse cutoff of 1e-3 (same settings, switch at 30) moved the switch
-point from 3.2e-4 to 2.6e-4 and the time from 3.3 to 3.0 s against
-one-stage, a 10% saving, with the taper; without it the coarse stage
-handed over 3.5e-4. And the per-evaluation traces settle what the coarse
-stage is doing: after the same number of evaluations the one-stage fine
-run was at 2.75e-4 where the 1e-2 coarse stage was at 3.8–4.3e-4 under the
-fine model and the 1e-3 stage at 2.6e-4. **The coarse model does not
-converge in fewer iterations; the landscape has the same shape at every
-cutoff.** Its only advantage is a cheaper evaluation, so the saving can
-never exceed one minus the cost ratio over the iterations spent coarse,
-and at 1e-2 it is partly given back as slower progress per iteration.
-
-**On the large system the schedule is worth 5% and the taper is worth the
-refinement.** `top_bfac.pdb.gz` with `--select "protein and not element H"`
-(39,040 heavy protein atoms, all free; the waters dropped because Bragg
-amplitudes do not determine them and the hydrogens because moving heavy
-atoms under fixed hydrogens is not a model anyone uses), P1 box, `d_min`
-2.0, float32 on CUDA, coarse 1e-3 for 30 of 100 iterations, self target:
+**The large system**, `top_bfac.pdb.gz` with
+`--select "protein and not element H"` (39,040 heavy protein atoms, all
+free; the waters dropped because Bragg amplitudes do not determine them and
+the hydrogens because moving heavy atoms under fixed hydrogens is not a
+model anyone uses), P1 box, `d_min` 2.0, float32 on CUDA, coarse 1e-3 for
+30 of 100 iterations, self target:
 
 | width | one-stage loss / rmsd | two-stage loss / rmsd | fine loss at switch | s one / two |
 |---|---|---|---|---|
@@ -196,24 +185,27 @@ atoms under fixed hydrogens is not a model anyone uses), P1 box, `d_min`
 | 0.03 | 4.7e-6 / 0.050 | 4.9e-6 / 0.050 | 1.2e-4 | 19.9 / 19.0 |
 | 0.1 | 4.8e-6 / 0.050 | 5.2e-6 / 0.052 | 1.3e-4 | 20.1 / 19.0 |
 
-Twelve times the atoms means boundary crossings twelve times as frequent
-per step, and the hard cutoff's coarse stage no longer stalls late enough
-to be rescued: it hands over eight times worse than the tapered one and
-seventy fine iterations do not recover. Both tapered widths match
-one-stage. The 5% saving is inside the bound above, and here the bound is
-the r³ one: the radii are 3.34 and 4.01 Å (this model's random
-per-residue B of 10–100 Å² makes them larger than 7FPV's), r³ predicts a
-cost ratio of 0.58 and the measured seconds per evaluation, 0.123 against
-0.187, give 0.66, so the density step does dominate this frame. With 36 of
-∼110 evaluations coarse that caps the saving at 11%, and the two-stage run
-spent seven more evaluations in total than one-stage.
+Here the cost ratio was the r³ one (radii 3.34 and 4.01 Å; predicted 0.58,
+measured 0.66 from 0.123 against 0.187 s per evaluation), and the
+two-stage run was 5% faster. The row that matters is the first: at the
+1e-3 cutoff on this system, L-BFGS without the taper made far less
+progress in its 30 iterations, handing over eight times worse than with
+it, and seventy iterations at 1e-4 did not recover; with the taper, both
+widths matched one-stage. The one-stage runs at 1e-4, hard or tapered,
+all converged.
 
-So the recipe is sound but minor: the coarse model takes as many
-iterations as the fine one, and 1e-3 against 1e-4 is at most a factor of
-two in density work, so 5–20% is all a coarse stage can return. What the
-study establishes is about the taper. At the shipped cutoff of 1e-4 it is
-an atom-level correctness measure the optimizer cannot see; at any coarser
-cutoff, on a protein-sized system, L-BFGS does not converge without it.
+**What this says about optimization at different density thresholds**,
+which is the conclusion the study supports and the only one drawn from it.
+For the systems examined, refinement with L-BFGS works with or without the
+taper at the 1e-4 cutoff. At coarser cutoffs it does not work without the
+taper: on 7FPV at 1e-2 L-BFGS stops on a failed line search a little past
+halfway through its budget, and on the 39,040-atom system at 1e-3 it
+converges so slowly that the refinement fails. The thresholds at which
+this sets in will differ between systems, since the boundary-crossing rate
+grows with the number of atoms and the density jump at the boundary is the
+cutoff value itself. The finding is that cases exist, within the range of
+cutoffs the code accepts and on a protein-sized system, where the taper
+decides whether L-BFGS converges, and there may well be others.
 
 ## Assumptions carried over from xtraj.py
 
