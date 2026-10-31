@@ -85,9 +85,11 @@ walk, and optimizer convergence, over a sweep of widths and cutoffs. See
 `tools/study_taper.py` on 7FPV, 3,341 atoms, one asymmetric unit expanded on
 the grid, `d_min` 2.0, grid 54×72×150, 11,011 reflections, float64 on CUDA,
 the structure displaced by 0.3 Å rms and refined back. **Measured with the
-density window inside the cutoff radius**, the convention before 2026-10-30;
-the conclusions about where the taper matters do not depend on which side of
-R the window sits, the width-dependence of the 1e-2 forward floor does. Taper widths hard
+density window inside the cutoff radius**, the convention before 2026-10-30,
+except where a re-run with the outward window is stated; the conclusions
+about where the taper matters do not depend on which side of R the window
+sits (checked: hard, roughness and fidelity rows agree to the second digit
+across the two), the width-dependence of the 1e-2 forward floor does. Taper widths hard
 (1e-6 Å), 0.01, 0.03, 0.1, 0.3 Å; cutoffs 1e-2 and 1e-4 e/Å³; targets the
 model's own amplitudes (`self`) and cctbx direct summation (`exact`). JSON
 in `examples/compare_gemmi/taper_*.json`, gitignored; 2026-10-30.
@@ -121,9 +123,15 @@ boundary is the cutoff value itself.**
   1e-2 the forward error sets a floor of 2.3–2.7e-4 against the exact
   target, four times the fine model's, and it grew with taper width (0.3 Å
   removed enough density to cost a further factor of two). That last effect
-  was the inward window removing density above the cutoff; with the window
-  outside R the removed density is bounded by the cutoff whatever the width,
-  and the 1e-2 sweep should be re-run to confirm the dependence is gone.
+  was the inward window removing density above the cutoff. **Re-run
+  2026-10-31 with the window outside R** (same settings, exact target,
+  cutoff 1e-2): the dependence reverses. The L-BFGS floor is 2.18e-4 at
+  0.01 Å, 2.08e-4 at 0.03, 1.74e-4 at 0.1 and 1.23e-4 at 0.3 Å, against
+  2.49 / 2.30 / 2.73 / 4.46e-4 inward, because a window outside R keeps
+  part of the sub-cutoff tail that a hard cutoff drops, and a wider window
+  keeps more of it. The hard cutoff is the same run either way (5.9e-4,
+  stall at 118), and roughness and fidelity are unchanged to the second
+  digit, so the window's side affects the forward model only, as it should.
   A 1e-5 final cutoff bought nothing over 1e-4 in any run.
 - **The tapered floor is identical everywhere**, 0.009, independent of width
   and cutoff: that is the walk's own central difference at 0.005 Å steps,
