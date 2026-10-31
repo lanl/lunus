@@ -176,42 +176,49 @@ coordinates (2.8 per parameter), self target, float32:
 | 1e-4 | hard | 0.019 | 1.1e-7 | 300 |
 | 1e-4 | 0.03 / 0.1 | 0.018 / 0.018 | 9.2e-8 / 9.1e-8 | 300 |
 
-7FPV, 3,341 atoms, one asymmetric unit, `d_min` 2.0, exact target (cctbx
-direct summation), float64 — **and not a test of optimization**: 11,011
-reflections against 10,023 coordinates is 1.1 per parameter, and every run
-drops to ∼0.18 Å by evaluation 50 and then drifts away from the truth while
-its loss keeps falling, ending between 0.22 and 0.34 Å. The runs that stop
-earliest end closest. The rows are kept to show the line-search failures,
-which are the same as on the large system, and for nothing else; this
-system needs more data per coordinate (1.2 Å gives ∼5, the deposited
-amplitudes to 1.04 Å give ∼7) before its rmsd means anything.
+7FPV, 3,341 atoms, one asymmetric unit, exact target (cctbx direct
+summation of the true structure, 11.8 s for 49,297 reflections), float64,
+`d_min` 1.2, grid 90×120×250, 4.9 reflections per coordinate. (A first pass
+at `d_min` 2.0 had 1.1 per coordinate and was not a test of optimization:
+every run improved to ∼0.18 Å by evaluation 50 and then drifted away from
+the truth while its loss kept falling, the earliest-stopping runs ending
+closest. Its JSON, `lbfgs_7fpv.json`, is kept; nothing rests on it.)
 
 | cutoff | width | final rmsd (Å) | final loss | iterations of 300 |
 |---|---|---|---|---|
-| 1e-2 | hard | 0.217 | 4.7e-4 | **165, line search failed** |
-| 1e-2 | 0.03 / 0.1 | 0.292 / 0.344 | 2.0e-4 / 1.6e-4 | 300 |
-| 1e-3 | hard | 0.177 | 8.3e-5 | **229, line search failed** |
-| 1e-3 | 0.03 / 0.1 | 0.274 / 0.270 | 4.8e-5 / 4.6e-5 | 300 |
-| 1e-4 | hard | 0.250 | 5.2e-5 | 300 |
-| 1e-4 | 0.03 / 0.1 | 0.284 / 0.283 | 5.0e-5 / 5.0e-5 | 300 |
+| 1e-2 | hard | **0.210** | 9.0e-4 | **225, line search failed** |
+| 1e-2 | 0.1 | 0.183 (0.138 at evaluation 100, then drifting) | 2.1e-4 | 300 |
+| 1e-3 | hard | 0.122 | 5.6e-5 | 300 |
+| 1e-3 | 0.1 | 0.123 | 4.5e-5 | 300 |
+| 1e-4 | hard | 0.106 | 2.9e-5 | 300 |
+| 1e-4 | 0.1 | 0.127 | 4.6e-5 | 300 |
+
+No 7FPV run recovers the structure the way the box does; they level off
+at 0.11 to 0.13 Å whatever the cutoff. The box was refined against its own
+model's amplitudes, whose minimum is exactly the true structure; 7FPV
+against direct summation, where the grid model's residual forward error
+moves the minimum off it. Which of the two explains the floor has not been
+separated (a `--target self` run at 1.2 Å would), and it does not bear on
+the taper, which is compared within one target.
 
 **What this says about optimization at different density thresholds**,
-which is the conclusion the study is for. On the one system examined where
-the refinement is determined, the 39,040-atom protein-only box, L-BFGS
-recovers the structure with or without the taper at the 1e-4 cutoff, to
-0.019 Å against 0.018 Å. At 1e-3 and at 1e-2 it does not recover it without
-the taper: L-BFGS stops on a failed line search at 0.149 Å and at 0.307 Å,
-the latter no better than where it started, while every tapered run reaches
-0.014 to 0.018 Å. The two taper widths, 0.03 and 0.1 Å, behave the same
-everywhere. On 7FPV at 2 Å the line-search failures occur at the same
-cutoffs, but the problem is underdetermined and the rmsd does not
-discriminate. The threshold at which the taper starts to matter will
-differ between systems, since the boundary-crossing rate grows with the
-number of atoms and the density jump at the boundary is the cutoff value
-itself; here it set in between 1e-4 and 1e-3. The finding is that cases
-exist, within the range of cutoffs the code accepts and on a protein-sized
-system, where the taper decides whether L-BFGS recovers the structure, and
-there may well be others.
+which is the conclusion the study is for. At the 1e-4 cutoff L-BFGS does
+as well without the taper as with it on both systems: 0.019 against 0.018 Å
+on the box, 0.106 against 0.127 Å on 7FPV. Where the hard cutoff fails, it
+fails on a line search before the budget is spent, and the cutoff at which
+that sets in differs between the two systems. On the 39,040-atom box it is
+already failing at 1e-3 (0.149 Å against 0.018) and does not move at all at
+1e-2 (0.307 Å, the starting distance, after 52 iterations); on 7FPV it
+holds at 1e-3 (0.122 against 0.123 Å) and fails at 1e-2 (0.210 against
+0.183 Å, stopping at iteration 225). With the taper, L-BFGS runs its full
+budget at every cutoff on both systems, and 0.03 and 0.1 Å behave the same
+where both were run. That the threshold differs is expected: the
+boundary-crossing rate grows with the number of atoms, twelve times more
+on the box, and the density jump at the boundary is the cutoff value
+itself. The finding is that cases exist, within the range of cutoffs the
+code accepts and on protein-sized systems, where the taper decides whether
+L-BFGS recovers the structure, that where it sets in depends on the
+system, and that there may well be other cases.
 
 ## Assumptions carried over from xtraj.py
 
