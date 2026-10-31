@@ -157,47 +157,61 @@ model switch and an optimizer reset in the middle of every run confused
 the question. Its JSON files remain in `examples/compare_gemmi/`; nothing
 here rests on them.)
 
-7FPV, 3,341 atoms, exact target (cctbx direct summation), float64:
-
-| cutoff | width | final loss | iterations of 300 | note |
-|---|---|---|---|---|
-| 1e-2 | hard | 4.7e-4 | **165, line search failed** | |
-| 1e-2 | 0.03 / 0.1 | 2.0e-4 / 1.6e-4 | 300 | at the 1e-2 forward floor, flat |
-| 1e-3 | hard | 8.3e-5 | **229, line search failed** | still descending when it stopped |
-| 1e-3 | 0.03 / 0.1 | 4.8e-5 / 4.6e-5 | 300 | |
-| 1e-4 | hard | 5.2e-5 | 300 | 351 evaluations: more backtracking than the tapered 307–309 |
-| 1e-4 | 0.03 / 0.1 | 5.0e-5 / 5.0e-5 | 300 | |
+Success is judged by the rmsd of the refined coordinates from the true
+structure, which every run starts 0.30 Å from; the loss is reported
+because it is what the optimizer sees, not as the criterion.
 
 `top_bfac.pdb.gz`, `--select "protein and not element H"`, 39,040 heavy
 protein atoms all free, no waters (Bragg amplitudes do not determine them)
 and no hydrogens (moving heavy atoms under fixed hydrogens is not a model
-anyone uses), P1 box, `d_min` 2.0, self target, float32:
+anyone uses), P1 box, `d_min` 2.0, 323,136 reflections against 117,120
+coordinates (2.8 per parameter), self target, float32:
 
-| cutoff | width | final loss | iterations of 300 | note |
+| cutoff | width | final rmsd (Å) | final loss | iterations of 300 |
 |---|---|---|---|---|
-| 1e-2 | hard | 4.5e-3 | **52, line search failed** | four orders of magnitude short |
-| 1e-2 | 0.03 / 0.1 | 2.1e-7 / 1.3e-7 | 300 | still descending, halving every 50 |
-| 1e-3 | hard | 7.1e-5 | **279, line search failed** | slowing (0.83 per 50) before it stopped |
-| 1e-3 | 0.03 / 0.1 | 9.1e-8 / 9.1e-8 | 300 | still descending, halving every 50 |
-| 1e-4 | hard | 1.1e-7 | 300 | still descending, same rate as tapered |
-| 1e-4 | 0.03 / 0.1 | 9.2e-8 / 9.1e-8 | 300 | |
+| 1e-2 | hard | **0.307** | 4.5e-3 | **52, line search failed** |
+| 1e-2 | 0.03 / 0.1 | 0.014 / 0.014 | 2.1e-7 / 1.3e-7 | 300 |
+| 1e-3 | hard | **0.149** | 7.1e-5 | **279, line search failed** |
+| 1e-3 | 0.03 / 0.1 | 0.018 / 0.018 | 9.1e-8 / 9.1e-8 | 300 |
+| 1e-4 | hard | 0.019 | 1.1e-7 | 300 |
+| 1e-4 | 0.03 / 0.1 | 0.018 / 0.018 | 9.2e-8 / 9.1e-8 | 300 |
+
+7FPV, 3,341 atoms, one asymmetric unit, `d_min` 2.0, exact target (cctbx
+direct summation), float64 — **and not a test of optimization**: 11,011
+reflections against 10,023 coordinates is 1.1 per parameter, and every run
+drops to ∼0.18 Å by evaluation 50 and then drifts away from the truth while
+its loss keeps falling, ending between 0.22 and 0.34 Å. The runs that stop
+earliest end closest. The rows are kept to show the line-search failures,
+which are the same as on the large system, and for nothing else; this
+system needs more data per coordinate (1.2 Å gives ∼5, the deposited
+amplitudes to 1.04 Å give ∼7) before its rmsd means anything.
+
+| cutoff | width | final rmsd (Å) | final loss | iterations of 300 |
+|---|---|---|---|---|
+| 1e-2 | hard | 0.217 | 4.7e-4 | **165, line search failed** |
+| 1e-2 | 0.03 / 0.1 | 0.292 / 0.344 | 2.0e-4 / 1.6e-4 | 300 |
+| 1e-3 | hard | 0.177 | 8.3e-5 | **229, line search failed** |
+| 1e-3 | 0.03 / 0.1 | 0.274 / 0.270 | 4.8e-5 / 4.6e-5 | 300 |
+| 1e-4 | hard | 0.250 | 5.2e-5 | 300 |
+| 1e-4 | 0.03 / 0.1 | 0.284 / 0.283 | 5.0e-5 / 5.0e-5 | 300 |
 
 **What this says about optimization at different density thresholds**,
-which is the conclusion the study is for. For the two systems examined,
-L-BFGS refinement converges with or without the taper at the 1e-4 cutoff:
-the hard-cutoff run ends within a few percent of the tapered ones on 7FPV,
-and within 20% on the large system, still descending at the same rate. At
-1e-3 and at 1e-2 it does not converge without the taper, on either system:
-L-BFGS stops on a failed line search before its budget, at 1.8× and 2.5×
-the tapered loss on 7FPV, and at 800× and 20,000× on the 39,040-atom
-system, where the hard-cutoff run at 1e-2 gave up after 52 iterations.
-With the taper, 0.03 and 0.1 Å behave the same everywhere. The thresholds
-at which the taper starts to matter will differ between systems, since the
-boundary-crossing rate grows with the number of atoms and the density jump
-at the boundary is the cutoff value itself; here it set in between 1e-4
-and 1e-3 on both. The finding is that cases exist, within the range of
-cutoffs the code accepts and on a protein-sized system, where the taper
-decides whether L-BFGS converges, and there may well be others.
+which is the conclusion the study is for. On the one system examined where
+the refinement is determined, the 39,040-atom protein-only box, L-BFGS
+recovers the structure with or without the taper at the 1e-4 cutoff, to
+0.019 Å against 0.018 Å. At 1e-3 and at 1e-2 it does not recover it without
+the taper: L-BFGS stops on a failed line search at 0.149 Å and at 0.307 Å,
+the latter no better than where it started, while every tapered run reaches
+0.014 to 0.018 Å. The two taper widths, 0.03 and 0.1 Å, behave the same
+everywhere. On 7FPV at 2 Å the line-search failures occur at the same
+cutoffs, but the problem is underdetermined and the rmsd does not
+discriminate. The threshold at which the taper starts to matter will
+differ between systems, since the boundary-crossing rate grows with the
+number of atoms and the density jump at the boundary is the cutoff value
+itself; here it set in between 1e-4 and 1e-3. The finding is that cases
+exist, within the range of cutoffs the code accepts and on a protein-sized
+system, where the taper decides whether L-BFGS recovers the structure, and
+there may well be others.
 
 ## Assumptions carried over from xtraj.py
 
