@@ -24,9 +24,9 @@ def hard_mask_density(atom_pos, grid_points, A, lam, R):
 
 def smooth_taper_density(atom_pos, grid_points, A, lam, R, w):
     """Same Gaussian sum, but multiplied by a C^1 raised-cosine taper
-    that goes from 1 at r=R-w to 0 at r=R, instead of a hard step. The
-    pipeline places that window OUTSIDE the cutoff radius, so main() hands
-    this R_cut + w: nothing above the cutoff density is attenuated."""
+    that goes from 1 at r=R-w to 0 at r=R, instead of a hard step. In the
+    pipeline the taper BEGINS at the cutoff threshold, so main() hands this
+    R_cut + w: nothing above the threshold density is attenuated."""
     d = grid_points - atom_pos
     r = np.sqrt(np.sum(d * d, axis=-1))
     dens = np.sum(A * np.exp(-lam * r[..., None] ** 2), axis=-1)

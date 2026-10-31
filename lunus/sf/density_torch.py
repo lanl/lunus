@@ -50,11 +50,12 @@ operator), whose non-negative-result-for-positive-divisor behavior is
 documented and version-independent, to avoid any ambiguity for negative
 grid-index candidates near a fractional-coordinate boundary.
 
-GRADIENT CORRECTNESS: density is tapered smoothly to zero over a shell of
-width `taper_width` OUTSIDE the cutoff radius (a C^1 raised-cosine window
-on [R, R + w], where R is the radius at which the density equals the
-cutoff; kernel_torch.py's builders hand this function R + w) instead of
-being hard-masked at the radius. A hard `r2 <= radius^2` mask exactly
+GRADIENT CORRECTNESS: density is tapered smoothly to zero over a tail of
+width `taper_width` that BEGINS AT THE CUTOFF THRESHOLD (a C^1
+raised-cosine window on [R, R + w], where R is the radius at which the
+density equals the threshold; kernel_torch.py's builders hand this
+function R + w), so inside R the density is identical to a hard cutoff's,
+instead of being hard-masked at the radius. A hard `r2 <= radius^2` mask exactly
 matches gemmi's forward values, but is a genuine correctness problem for
 gradients: torch.where's backward rule holds the mask fixed and never
 accounts for grid points crossing the boundary as an atom moves, which a
@@ -69,9 +70,9 @@ cutoff for reliable gradients, which is the right trade given this
 engine's purpose. taper_width doesn't need to track grid spacing at all
 (gradient correctness held to <0.06% error even at taper_width an order
 of magnitude narrower than typical grid spacing, in direct testing). With
-the window outside R, the width also no longer sets how much density is
-removed -- that is bounded by the cutoff value times the shell volume --
-only how many candidate voxels are visited. build_element_kernels_torch
+the taper beginning at the threshold, the width also no longer sets how
+much density is removed -- that is bounded by the threshold value times
+the tail volume -- only how many candidate voxels are visited. build_element_kernels_torch
 defaults to 0.1 A if not given explicitly.
 
 Every operation here is a standard differentiable PyTorch primitive

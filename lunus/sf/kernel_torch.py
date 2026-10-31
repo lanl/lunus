@@ -9,21 +9,25 @@ The B-factor/kernel-coefficient computation is NOT differentiated
 (B-factor/blur are fixed hyperparameters, not learned), so it's done
 once in NumPy via kernel.py and then converted to tensors.
 
-WHERE THE WINDOW SITS. kernel.py returns R, the radius at which an atom's
-density equals the cutoff. The raised-cosine window that compute_density
-applies occupies [R, R + taper_width], OUTSIDE that radius: every voxel
-whose density exceeds the cutoff keeps its full value, and only density
-already below the cutoff is attenuated. So the radius handed to
-compute_density, and the radius the candidate offset boxes are sized by,
-is R + taper_width. The three builders below add the width in one place
-each; kernel.py keeps the meaning "density equals cutoff" for R.
+WHERE THE TAPER BEGINS. kernel.py returns R, the radius at which an atom's
+density equals the cutoff threshold. The raised-cosine window that
+compute_density applies BEGINS AT THE THRESHOLD: it occupies
+[R, R + taper_width], so inside R the density is identical to what a hard
+cutoff gives, and only density already below the threshold is attenuated,
+over a tail of width taper_width. So the radius handed to compute_density,
+and the radius the candidate offset boxes are sized by, is R + taper_width.
+The three builders below add the width in one place each; kernel.py keeps
+the meaning "density equals the threshold" for R.
 
-The window used to sit INSIDE R, on [R - w, R], which made the density
-removed grow with the width -- the taper study (docs/design.md) measured
-a 0.3 A window costing a factor of two in forward error at cutoff 1e-2.
-Outside, the removed density is bounded by the cutoff value times the
-shell volume whatever the width, at the price of ~9-15% more candidate
-voxels per atom (work ~ r^3; carbon at 1e-4: 3.43 -> 3.53 A).
+This corrects an error in how the method worked before 2026-10-30. The
+window used to REACH ZERO AT THE THRESHOLD, occupying [R - w, R], which
+made the density inside the cutoff radius lower than the hard cutoff's,
+and the amount removed grow with the width -- the taper study
+(docs/design.md) measured a 0.3 A window costing a factor of two in forward
+error at cutoff 1e-2. With the taper beginning at the threshold the density
+removed is bounded by the threshold value times the tail volume whatever
+the width, and parity with gemmi improved 4.5x, at the price of ~9-15% more
+candidate voxels per atom (work ~ r^3; carbon at 1e-4: 3.43 -> 3.53 A).
 """
 
 import numpy as np
@@ -51,17 +55,18 @@ def build_element_kernels_torch(
                                  # breaks autograd -- grid spacing only
                                  # affects how finely the taper's SHAPE is
                                  # sampled, a minor secondary concern, not
-                                 # gradient correctness. The window sits
-                                 # OUTSIDE the cutoff radius (module
-                                 # docstring), so the width no longer sets
-                                 # how much density is removed -- only how
-                                 # many extra candidate voxels are visited.
-                                 # The ~0.5% loss and the forward-value
-                                 # degradation at 0.6 A that were measured
-                                 # for the old inward window are gone with
-                                 # it; 0.1 A stays the default because the
-                                 # taper study found every width from 0.01
-                                 # to 0.3 A equivalent for the optimizer.
+                                 # gradient correctness. The taper begins
+                                 # AT the threshold (module docstring), so
+                                 # the width no longer sets how much density
+                                 # is removed -- only how many extra
+                                 # candidate voxels are visited. The ~0.5%
+                                 # loss and the forward-value degradation
+                                 # at 0.6 A were measured when the taper
+                                 # reached zero at the threshold instead,
+                                 # and are gone with that; 0.1 A stays the
+                                 # default because the taper study found
+                                 # every width from 0.01 to 0.3 A
+                                 # equivalent for the optimizer.
     device="cpu",
     dtype=torch.float32,
 ):

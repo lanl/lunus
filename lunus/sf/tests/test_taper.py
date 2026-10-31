@@ -78,7 +78,7 @@ def test_tapered_gradient_converges():
     coef9 = IT92_COEFFS["C"]
     A, lam = precalculate_density_iso(coef9, b_iso)
     R = cutoff_radius(A, lam, cutoff=0.01)
-    w = 0.1  # kernel_torch.py's default; the window sits on [R, R + w], outside R
+    w = 0.1  # kernel_torch.py's default; the taper begins at the threshold, on [R, R + w]
 
     pos_frac = np.array([0.372, 0.611, 0.148])
     hkl = np.array([5, -3, 7])  # a generic, nontrivial reflection

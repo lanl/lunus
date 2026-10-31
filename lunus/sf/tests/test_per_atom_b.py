@@ -67,9 +67,10 @@ def test_per_atom_b_factors():
     B=85 carbon loses ~9.3% of its charge to the cutoff before any taper,
     against ~3.1% for the same element at B=12). That is a property of the
     fixed-threshold cutoff itself, which gemmi shares, not of per-atom B or of
-    this implementation. It measured 4.1e-2 while the taper window sat inside
-    the cutoff radius and removed density above the cutoff as well; with the
-    window outside (kernel_torch.py) it is 3.2e-2, the cutoff's share alone.
+    this implementation. It measured 4.1e-2 while the taper reached zero AT
+    the threshold, which also removed density above it; with the taper
+    beginning at the threshold (kernel_torch.py) it is 3.2e-2, the cutoff's
+    share alone.
 
     The atom set mixes rigid and very disordered atoms (B=12 and B=85 on the
     SAME element) precisely so this effect is exercised rather than averaged
@@ -111,7 +112,7 @@ def test_per_atom_b_factors():
         F_ref += occ * analytic_atom_F(IT92_COEFFS[el], b_atom, pos, hkl_test, M)
 
     atoms_for_density = [(s[1], s[2]) for s in atoms_spec]
-    # The window sits OUTSIDE the cutoff radius, on [R, R + w], as in
+    # The taper begins at the threshold and occupies [R, R + w], as in
     # kernel_torch.py; the reference's taper takes the outer edge.
     Fgrid = density_and_fft_per_atom_b(atoms_for_density, A_arr, lam_arr, R_arr + w, w, grid_shape, M, cell_volume)
     F_num = np.array([Fgrid[h % Nu, k % Nv, l % Nw] for h, k, l in hkl_test])
@@ -124,7 +125,8 @@ def test_per_atom_b_factors():
         print(f"{h:3d}{k:3d}{l:3d}   {fn.real:8.4f}{fn.imag:+8.4f}i   {fa.real:8.4f}{fa.imag:+8.4f}i   {rel_err:.2e}")
     print(f"\nMax relative error: {max_rel_err:.2e}")
 
-    # Measured 3.2e-02 (4.1e-02 with the old inward window). Bounded on BOTH
+    # Measured 3.2e-02 (4.1e-02 when the taper reached zero at the threshold).
+    # Bounded on BOTH
     # sides: an unexpectedly small error would mean the truncation described
     # above stopped happening, which is as much a change in behaviour as an
     # unexpectedly large one.

@@ -997,22 +997,24 @@ field already tolerates between radii sets.
 ### But matching gemmi exactly forces a nearly hard threshold
 
 **Retracted twice over — read the two notes below before the numbers.**
-Everything in this subsection was measured with the density window sitting
-INSIDE the cutoff radius, which it no longer does (2026-10-30; see
-`kernel_torch.py`'s module docstring). On this fixture, at its density cutoff
-of 0.01 e/Å³, the gemmi-matched mask level of 1.45e-3 of peak was 0.0027
-e/Å³, BELOW the density cutoff — i.e. inside the shell the old window had
-already suppressed — so the level set was artificially steep and the "nearly
-hard threshold" was the density window, not the mask. Re-measured with the
-window outside R: the matched level is 0.7% of peak (0.0129 e/Å³), the shell
+Everything in this subsection was measured while the density taper reached
+zero AT the cutoff threshold, an error corrected on 2026-10-30: the taper
+now begins at the threshold, so the density inside the cutoff radius is
+identical to a hard cutoff's (see `kernel_torch.py`'s module docstring). On
+this fixture, at its density cutoff of 0.01 e/Å³, the gemmi-matched mask
+level of 1.45e-3 of peak was 0.0027 e/Å³, BELOW the density cutoff — i.e.
+inside the shell the old taper had already suppressed — so the level set was
+artificially steep and the "nearly hard threshold" was the density taper,
+not the mask. Re-measured with the taper beginning at the threshold: the
+matched level is 0.7% of peak (0.0129 e/Å³), the shell
 is 411 voxels rather than 31, and widening to 1% of peak gives 908 shell
 voxels (2.2×, not 19×) at agreement 0.9953 → 0.9958. The same fixture at a
 1e-4 density cutoff gives 0.018 e/Å³ and 423 voxels, which is how we know the
-old figure was the window. `tests/test_solvent_gemmi.py` carries the new
+old figure was the taper. `tests/test_solvent_gemmi.py` carries the new
 numbers; its name is historical.
 
 The original text follows. Matching gemmi's boundary puts the cutoff far out
-in the density tail (1.45e-3 of peak here, with the inward window), where the
+in the density tail (1.45e-3 of peak here, with the old taper), where the
 density falls through the taper's range in well under a voxel. The taper width cannot rescue it: `mask = 1` requires
 `ρ ≤ cutoff − width`, so a width approaching the cutoff eliminates the fully
 solvent region altogether (measured: width = 4× cutoff drops occupancy from
@@ -1051,7 +1053,7 @@ the convergence study in Validation is where that gets settled, not here.
 ### The cutoff is a calibration, not a constant
 
 The matched cutoff moves by 4.6× between B = 20 and B = 60 on the test fixture
-(0.0129 → 0.0595 e/Å³; it read as 21× with the inward density window, for the
+(0.0129 → 0.0595 e/Å³; it read as 21× with the taper reaching zero at the threshold, for the
 reason given above), and by three orders of magnitude on a larger one. Borrowing B = 20's cutoff for
 a B = 60 structure costs real agreement (0.996 → 0.974). A geometric mask does
 not move with B and a density threshold does — so the cutoff must be calibrated

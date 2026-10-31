@@ -123,10 +123,10 @@ def test_values_match_numpy_reference(torch_system):
     # grid discretization. Directly confirmed via radial integration for
     # these exact parameters (b_iso=80, cutoff=1e-5): the hard cutoff alone
     # loses ~0.018% of total charge, unavoidable with any finite radius.
-    # Measured here 1.56e-4; it was ~2.1e-4 while the taper window sat
-    # inside the cutoff radius and removed density on top of the cutoff.
-    # With the window outside (kernel_torch.py) the width adds nothing
-    # measurable. This is the intentional tradeoff for gradient correctness
+    # Measured here 1.56e-4; it was ~2.1e-4 while the taper reached zero at
+    # the threshold and so removed density on top of the cutoff. With the
+    # taper beginning at the threshold (kernel_torch.py) the width adds
+    # nothing measurable. This is the intentional tradeoff for gradient correctness
     # (see density_torch.py's module docstring), not a regression.
     assert max_rel_err < 5e-4, "torch pipeline does not match the analytic reference"
 
