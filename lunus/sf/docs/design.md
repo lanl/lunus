@@ -335,8 +335,19 @@ configuration the same comparison gives **correlation 0.999919, R-factor
 0.004997** over 115,348 reflections, with the same resolution dependence —
 0.9999 beyond 1.55 Å falling to 0.9125 in the 0.900–0.933 Å shell.
 
-The residual disagreement is the taper and the cutoff-radius convention, not
-symmetry. It is monotonic in resolution — Icalc correlation 1.0000 at low
+**Re-measured 2026-10-30 with the window outside the cutoff radius**, same
+system and script, cutoff 1e-4 (the current default), 10 frames on CPU:
+Icalc **correlation 1.000000, R-factor 0.000019** over 115,348 reflections,
+0.0005 in the 0.900–0.933 Å shell and ≤ 0.0001 beyond 1.07 Å. The inward
+window, run the same day on the same gemmi output for a like-for-like
+comparison, gave R-factor 0.000085 and 0.0013 in the top shell, so moving
+the window out cut the residual against gemmi by 4.5× at every resolution.
+With the window outside R, torch and gemmi differ only by density below the
+cutoff, and at 1e-4 that is below what Icalc can resolve. The figures above
+were taken with the inward window and at cutoff 0.01.
+
+The residual disagreement in those earlier figures is the taper and the
+cutoff-radius convention, not symmetry. It is monotonic in resolution — Icalc correlation 1.0000 at low
 resolution falling to 0.9099 in the 0.900–0.932 Å shell — which is the
 signature of a real-space truncation difference, and it halves when the taper is
 narrowed. Reproduce with `examples/compare_gemmi/run_xtraj.sh`.
