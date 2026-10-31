@@ -128,7 +128,8 @@ def width_label(w):
 
 
 # --------------------------------------------------------------------- setup
-def load_system(pdb, d_min, device, dtype, log, free="all", select="all"):
+def load_system(pdb, d_min, device, dtype, log, free="all", select="all",
+                b_iso=None):
     """Everything about the crystal that does not depend on the taper or the
     cutoff: coordinates, B, occupancies, grid, symmetry operations, the full
     reflection list to d_min, which atoms exist and which are free to move."""
@@ -151,6 +152,9 @@ def load_system(pdb, d_min, device, dtype, log, free="all", select="all"):
         free_np = free_np[keep_np]
         print("%d of %d atoms kept (--select %r)"
               % (keep_np.sum(), len(keep_np), select), file=log)
+    if b_iso is not None:
+        b_per_atom = np.full_like(b_per_atom, b_iso)
+        print("every B set to %.1f A^2 (--b-iso)" % b_iso, file=log)
     if not free_np.any():
         raise SystemExit("--free %r selects no atoms" % free)
     print("%d of %d atoms free to move (--free %r)"
@@ -473,6 +477,9 @@ def build_parser():
     p.add_argument("--select", default="all",
                    help="cctbx atom selection of the atoms that EXIST in the "
                         "model; everything else is dropped (e.g. 'protein')")
+    p.add_argument("--b-iso", type=float, default=None,
+                   help="override every atom's B with this value, A^2 (for "
+                        "testing how the B distribution affects convergence)")
     p.add_argument("--free", default="all",
                    help="cctbx atom selection of the atoms that move; the rest "
                         "contribute density but are held fixed (e.g. "
@@ -540,7 +547,7 @@ def main():
     rng = np.random.default_rng(args.seed)
 
     s = load_system(args.pdb, args.d_min, args.device, dtype, log,
-                    free=args.free, select=args.select)
+                    free=args.free, select=args.select, b_iso=args.b_iso)
     n_atoms = s["frac0"].shape[0]
     free_idx = np.flatnonzero(s["free_np"])
     n_free = len(free_idx)

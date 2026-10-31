@@ -176,57 +176,63 @@ coordinates (2.8 per parameter), self target, float32:
 | 1e-4 | hard | 0.019 | 1.1e-7 | 300 |
 | 1e-4 | 0.03 / 0.1 | 0.018 / 0.018 | 9.2e-8 / 9.1e-8 | 300 |
 
-7FPV, 3,341 atoms, one asymmetric unit, `d_min` 1.2, grid 90×120×250,
-49,297 reflections against 10,023 coordinates (4.9 per parameter), self
-target, float64. The optimization test uses the model's own amplitudes on
-both systems, so that the minimum of the loss is the true structure by
-construction and the rmsd measures the optimizer alone. (A first pass at
-`d_min` 2.0 had 1.1 reflections per coordinate and was not a test of
-optimization: every run improved to ∼0.18 Å by evaluation 50 and then
-drifted away from the truth while its loss kept falling. Its JSON,
-`lbfgs_7fpv.json`, is kept; nothing rests on it.)
+7FPV, one asymmetric unit, `d_min` 2.0, self target, float64. Getting
+this system to refine at all took three protocol corrections, recorded
+here because each one is a mistake the next person would otherwise repeat
+(all at the 1e-4 cutoff, from the 0.3 Å displacement, 300 L-BFGS
+iterations, CPU checks on 2026-10-31):
 
-| cutoff | width | final rmsd (Å) | final loss | iterations of 300 |
-|---|---|---|---|---|
-| 1e-2 | hard | **0.207** | 6.1e-4 | **214, line search failed** |
-| 1e-2 | 0.1 | 0.123 | 4.3e-5 | 300 |
-| 1e-3 | hard | 0.120 | 4.9e-5 | 300 |
-| 1e-3 | 0.1 | 0.128 | 4.7e-5 | 300 |
-| 1e-4 | hard | 0.106 | 2.9e-5 | 300 |
-| 1e-4 | 0.1 | 0.128 | 4.7e-5 | 300 |
+| free atoms | hard cutoff | taper 0.1 Å |
+|---|---|---|
+| every deposited atom (3,341; 1,527 are H, ∼350 water) | 0.250 Å | 0.283 Å |
+| heavy protein atoms (1,523), alternates included | 0.147 Å, line search failed | 0.158 Å, drifting |
+| heavy protein atoms, alternates B/C/D excluded (1,270) | **0.040 Å** | **0.041 Å** |
+| heavy protein atoms with every B set to 55 Å² | 0.194 Å, failed | 0.345 Å, drifting |
 
-The 7FPV rows above were refined with every deposited atom free, including
-1,527 hydrogens and ∼350 waters, and the rmsd averaged over all of them.
-That is why they level off at 0.11 to 0.13 Å while the box reaches 0.014 Å:
-the amplitudes barely constrain a hydrogen's position, so the hydrogens
-drift and dominate the average. Refining the box's way, `--select "protein
-and not element H"`, the same 1e-4 run reaches 0.069 Å and a loss of
-8.9e-7 in 150 iterations (CPU check, 2026-10-31), against 0.118 Å and
-5.3e-5 with everything free — on course for the box's result. The
-hydrogens should not be in the model without a riding scheme, for the
-reason given above for the box; the table is being repeated with that
-selection, and the rows above stand only until it lands. (The same runs
-against cctbx direct summation, `lbfgs_7fpv_1p2.json`, gave the same
-floors, which rules out the forward model as the cause.)
+1. **Hydrogens out.** The amplitudes barely constrain a hydrogen, so free
+   hydrogens drift and, at 46% of the atoms, dominate the rmsd. They do
+   not belong in the model without a riding scheme, which `lunus.sf` does
+   not have.
+2. **Alternate conformers out.** 473 of 7FPV's 1,523 heavy protein atoms
+   are alternates at partial occupancy, pairs within an ångström of each
+   other, each refined as an independent scatterer. An amplitude-only loss
+   cannot tell density moved from one alternate to the other apart from
+   density in the right place, so those atoms sit in near-degenerate
+   directions along which the loss keeps falling while the rmsd drifts.
+   Keeping the A conformer only, the refinement converges from 0.3 Å.
+   The MD box has no alternates, which is why it never showed this.
+3. **Not the B factors.** The box's random per-residue B has a median of
+   55 Å² against 7FPV's 18 Å², and the guess that broader atoms give a
+   wider basin was tested and is wrong: setting every 7FPV B to 55 Å²
+   makes the refinement worse, since broader atoms carry less information
+   at 2 Å. Nor is it resolution: with the alternates in, 7FPV converges
+   from a 0.15 Å displacement at 2 Å (0.040 Å) and from 0.3 Å at 1.2 Å
+   (0.069 Å), which are statements about how far the degenerate
+   directions let it drift, not about the basin of a well-posed problem.
+
+With the single-conformer heavy-atom model, 11,011 reflections against
+3,810 coordinates (2.9 per parameter, the box's ratio), the cutoff and
+width table is being measured and goes here. The earlier 7FPV tables at
+2 Å with everything free (`lbfgs_7fpv.json`) and at 1.2 Å with and without
+the alternates (`lbfgs_7fpv_1p2*.json`) are superseded.
 
 **What this says about optimization at different density thresholds**,
-which is the conclusion the study is for. At the 1e-4 cutoff L-BFGS does
-as well without the taper as with it on both systems: 0.019 against 0.018 Å
-on the box, 0.106 against 0.128 Å on 7FPV. Where the hard cutoff fails, it
-fails on a line search before the budget is spent, and the cutoff at which
-that sets in differs between the two systems. On the 39,040-atom box it is
-already failing at 1e-3 (0.149 Å against 0.018) and does not move at all at
-1e-2 (0.307 Å, the starting distance, after 52 iterations); on 7FPV it
-holds at 1e-3 (0.120 against 0.128 Å) and fails at 1e-2 (0.207 against
-0.123 Å, stopping at iteration 214). With the taper, L-BFGS runs its full
-budget at every cutoff on both systems, and 0.03 and 0.1 Å behave the same
-where both were run. That the threshold differs is expected: the
-boundary-crossing rate grows with the number of atoms, twelve times more
-on the box, and the density jump at the boundary is the cutoff value
-itself. The finding is that cases exist, within the range of cutoffs the
-code accepts and on protein-sized systems, where the taper decides whether
-L-BFGS recovers the structure, that where it sets in depends on the
-system, and that there may well be other cases.
+which is the conclusion the study is for. On the 39,040-atom box, judged
+by rmsd, L-BFGS recovers the structure as well without the taper as with
+it at the 1e-4 cutoff, 0.019 against 0.018 Å, and does not recover it
+without the taper at 1e-3 (0.149 Å) or 1e-2 (0.307 Å, the starting
+distance, after 52 iterations), stopping on a failed line search both
+times, while every tapered run reaches 0.014 to 0.018 Å; 0.03 and 0.1 Å
+behave the same. The 7FPV rows are to be restated from the
+single-conformer run above; the runs so far, with the alternates in, put
+its threshold between 1e-3 and 1e-2 rather than the box's between 1e-4 and
+1e-3, and a system-dependent threshold is expected, since the
+boundary-crossing rate grows with the number of atoms and the density jump
+at the boundary is the cutoff value itself. The finding is that cases
+exist, within the range of cutoffs the code accepts and on a protein-sized
+system, where the taper decides whether L-BFGS recovers the structure,
+that where it sets in depends on the system, and that there may well be
+other cases.
 
 ## Assumptions carried over from xtraj.py
 
