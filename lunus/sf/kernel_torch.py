@@ -8,6 +8,26 @@ matters for speed).
 The B-factor/kernel-coefficient computation is NOT differentiated
 (B-factor/blur are fixed hyperparameters, not learned), so it's done
 once in NumPy via kernel.py and then converted to tensors.
+
+WHERE THE TAPER BEGINS. kernel.py returns R, the radius at which an atom's
+density equals the cutoff threshold. The raised-cosine window that
+compute_density applies BEGINS AT THE THRESHOLD: it occupies
+[R, R + taper_width], so inside R the density is identical to what a hard
+cutoff gives, and only density already below the threshold is attenuated,
+over a tail of width taper_width. So the radius handed to compute_density,
+and the radius the candidate offset boxes are sized by, is R + taper_width.
+The three builders below add the width in one place each; kernel.py keeps
+the meaning "density equals the threshold" for R.
+
+This corrects an error in how the method worked before 2026-10-30. The
+window used to REACH ZERO AT THE THRESHOLD, occupying [R - w, R], which
+made the density inside the cutoff radius lower than the hard cutoff's,
+and the amount removed grow with the width -- the taper study
+(docs/design.md) measured a 0.3 A window costing a factor of two in forward
+error at cutoff 1e-2. With the taper beginning at the threshold the density
+removed is bounded by the threshold value times the tail volume whatever
+the width, and parity with gemmi improved 4.5x, at the price of ~9-15% more
+candidate voxels per atom (work ~ r^3; carbon at 1e-4: 3.43 -> 3.53 A).
 """
 
 import numpy as np
@@ -35,20 +55,18 @@ def build_element_kernels_torch(
                                  # breaks autograd -- grid spacing only
                                  # affects how finely the taper's SHAPE is
                                  # sampled, a minor secondary concern, not
-                                 # gradient correctness. 0.1 A keeps
-                                 # density loss to ~0.5% (measured via
-                                 # direct radial integration for carbon
-                                 # at b_iso=16.2, cutoff=0.01) while still
-                                 # fully fixing the hard-cutoff gradient
-                                 # problem. A much wider default (2x grid
-                                 # spacing, ~0.6 A for a typical system)
-                                 # was tried first and caused real forward
-                                 # -value degradation -- removing density
-                                 # from a specific outer shell reshapes
-                                 # the effective form factor at whatever
-                                 # intermediate resolution corresponds to
-                                 # that shell's width, not just at the
-                                 # true resolution limit.
+                                 # gradient correctness. The taper begins
+                                 # AT the threshold (module docstring), so
+                                 # the width no longer sets how much density
+                                 # is removed -- only how many extra
+                                 # candidate voxels are visited. The ~0.5%
+                                 # loss and the forward-value degradation
+                                 # at 0.6 A were measured when the taper
+                                 # reached zero at the threshold instead,
+                                 # and are gone with that; 0.1 A stays the
+                                 # default because the taper study found
+                                 # every width from 0.01 to 0.3 A
+                                 # equivalent for the optimizer.
     device="cpu",
     dtype=torch.float32,
 ):
@@ -69,8 +87,9 @@ def build_element_kernels_torch(
         k = kernels[el]
         A_list.append(k["A"])
         lam_list.append(k["lam"])
-        radius_vox_list.append(np.ceil(k["radius"] / spacing).astype(np.int64))
-        radius_ang_list.append(k["radius"])
+        outer = k["radius"] + taper_width        # window on [R, R + w]
+        radius_vox_list.append(np.ceil(outer / spacing).astype(np.int64))
+        radius_ang_list.append(outer)
 
     elem_A = torch.tensor(np.stack(A_list), device=device, dtype=dtype)
     elem_lam = torch.tensor(np.stack(lam_list), device=device, dtype=dtype)
@@ -123,6 +142,7 @@ def build_atom_kernels_aniso_torch(
     elements_per_atom = np.asarray(elements_per_atom)
     if taper_width is None:
         taper_width = 0.1
+    radius_np = radius_np + taper_width          # window on [R, R + w]
 
     Nu, Nv, Nw = grid_shape
     spacing = np.array([np.linalg.norm(orth_matrix_np[:, i]) / n
@@ -191,6 +211,7 @@ def build_atom_kernels_torch(
     elements_per_atom = np.asarray(elements_per_atom)
     if taper_width is None:
         taper_width = 0.1
+    radius_np = radius_np + taper_width          # window on [R, R + w]
 
     Nu, Nv, Nw = grid_shape
     spacing = np.array([

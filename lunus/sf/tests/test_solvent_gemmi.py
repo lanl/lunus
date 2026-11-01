@@ -195,10 +195,14 @@ def test_the_matched_cutoff_is_not_transferable_across_b(fixture):
 
     cut20 = fixture["cutoff"]
     cut60 = cutoff_matching(rho60, g60.mean())
-    # 21x on this fixture; thousands-fold on a larger, denser one. The floor is
+    # 4.6x on this fixture (0.0129 -> 0.0595 e/A^3). It read as 21x while the
+    # density taper reached zero AT the cutoff threshold: the matched level
+    # then fell in the shell the taper had suppressed, where the density is
+    # artificially steep, and the ratio measured the taper as much as the
+    # B-dependence. The floor is
     # deliberately loose because the ratio is a property of the system, not a
     # constant -- what is constant is that it is nowhere near 1.
-    assert cut60 > 10 * cut20, (cut20, cut60)
+    assert cut60 > 3 * cut20, (cut20, cut60)
 
     def agreement(cut):
         m = solvent_mask(rho60, cut, 0.25 * cut).numpy() > 0.5
@@ -209,27 +213,34 @@ def test_the_matched_cutoff_is_not_transferable_across_b(fixture):
 
 
 def test_matching_gemmi_forces_a_nearly_hard_threshold(fixture):
-    """A real constraint on the model, not a defect in this test.
+    """Matching gemmi's boundary puts the mask cutoff far out in the density
+    tail, where the mask's taper spans a small distance: 0.7% of peak density
+    here, a shell of 411 voxels out of 110,592. Widening to 1% of peak gives
+    908 shell voxels while agreement with gemmi goes 0.9953 to 0.9958, i.e.
+    does not degrade; docs/solvent-design.md carries the full curve.
 
-    Matching gemmi's boundary puts the cutoff far out in the density tail,
-    where the taper -- whose width cannot exceed the cutoff, or the fully
-    solvent region disappears -- spans a sub-voxel distance. The mask is then
-    smooth in principle and a hard threshold in practice, which is exactly what
-    the gradients and the diffuse variance care about.
-
-    Measured on this fixture: the matched cutoff is 1.45e-3 of peak density and
-    leaves 31 shell voxels out of 110,592. Raising it to 1% of peak gives 599
-    shell voxels -- 19x more boundary to differentiate through -- while
-    agreement with gemmi goes 0.9951 to 0.9954, i.e. does not degrade at all.
-    docs/solvent-design.md carries the full curve and the point where it does.
+    HISTORY, because the numbers used to be more dramatic and the name of
+    this test reflects that. While the density taper reached zero AT the
+    cutoff threshold (an error corrected 2026-10-30: it now begins there),
+    this fixture's matched cutoff was 1.45e-3 of peak with 31 shell voxels,
+    and widening to 1% gave 19x more shell. That was the density taper, not
+    the mask: the matched level (0.0027 e/A^3) sat BELOW the fixture's
+    density cutoff of 0.01, inside the shell the taper had already
+    suppressed, so the level set was artificially steep. With the taper
+    beginning at the threshold the matched level is 0.0129 e/A^3,
+    above the cutoff, and the same fixture at a 1e-4 density cutoff gives
+    the same picture (0.018, 423 shell voxels) -- which is how we know the
+    old figure was the taper. docs/solvent-design.md had already found the
+    "nearly hard threshold" conclusion to be an artifact of a sparse model
+    on a real crystal (4WOR); it was an artifact of the taper as well.
     """
     total = fixture["density"].numel()
     at_matched = shell_voxels(fixture["ours"])
-    assert at_matched < 0.001 * total, (at_matched, total)
+    assert 100 < at_matched < 0.01 * total, (at_matched, total)
 
     cut = 0.01 * float(fixture["density"].max())
     wider = solvent_mask(fixture["density"], cut, 0.5 * cut)
-    assert shell_voxels(wider) > 10 * max(at_matched, 1)
+    assert shell_voxels(wider) > 1.5 * at_matched, (shell_voxels(wider), at_matched)
     agree = float(((wider.numpy() > 0.5) == (fixture["gemmi"] > 0.5)).mean())
     assert agree > 0.98, agree
 

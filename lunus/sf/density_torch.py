@@ -50,9 +50,12 @@ operator), whose non-negative-result-for-positive-divisor behavior is
 documented and version-independent, to avoid any ambiguity for negative
 grid-index candidates near a fractional-coordinate boundary.
 
-GRADIENT CORRECTNESS: density is tapered smoothly to zero over the last
-`taper_width` of the cutoff radius (a C^1 raised-cosine window) instead
-of being hard-masked at the radius. A hard `r2 <= radius^2` mask exactly
+GRADIENT CORRECTNESS: density is tapered smoothly to zero over a tail of
+width `taper_width` that BEGINS AT THE CUTOFF THRESHOLD (a C^1
+raised-cosine window on [R, R + w], where R is the radius at which the
+density equals the threshold; kernel_torch.py's builders hand this
+function R + w), so inside R the density is identical to a hard cutoff's,
+instead of being hard-masked at the radius. A hard `r2 <= radius^2` mask exactly
 matches gemmi's forward values, but is a genuine correctness problem for
 gradients: torch.where's backward rule holds the mask fixed and never
 accounts for grid points crossing the boundary as an atom moves, which a
@@ -66,12 +69,11 @@ a small, already-quantified forward-value difference from gemmi's hard
 cutoff for reliable gradients, which is the right trade given this
 engine's purpose. taper_width doesn't need to track grid spacing at all
 (gradient correctness held to <0.06% error even at taper_width an order
-of magnitude narrower than typical grid spacing, in direct testing) --
-what it needs to stay small against is the cutoff radius, since removing
-density from a specific outer shell reshapes the effective form factor
-at whatever resolution corresponds to that shell's width, not just at
-the true resolution limit. build_element_kernels_torch defaults to 0.1 A
-(~0.5% density loss, measured) if not given explicitly.
+of magnitude narrower than typical grid spacing, in direct testing). With
+the taper beginning at the threshold, the width also no longer sets how
+much density is removed -- that is bounded by the threshold value times
+the tail volume -- only how many candidate voxels are visited. build_element_kernels_torch
+defaults to 0.1 A if not given explicitly.
 
 Every operation here is a standard differentiable PyTorch primitive
 (arithmetic, exp, index_add_), so autograd differentiates it exactly as
@@ -585,11 +587,13 @@ def compute_density(
                                       # -- from precompute_element_offsets(), NOT recomputed here.
                                       # Stays per-element: it's only a generous candidate box,
                                       # sized for the largest radius among that element's atoms.
-    atom_radius_ang: torch.Tensor,   # (n_atoms,) -- outer radius where taper reaches 0, A.
+    atom_radius_ang: torch.Tensor,   # (n_atoms,) -- outer radius where taper reaches 0, A:
+                                      # R + taper_width, with R where density = cutoff.
                                       # Per-atom, same broadcasting note as atom_A.
     grid_shape,                      # (Nu, Nv, Nw)
     orth_matrix: torch.Tensor,       # (3,3), Cartesian = orth_matrix @ frac -- no grad
-    taper_width,                     # scalar, A -- taper spans [radius-taper_width, radius]
+    taper_width,                     # scalar, A -- taper spans [radius-taper_width, radius],
+                                      # i.e. [R, R+w] in cutoff-radius terms
     max_atoms_per_batch: int = 50_000,
     max_pairs_per_batch: int = 4_000_000,
     compile_core: bool = True,

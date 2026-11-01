@@ -685,11 +685,15 @@ if __name__=="__main__":
   else:
     torch_max_atoms_per_batch = int(args.pop(idx).split("=")[1])
 
-# Density taper width (Angstrom) for the torch engine, spanning the last
-# taper_width of the cutoff radius, replacing gemmi's hard cutoff (see
-# lunus/sf/density_torch.py for why: hard cutoffs make autograd gradients
-# essentially grid-noise-dominated near the boundary). Leave unset for
-# the default of 0.1 A (kernel_torch.py).
+# Density taper width (Angstrom) for the torch engine: a raised-cosine
+# tail that BEGINS at the cutoff threshold and reaches zero taper_width
+# beyond it, i.e. on [R, R + taper_width] with R the cutoff radius, in
+# place of gemmi's hard cutoff at R (see lunus/sf/density_torch.py for
+# why: the taper makes the autograd gradient agree with the true one, and
+# L-BFGS needs that at any cutoff coarser than ~1e-4). Density above the
+# threshold is never attenuated, so the width does not affect forward
+# accuracy, only the candidate-voxel count. Leave unset for the default
+# of 0.1 A (kernel_torch.py).
 
   try:
     idx = [a.find("torch_taper_width")==0 for a in args].index(True)

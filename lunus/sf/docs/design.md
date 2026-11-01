@@ -56,13 +56,202 @@ implementations' differing radius conventions are then the **largest** source
 of disagreement with gemmi — larger than the taper below. See "Of those two
 terms, the cutoff dominates".
 
-**The taper.** A hard cutoff is unusable for gradients: atoms crossing the
-boundary make the density discontinuous, so the finite-difference derivative
-swings erratically. A smooth taper over the outermost 0.1 Å fixes that at the
-cost of a small, deliberate deviation from an untruncated reference.
-`examples/demo_taper_gradient.py` shows the contrast directly, and
-`tests/test_taper.py` asserts that the tapered gradient converges monotonically
-as eps shrinks. See `density_torch.py`'s module docstring for the full argument.
+**The taper.** A hard cutoff is differentiable almost everywhere, so it is
+not what makes a density-on-grid calculation non-differentiable. What it
+does is make two derivatives disagree: autograd differentiates the Gaussian with each
+atom's cutoff sphere held fixed, so the gradient it returns omits the voxels
+that cross the boundary as the atom moves, while the true derivative of the
+loss includes them. With thousands of truncated atoms those crossings are
+frequent, and a hard edge is also a sharp feature for the FFT to represent.
+The smooth taper, a raised-cosine window of width 0.1 Å, makes the autograd
+and true gradients agree and removes the edge. **The taper begins at the
+cutoff threshold**: it occupies [R, R + w], where R is the radius at which
+the density equals the threshold, so inside R the density is identical to a
+hard cutoff's and only the tail below the threshold is attenuated. Before
+2026-10-30 the taper reached zero *at* the threshold instead, occupying
+[R − w, R], which made the density inside the cutoff radius lower than a
+hard cutoff's; that was an error in how the method worked, and the record
+of what it cost is kept below. Nothing above the threshold is attenuated
+now, so the width does not affect forward accuracy, only the
+candidate-voxel count (+9% at 1e-4, +13% at 1e-2, measured on 7FPV). It is an accuracy measure, not a requirement for
+differentiability. The one component of the standard method whose gradient
+with respect to the coordinates is genuinely useless is a geometric solvent
+mask: it is piecewise constant in the atom positions, so its derivative is
+zero almost everywhere and undefined at the boundary. That is a property of
+geometric masks as such, in gemmi, cctbx, Phenix and REFMAC alike, and it is
+why `lunus.sf` builds its mask from the density instead
+(docs/solvent-design.md).
+`examples/demo_taper_gradient.py` shows the autograd-versus-finite-difference
+gap directly, `tests/test_taper.py` asserts that the tapered gradient
+converges as eps shrinks, and `tools/study_taper.py` measures what the taper
+buys on a real crystal: gradient fidelity, the roughness of the loss along a
+walk, and optimizer convergence, over a sweep of widths and cutoffs. See
+`density_torch.py`'s module docstring for the autograd argument in full.
+
+### What the taper study measured
+
+`tools/study_taper.py` on 7FPV, 3,341 atoms, one asymmetric unit expanded on
+the grid, `d_min` 2.0, grid 54×72×150, 11,011 reflections, float64 on CUDA,
+the structure displaced by 0.3 Å rms and refined back. **Measured with the
+taper reaching zero at the threshold**, the erroneous placement before
+2026-10-30, except where a re-run with the taper beginning at the threshold
+is stated; the conclusions about where the taper matters do not depend on
+where the taper begins (checked: hard, roughness and fidelity rows agree to
+the second digit across the two), the width-dependence of the 1e-2 forward
+floor does. Taper widths hard
+(1e-6 Å), 0.01, 0.03, 0.1, 0.3 Å; cutoffs 1e-2 and 1e-4 e/Å³; targets the
+model's own amplitudes (`self`) and cctbx direct summation (`exact`). JSON
+in `examples/compare_gemmi/taper_*.json`, gitignored; 2026-10-30.
+
+**The taper's value depends on the cutoff, because the density jump at the
+boundary is the cutoff value itself.**
+
+| cutoff | width | walk: rms jump in dL/dt | L-BFGS, 200 it., exact target | at 0.001 Å step: max \|fd−auto\|/\|auto\| |
+|---|---|---|---|---|
+| 1e-2 | hard | 0.33 | **stalled at 122**, 5.8e-4 | 10 |
+| 1e-2 | 0.01–0.1 | 0.009 | ran out, 2.3–2.7e-4 | 0.1–0.01 |
+| 1e-2 | 0.3 | 0.009 | ran out, 4.5e-4 | 1e-4 |
+| 1e-4 | hard | 0.010 | ran out, **5.3e-5** | 0.19 |
+| 1e-4 | 0.01–0.3 | 0.009 | ran out, 5.7e-5 | 0.005 |
+
+- **At 1e-2** the hard cutoff's gradient disagrees with the loss's actual
+  slope along a collective walk by 23% rms, and L-BFGS fails its line search
+  before the budget is spent. Any taper from 0.01 Å up removes that: the
+  roughness falls 35-fold to the walk's own resolution and L-BFGS runs to
+  completion at a tenth of the loss. Adam does not care either way; its loss
+  trajectories are identical across widths, which is the usual first-order
+  indifference to a kinked gradient, and why a result obtained only with
+  Adam says nothing about the taper.
+- **At 1e-4** the jump is a hundredfold smaller and the optimizer cannot see
+  it: hard and tapered are the same to within noise, and the hard cutoff's
+  L-BFGS run is in fact marginally the best. What the taper still fixes is
+  pointwise: the worst sampled atom's autograd error at a 0.001 Å step is 19%
+  of the gradient without it and 0.5% with it.
+- **The 1e-4 model is exact at this resolution.** Every 1e-4 number is the
+  same against direct-summation amplitudes as against the model's own. At
+  1e-2 the forward error sets a floor of 2.3–2.7e-4 against the exact
+  target, four times the fine model's, and it grew with taper width (0.3 Å
+  removed enough density to cost a further factor of two). That last effect
+  was the taper reaching zero at the threshold and so removing density
+  above it. **Re-run 2026-10-31 with the taper beginning at the
+  threshold** (same settings, exact target, cutoff 1e-2): the dependence
+  reverses. The L-BFGS floor is 2.18e-4 at 0.01 Å, 2.08e-4 at 0.03, 1.74e-4
+  at 0.1 and 1.23e-4 at 0.3 Å, against 2.49 / 2.30 / 2.73 / 4.46e-4 before,
+  because a taper that begins at the threshold keeps part of the tail a
+  hard cutoff drops, and a wider one keeps more of it. The hard cutoff is
+  the same run either way (5.9e-4, stall at 118), and roughness and
+  fidelity are unchanged to the second digit, so where the taper begins
+  affects the forward model only, as it should.
+  A 1e-5 final cutoff bought nothing over 1e-4 in any run.
+- **The tapered floor is identical everywhere**, 0.009, independent of width
+  and cutoff: that is the walk's own central difference at 0.005 Å steps,
+  not the taper. The taper has pushed the kink below what the walk resolves.
+
+**L-BFGS alone, one stage, at every cutoff** (`--stages optimize --no-adam
+--steps 300`, 2026-10-31). The clean test of whether the optimizer
+converges at a given cutoff with and without the taper: nine refinements
+per system from the same displaced start to the same target, one per
+cutoff and width, nothing switched midway. (A two-stage coarse-then-fine
+experiment, `--stages schedule`, was tried before this and set aside: a
+model switch and an optimizer reset in the middle of every run confused
+the question. Its JSON files remain in `examples/compare_gemmi/`; nothing
+here rests on them.)
+
+Success is judged by the rmsd of the refined coordinates from the true
+structure, which every run starts 0.30 Å from; the loss is reported
+because it is what the optimizer sees, not as the criterion.
+
+`top_bfac.pdb.gz`, `--select "protein and not element H"`, 39,040 heavy
+protein atoms all free, no waters (Bragg amplitudes do not determine them)
+and no hydrogens (moving heavy atoms under fixed hydrogens is not a model
+anyone uses), P1 box, `d_min` 2.0, 323,136 reflections against 117,120
+coordinates (2.8 per parameter), self target, float32:
+
+| cutoff | width | final rmsd (Å) | final loss | iterations of 300 |
+|---|---|---|---|---|
+| 1e-2 | hard | **0.307** | 4.5e-3 | **52, line search failed** |
+| 1e-2 | 0.03 / 0.1 | 0.014 / 0.014 | 2.1e-7 / 1.3e-7 | 300 |
+| 1e-3 | hard | **0.149** | 7.1e-5 | **279, line search failed** |
+| 1e-3 | 0.03 / 0.1 | 0.018 / 0.018 | 9.1e-8 / 9.1e-8 | 300 |
+| 1e-4 | hard | 0.019 | 1.1e-7 | 300 |
+| 1e-4 | 0.03 / 0.1 | 0.018 / 0.018 | 9.2e-8 / 9.1e-8 | 300 |
+
+7FPV, one asymmetric unit, `d_min` 2.0, self target, float64. Getting
+this system to refine at all took three protocol corrections, recorded
+here because each one is a mistake the next person would otherwise repeat
+(all at the 1e-4 cutoff, from the 0.3 Å displacement, 300 L-BFGS
+iterations, CPU checks on 2026-10-31):
+
+| free atoms | hard cutoff | taper 0.1 Å |
+|---|---|---|
+| every deposited atom (3,341; 1,527 are H, ∼350 water) | 0.250 Å | 0.283 Å |
+| heavy protein atoms (1,523), alternates included | 0.147 Å, line search failed | 0.158 Å, drifting |
+| heavy protein atoms, alternates B/C/D excluded (1,270) | **0.040 Å** | **0.041 Å** |
+| heavy protein atoms with every B set to 55 Å² | 0.194 Å, failed | 0.345 Å, drifting |
+
+1. **Hydrogens out.** The amplitudes barely constrain a hydrogen, so free
+   hydrogens drift and, at 46% of the atoms, dominate the rmsd. They do
+   not belong in the model without a riding scheme, which `lunus.sf` does
+   not have.
+2. **Alternate conformers out.** 473 of 7FPV's 1,523 heavy protein atoms
+   are alternates at partial occupancy, pairs within an ångström of each
+   other, each refined as an independent scatterer. An amplitude-only loss
+   cannot tell density moved from one alternate to the other apart from
+   density in the right place, so those atoms sit in near-degenerate
+   directions along which the loss keeps falling while the rmsd drifts.
+   Keeping the A conformer only, the refinement converges from 0.3 Å.
+   The MD box has no alternates, which is why it never showed this.
+3. **Not the B factors.** The box's random per-residue B has a median of
+   55 Å² against 7FPV's 18 Å², and the guess that broader atoms give a
+   wider basin was tested and is wrong: setting every 7FPV B to 55 Å²
+   makes the refinement worse, since broader atoms carry less information
+   at 2 Å. Nor is it resolution: with the alternates in, 7FPV converges
+   from a 0.15 Å displacement at 2 Å (0.040 Å) and from 0.3 Å at 1.2 Å
+   (0.069 Å), which are statements about how far the degenerate
+   directions let it drift, not about the basin of a well-posed problem.
+
+With the single-conformer heavy-atom model (1,270 atoms, `--occ-one`
+restoring the 220 kept A conformers to full occupancy), 11,011 reflections
+against 3,810 coordinates, 2.9 per parameter, the box's ratio
+(`lbfgs_7fpv_single.json`):
+
+| cutoff | width | final rmsd (Å) | final loss | iterations of 300 |
+|---|---|---|---|---|
+| 1e-2 | hard | 0.034 | 5.4e-6 | 141, line search failed, after converging |
+| 1e-2 | 0.1 | 0.042 | 6.9e-5 | 300 |
+| 1e-3 | hard | 0.038 | 3.9e-5 | 165, line search failed, after converging |
+| 1e-3 | 0.1 | 0.036 | 3.0e-5 | 300 |
+| 1e-4 | hard | 0.040 | 6.5e-5 | 244, line search failed, after converging |
+| 1e-4 | 0.1 | 0.034 | 2.5e-5 | 300 |
+
+Every run reaches 0.034 to 0.042 Å, with or without the taper, at every
+cutoff. The hard-cutoff runs do end on failed line searches, but at
+iteration 141 to 244, by which point their rmsd had stopped moving: the
+failure is the optimizer finding no descent direction on a kinked surface
+at the minimum, not a failure to reach it. The earlier 7FPV tables, at 2 Å
+with everything free (`lbfgs_7fpv.json`) and at 1.2 Å with and without
+the alternates (`lbfgs_7fpv_1p2*.json`), are superseded.
+
+**What this says about optimization at different density thresholds**,
+which is the conclusion the study is for, judged by the rmsd of the
+refined coordinates from the true structure. On the 1,270-atom
+single-conformer 7FPV model, L-BFGS recovers the structure as well
+without the taper as with it at every cutoff tested, 1e-4 to 1e-2. On
+the 39,040-atom box it does so at 1e-4 (0.019 against 0.018 Å) and does
+not at 1e-3 (0.149 Å) or 1e-2 (0.307 Å, the starting distance, after 52
+iterations), stopping on a failed line search while still far from the
+minimum, while every tapered run reaches 0.014 to 0.018 Å; 0.03 and 0.1 Å
+behave the same. So whether the taper matters depends on the system: it
+did not on the small one at any cutoff, and on the large one it decided
+the outcome at 1e-3 and 1e-2. That is the direction expected, since the
+rate of voxels crossing cutoff spheres per step grows with the number of
+atoms, thirty times more on the box, and the density jump at each
+crossing is the cutoff value itself; the two systems also differ in B
+distribution and symmetry, and nothing here separates those. The finding
+is that cases exist, within the range of cutoffs the code accepts and on
+a protein-sized system, where the taper decides whether L-BFGS recovers
+the structure, that where it sets in depends on the system, and that
+there may well be other cases.
 
 ## Assumptions carried over from xtraj.py
 
@@ -177,7 +366,12 @@ docs/performance.md.
 System: `examples/compare_gemmi/top_bfac.pdb.gz`, 135,834 atoms, per-residue B
 on [10, 100], cell 88.451, 88.451, 39.823, space group P4₃ (superseded; see
 docs/performance.md), `d_min` 0.9, grid
-300 × 300 × 144, cutoff 0.01.
+300 × 300 × 144, cutoff 0.01. Every number in this section and the next was
+measured while the density taper reached zero at the cutoff threshold, the
+error corrected on 2026-10-30: the taper now begins at the threshold, and
+since gemmi truncates hard at R the two now differ only by density below
+the threshold. The corrected-cell parity figure has been re-measured — see
+the note after the table.
 
 **Read the first row carefully**: it is torch NOT expanding while gemmi does,
 i.e. a genuine mismatch, and not a description of `expand_symmetry=False`.
@@ -198,11 +392,66 @@ configuration the same comparison gives **correlation 0.999919, R-factor
 0.004997** over 115,348 reflections, with the same resolution dependence —
 0.9999 beyond 1.55 Å falling to 0.9125 in the 0.900–0.933 Å shell.
 
-The residual disagreement is the taper and the cutoff-radius convention, not
-symmetry. It is monotonic in resolution — Icalc correlation 1.0000 at low
+**Re-measured 2026-10-30 with the taper beginning at the threshold**, same
+system and script, cutoff 1e-4 (the current default), 10 frames on CPU:
+Icalc **correlation 1.000000, R-factor 0.000019** over 115,348 reflections,
+0.0005 in the 0.900–0.933 Å shell and ≤ 0.0001 beyond 1.07 Å. The old
+placement, run the same day on the same gemmi output for a like-for-like
+comparison, gave R-factor 0.000085 and 0.0013 in the top shell, so the
+correction cut the residual against gemmi by 4.5× at every resolution. With
+the taper beginning at the threshold, torch and gemmi differ only by density
+below it, and at 1e-4 that is below what Icalc can resolve. The figures
+above were taken with the old placement and at cutoff 0.01.
+
+The residual disagreement in those earlier figures is the taper and the
+cutoff-radius convention, not symmetry. It is monotonic in resolution — Icalc correlation 1.0000 at low
 resolution falling to 0.9099 in the 0.900–0.932 Å shell — which is the
 signature of a real-space truncation difference, and it halves when the taper is
 narrowed. Reproduce with `examples/compare_gemmi/run_xtraj.sh`.
+
+### Against the exact answer, by cutoff
+
+`tools/compare_three_way.py` adds what the parity runs cannot: cctbx direct
+summation of the same model over the same reflections, no grid, no cutoff.
+7FPV as deposited, 3,341 atoms with ADPs flattened to isotropic so all three
+see identical atoms, 25,552 reflections to 1.5 Å, gemmi's grid (72×96×200)
+for both grid methods, R on amplitudes after one scale, 2026-11-01, taper
+beginning at the threshold:
+
+| cutoff | gemmi vs direct | lunus.sf hard vs direct | lunus.sf taper vs direct | lunus.sf taper vs gemmi |
+|---|---|---|---|---|
+| 1e-2 | 0.0104 | 0.0131 | 0.0111 | 0.0024 |
+| 1e-3 | 0.0012 | 0.0017 | 0.0014 | 0.0004 |
+| 1e-4 | 0.0003 | 0.0003 | 0.0003 | 0.0000 |
+| 1e-5 | 0.0002 | 0.0002 | 0.0002 | 0.0000 |
+
+At 1e-4 and below the three are indistinguishable, and the residual that
+remains against direct summation, 0.0009 in the 1.5–1.7 Å shell, is the
+same for every grid method, so it is the grid and the FFT rather than the
+cutoff or the window. At coarse cutoffs the taper moves lunus.sf toward the
+exact answer, where the old placement would have moved it away.
+
+**Why the two hard cutoffs differ.** With `--radii` the tool prints the
+radius gemmi assigns an atom next to the radius at which the density
+actually equals the cutoff, which is what lunus.sf solves for:
+
+| atom | cutoff | gemmi radius (density there) | lunus.sf R (density there) |
+|---|---|---|---|
+| C, B 20 | 1e-2 | 2.249 Å (7.3e-3) | 2.159 Å (1.0e-2) |
+| C, B 50 | 1e-2 | 2.607 Å (8.8e-3) | 2.564 Å (1.0e-2) |
+| O, B 20 | 1e-2 | 2.123 Å (7.7e-3) | 2.065 Å (1.0e-2) |
+| C, B 20 | 1e-4 | 3.483 Å (8.3e-5) | 3.435 Å (1.0e-4) |
+
+gemmi's estimate overshoots systematically: its hard edge sits where the
+density is 0.65 to 0.9 of the cutoff, 0.05 to 0.1 Å beyond the true
+cutoff radius, so gemmi keeps slightly more tail than a hard cutoff at the
+nominal value would, and is correspondingly closer to direct summation.
+lunus.sf's taper on [R, R + 0.1 Å] keeps about the same tail — for carbon
+at B = 20 and cutoff 1e-2, gemmi's edge is at 2.249 Å and the tapered
+window ends at 2.259 Å — which is why the tapered lunus.sf lands within
+0.0024 of gemmi at 1e-2 and closer to the exact answer than its own hard
+cutoff. The radius convention was already identified above as the dominant
+source of the gemmi difference; this is the mechanism, measured.
 
 ### Of those two terms, the cutoff dominates
 
