@@ -409,6 +409,50 @@ resolution falling to 0.9099 in the 0.900–0.932 Å shell — which is the
 signature of a real-space truncation difference, and it halves when the taper is
 narrowed. Reproduce with `examples/compare_gemmi/run_xtraj.sh`.
 
+### Against the exact answer, by cutoff
+
+`tools/compare_three_way.py` adds what the parity runs cannot: cctbx direct
+summation of the same model over the same reflections, no grid, no cutoff.
+7FPV as deposited, 3,341 atoms with ADPs flattened to isotropic so all three
+see identical atoms, 25,552 reflections to 1.5 Å, gemmi's grid (72×96×200)
+for both grid methods, R on amplitudes after one scale, 2026-11-01, taper
+beginning at the threshold:
+
+| cutoff | gemmi vs direct | lunus.sf hard vs direct | lunus.sf taper vs direct | lunus.sf taper vs gemmi |
+|---|---|---|---|---|
+| 1e-2 | 0.0104 | 0.0131 | 0.0111 | 0.0024 |
+| 1e-3 | 0.0012 | 0.0017 | 0.0014 | 0.0004 |
+| 1e-4 | 0.0003 | 0.0003 | 0.0003 | 0.0000 |
+| 1e-5 | 0.0002 | 0.0002 | 0.0002 | 0.0000 |
+
+At 1e-4 and below the three are indistinguishable, and the residual that
+remains against direct summation, 0.0009 in the 1.5–1.7 Å shell, is the
+same for every grid method, so it is the grid and the FFT rather than the
+cutoff or the window. At coarse cutoffs the taper moves lunus.sf toward the
+exact answer, where the old placement would have moved it away.
+
+**Why the two hard cutoffs differ.** With `--radii` the tool prints the
+radius gemmi assigns an atom next to the radius at which the density
+actually equals the cutoff, which is what lunus.sf solves for:
+
+| atom | cutoff | gemmi radius (density there) | lunus.sf R (density there) |
+|---|---|---|---|
+| C, B 20 | 1e-2 | 2.249 Å (7.3e-3) | 2.159 Å (1.0e-2) |
+| C, B 50 | 1e-2 | 2.607 Å (8.8e-3) | 2.564 Å (1.0e-2) |
+| O, B 20 | 1e-2 | 2.123 Å (7.7e-3) | 2.065 Å (1.0e-2) |
+| C, B 20 | 1e-4 | 3.483 Å (8.3e-5) | 3.435 Å (1.0e-4) |
+
+gemmi's estimate overshoots systematically: its hard edge sits where the
+density is 0.65 to 0.9 of the cutoff, 0.05 to 0.1 Å beyond the true
+cutoff radius, so gemmi keeps slightly more tail than a hard cutoff at the
+nominal value would, and is correspondingly closer to direct summation.
+lunus.sf's taper on [R, R + 0.1 Å] keeps about the same tail — for carbon
+at B = 20 and cutoff 1e-2, gemmi's edge is at 2.249 Å and the tapered
+window ends at 2.259 Å — which is why the tapered lunus.sf lands within
+0.0024 of gemmi at 1e-2 and closer to the exact answer than its own hard
+cutoff. The radius convention was already identified above as the dominant
+source of the gemmi difference; this is the mechanism, measured.
+
 ### Of those two terms, the cutoff dominates
 
 Measured 2026-09-20 on a 7FPV MD trajectory at `d_min` 1.2 (supercell
