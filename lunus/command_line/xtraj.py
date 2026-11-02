@@ -2068,20 +2068,19 @@ EOF
           h = hkls_np[:, 0]
           k = hkls_np[:, 1]
           l = hkls_np[:, 2]
-          # Since we used half_l=False, the full reciprocal space grid is available.
-          # We just apply grid wrapping (modulo) for all dimensions based on periodic boundary conditions.
+          # The whole real-space grid was transformed (not a half_l
+          # transform), so the full reciprocal space grid is available and
+          # extraction is just grid wrapping (modulo) along each dimension:
+          # no Friedel mate is involved and nothing is conjugated. ifftn
+          # already carries the +2 pi i sign of
+          # F(hkl) = integral rho exp(+2 pi i h.r), the convention cctbx's
+          # direct summation (engine=cctbx) uses. An earlier version
+          # conjugated here and returned F(-hkl), every phase with its sign
+          # flipped.
           u = h % Nu
           v = k % Nv
           w = l % Nw
-
-          # Extract the complex values directly from the NumPy view of the grid
-          # Since we used half_l=False, the full reciprocal space grid is available.
-          # Apply the complex conjugate to the reflections where we used the Friedel mate
-        
-          complex_array = np.array(getattr(complex_grid, 'array', complex_grid), copy=False)
-          extracted_sf = complex_array[u, v, w]
-
-          extracted_sf = np.conjugate(extracted_sf)
+          extracted_sf = complex_grid[u, v, w]
           d_spacings_np = np.array(miller_set.d_spacings().data())
         
           # The un-blur math is mathematically: exp( B / (4 * d^2) )

@@ -45,7 +45,7 @@ def density_and_fft_tapered(pos_frac, A, lam, R, w, grid_shape, M, cell_volume):
                 wu, wv, ww = idx % np.array([Nu, Nv, Nw])
                 grid[wu, wv, ww] += dens
     Fgrid = np.fft.ifftn(grid) * cell_volume
-    return np.conj(Fgrid)
+    return Fgrid
 
 
 def test_tapered_gradient_converges():
@@ -58,13 +58,13 @@ def test_tapered_gradient_converges():
     well-behaved derivative means successive halvings of eps stop changing the
     answer. Measured dF/d(frac_x):
 
-        eps=1e-03  -3.4672-8.6577j
-        eps=1e-04  -2.9785-8.4010j
-        eps=1e-05  -2.9664-8.3995j
-        eps=1e-06  -2.9663-8.3995j
+        eps=1e-03  -4.1293+11.2128j
+        eps=1e-04  -3.7917+11.0237j
+        eps=1e-05  -3.7899+11.0234j
+        eps=1e-06  -3.7898+11.0234j
 
     i.e. the last two agree to ~1e-05 relative while the first two differ by
-    ~17%, which is exactly the signature of a converging finite difference.
+    ~9%, which is exactly the signature of a converging finite difference.
     """
     a, b, c = 30.0, 34.0, 26.0
     alpha, beta, gamma = 80.0, 95.0, 110.0

@@ -36,7 +36,7 @@ end to end.
 ## Matched by construction
 
 - the blur/unblur bookkeeping
-- the `ifftn` → volume-scale → conjugate structure-factor convention
+- the `ifftn` → volume-scale structure-factor convention (the standard +2πi sign; both this and xtraj.py's gemmi engine once conjugated on top of it, which flipped every phase, and both have dropped that)
 - the IT92 parameterization, read from a shared source
 
 ## Deliberately not identical

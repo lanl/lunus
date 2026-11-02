@@ -16,7 +16,7 @@ def analytic_atom_F(coef9, b_iso, pos_frac, hkl, M):
     stol2 = inv_d2 / 4.0
     f = calculate_sf(coef9, stol2)
     dwf = np.exp(-b_iso * stol2)
-    phase = np.exp(-2j * np.pi * (hkl @ pos_frac))
+    phase = np.exp(2j * np.pi * (hkl @ pos_frac))
     return f * dwf * phase
 
 
@@ -113,7 +113,7 @@ def test_exact_cutoff_mask():
         print(f"\n=== cutoff = {cutoff} ===")
         for exact_mask, label in [(False, "margin-padded, unmasked (old)"), (True, "exact cutoff mask (new)")]:
             grid = place_density(frac_coords, element_syms, occ, elem_kernels, grid_shape, M, exact_mask)
-            Fgrid = np.conj(np.fft.ifftn(grid) * cell_volume)
+            Fgrid = np.fft.ifftn(grid) * cell_volume
             F_num = np.array([Fgrid[h % Nu, k % Nv, l % Nw] for h, k, l in hkl_test])
             max_rel_err = np.max(np.abs(F_num - F_ref) / np.maximum(np.abs(F_ref), 1e-8))
             print(f"  {label}: grid sum={grid.sum():.4f}, max rel.err vs analytic = {max_rel_err:.2e}")

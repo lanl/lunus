@@ -14,7 +14,7 @@ def analytic_atom_F(coef9, b_atom, pos_frac, hkl, M):
     stol2 = inv_d2 / 4.0
     f = calculate_sf(coef9, stol2)
     dwf = np.exp(-b_atom * stol2)  # THIS atom's own B, not a shared one
-    phase = np.exp(-2j * np.pi * (hkl @ pos_frac))
+    phase = np.exp(2j * np.pi * (hkl @ pos_frac))
     return f * dwf * phase
 
 
@@ -53,7 +53,7 @@ def density_and_fft_per_atom_b(atoms, A_list, lam_list, R_list, w, grid_shape, M
                     wu, wv, ww = idx % np.array([Nu, Nv, Nw])
                     grid[wu, wv, ww] += dens
     Fgrid = np.fft.ifftn(grid) * cell_volume
-    return np.conj(Fgrid)
+    return Fgrid
 
 
 def test_per_atom_b_factors():

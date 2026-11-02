@@ -7,7 +7,7 @@ translation of.
 
 Two checks:
   1. VALUE check: F(hkl) from density+FFT vs. the direct analytic
-     single-atom formula F(hkl) = f(s) * exp(-B*s^2) * exp(-2 pi i h.x)
+     single-atom formula F(hkl) = f(s) * exp(-B*s^2) * exp(+2 pi i h.x)
   2. GRADIENT check: finite-difference dF/dx from the density+FFT pipeline
      vs. finite-difference dF/dx from the closed-form analytic formula.
      These are two independently-derived expressions for the same
@@ -33,8 +33,8 @@ GRAD_RTOL = 1e-3
 
 def density_and_fft(pos_frac, A, lam, radius, grid_shape, M, cell_volume):
     """One atom, occupancy 1. Returns the full (Nu,Nv,Nw) F(hkl) grid
-    (conjugated, volume-scaled ifft), matching xtraj.py's gemmi-engine
-    convention exactly."""
+    (volume-scaled ifft), in the standard convention
+    F(hkl) = integral rho exp(+2 pi i h.r)."""
     Nu, Nv, Nw = grid_shape
     grid = np.zeros((Nu, Nv, Nw), dtype=np.float64)
 
@@ -60,7 +60,7 @@ def density_and_fft(pos_frac, A, lam, radius, grid_shape, M, cell_volume):
                 grid[wu, wv, ww] += dens
 
     Fgrid = np.fft.ifftn(grid) * cell_volume
-    return np.conj(Fgrid)
+    return Fgrid
 
 
 def analytic_single_atom_F(coef9, b_iso, pos_frac, hkl, M):
@@ -68,7 +68,7 @@ def analytic_single_atom_F(coef9, b_iso, pos_frac, hkl, M):
     stol2 = inv_d2 / 4.0
     f = calculate_sf(coef9, stol2)
     dwf = np.exp(-b_iso * stol2)
-    phase = np.exp(-2j * np.pi * (hkl @ pos_frac))
+    phase = np.exp(2j * np.pi * (hkl @ pos_frac))
     return f * dwf * phase
 
 

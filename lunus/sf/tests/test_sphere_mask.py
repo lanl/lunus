@@ -35,14 +35,14 @@ def density_and_fft_sphere(pos_frac, A, lam, radius, grid_shape, M, cell_volume,
         grid[wu, wv, ww] += dens
 
     Fgrid = np.fft.ifftn(grid) * cell_volume
-    return np.conj(Fgrid), len(offsets), n_cube
+    return Fgrid, len(offsets), n_cube
 
 def analytic_single_atom_F(coef9, b_iso, pos_frac, hkl, M):
     inv_d2 = reciprocal_inv_d2(M, hkl)
     stol2 = inv_d2 / 4.0
     f = calculate_sf(coef9, stol2)
     dwf = np.exp(-b_iso * stol2)
-    phase = np.exp(-2j * np.pi * (hkl @ pos_frac))
+    phase = np.exp(2j * np.pi * (hkl @ pos_frac))
     return f * dwf * phase
 
 def test_sphere_masked_density_matches_analytic():

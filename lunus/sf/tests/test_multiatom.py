@@ -19,7 +19,7 @@ def analytic_atom_F(coef9, b_iso, pos_frac, hkl, M):
     stol2 = inv_d2 / 4.0
     f = calculate_sf(coef9, stol2)
     dwf = np.exp(-b_iso * stol2)
-    phase = np.exp(-2j * np.pi * (hkl @ pos_frac))
+    phase = np.exp(2j * np.pi * (hkl @ pos_frac))
     return f * dwf * phase
 
 
@@ -130,7 +130,7 @@ def test_multiatom_matches_analytic_and_is_chunk_invariant():
     by_chunk = {}
     for chunk_size in [1, 2, 100]:
         grid = density_grouped_chunked(frac_coords, element_syms, occ, elem_kernels, grid_shape, M, chunk_size)
-        Fgrid = np.conj(np.fft.ifftn(grid) * cell_volume)
+        Fgrid = np.fft.ifftn(grid) * cell_volume
         F_num = np.array([Fgrid[h % Nu, k % Nv, l % Nw] for h, k, l in hkl_test])
         by_chunk[chunk_size] = F_num
 
