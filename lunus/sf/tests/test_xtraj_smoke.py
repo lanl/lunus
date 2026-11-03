@@ -95,8 +95,9 @@ def _run(tmp_path, *args):
 
 
 @functools.lru_cache(maxsize=None)
-def _amplitudes(path):
-    """|F| from an mtz, as numpy, indexed consistently between calls.
+def _complex(path):
+    """F as complex from an mtz, as numpy, indexed consistently between
+    calls, so amplitudes and phases can be compared across engines.
 
     Cached: the comparisons below read the same few files repeatedly, and at
     this size the read plus map_to_asu plus sort costs more than the
@@ -106,7 +107,12 @@ def _amplitudes(path):
 
     array = mtz.object(str(path)).as_miller_arrays()[0]
     array = array.map_to_asu().sort(by_value="packed_indices")
-    return np.abs(array.data().as_numpy_array())
+    return array.data().as_numpy_array()
+
+
+def _amplitudes(path):
+    """|F| from an mtz, indexed as _complex."""
+    return np.abs(_complex(path))
 
 
 ENGINES = ["cctbx", "gemmi", "torch"]
@@ -166,6 +172,29 @@ def test_engines_agree_with_gemmi(calculated, engine):
 
     correlation = np.corrcoef(reference, other)[0, 1]
     assert correlation > 0.99, "%s vs gemmi: correlation %.4f" % (engine, correlation)
+
+
+@pytest.mark.parametrize("engine", [e for e in ENGINES if e != "cctbx"])
+def test_engines_agree_with_cctbx_in_phase(calculated, engine):
+    """The FFT engines must use the same sign convention as cctbx's direct
+    summation, F(hkl) = sum f exp(+2 pi i h.x). Amplitude correlations cannot
+    see a conjugated F -- it has the same |F| -- so compare the phases:
+    the amplitude-weighted mean of cos(phase difference) is near 1 for the
+    same convention and near 0 for a flipped one (the difference is then
+    2*phase, which is spread over the circle)."""
+    if engine not in calculated or "cctbx" not in calculated:
+        pytest.skip("need both %s and cctbx" % engine)
+
+    reference = _complex(str(calculated["cctbx"] / "fcalc.mtz"))
+    other = _complex(str(calculated[engine] / "fcalc.mtz"))
+    assert other.shape == reference.shape, "%s produced a different Miller set" % engine
+
+    weight = np.abs(reference) * np.abs(other)
+    agreement = float(np.sum(weight * np.cos(np.angle(other) - np.angle(reference)))
+                      / np.sum(weight))
+    assert agreement > 0.9, (
+        "%s vs cctbx: weighted mean cos(phase difference) %.4f -- the phases "
+        "do not share cctbx's sign convention" % (engine, agreement))
 
 
 def _shuffled_subset(source, destination, fraction=0.7, seed=0):

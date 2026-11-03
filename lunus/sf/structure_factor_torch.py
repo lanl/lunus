@@ -1,9 +1,13 @@
 """
-FFT + extraction half of the pipeline, matching xtraj.py's gemmi-engine
-convention exactly:
+FFT + extraction half of the pipeline, in the standard crystallographic
+convention F(hkl) = integral rho(r) exp(+2 pi i h.r) d^3r, the one gemmi's
+and cctbx's direct summations use:
     complex_grid = ifftn(density) * cell_volume
-    F(hkl) = conjugate(complex_grid[h % Nu, k % Nv, l % Nw])
+    F(hkl) = complex_grid[h % Nu, k % Nv, l % Nw]
     (optionally: F(hkl) *= exp(blur * 0.25 * inv_d2)  -- undoes gemmi's blur)
+
+ifftn already carries the +2 pi i sign (and the 1/N that, with the volume,
+makes the Riemann sum an integral), so nothing is conjugated.
 
 torch.fft.ifftn is a standard differentiable linear operator, so this
 composes with density_torch.compute_density to give end-to-end gradients
@@ -38,7 +42,7 @@ def compute_fcalc(
     u = torch.remainder(h, Nu)
     v = torch.remainder(k, Nv)
     w = torch.remainder(l, Nw)
-    F = torch.conj(Fgrid[u, v, w]).resolve_conj()
+    F = Fgrid[u, v, w]
 
     if blur != 0.0:
         if orth_matrix is None:

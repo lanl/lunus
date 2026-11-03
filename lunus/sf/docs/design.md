@@ -36,7 +36,7 @@ end to end.
 ## Matched by construction
 
 - the blur/unblur bookkeeping
-- the `ifftn` → volume-scale → conjugate structure-factor convention
+- the `ifftn` → volume-scale structure-factor convention (the standard +2πi sign, F(hkl) = ∫ρ exp(+2πi h·r))
 - the IT92 parameterization, read from a shared source
 
 ## Deliberately not identical

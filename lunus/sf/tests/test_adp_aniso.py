@@ -15,7 +15,7 @@ The checks:
   2. integral rho d^3r = f(0) = Z, the same normalization the isotropic kernel
      is held to.
   3. Density + FFT of one anisotropic atom against the closed-form
-     f(s) exp(-2 pi^2 s.U.s) exp(-2 pi i h.x). This is the one that pins the
+     f(s) exp(-2 pi^2 s.U.s) exp(+2 pi i h.x). This is the one that pins the
      CONVENTIONS -- a transposed U, eigenvectors as rows instead of columns, or
      U taken in the fractional rather than Cartesian frame all reproduce checks
      1 and 2 and fail here.
@@ -92,7 +92,7 @@ def test_total_charge_is_f_zero_whatever_the_adp(u):
 def density_and_fft_aniso(pos_frac, A, w, V, radius, grid_shape, M, cell_volume):
     """One anisotropic atom, occupancy 1, placed by brute force. Same
     conventions as tests/test_numpy_reference.py's isotropic version:
-    conjugated, volume-scaled ifft."""
+    volume-scaled ifft."""
     Nu, Nv, Nw = grid_shape
     grid = np.zeros(grid_shape, dtype=np.float64)
     spacing = [np.linalg.norm(M[:, i]) / n for i, n in enumerate(grid_shape)]
@@ -109,17 +109,17 @@ def density_and_fft_aniso(pos_frac, A, w, V, radius, grid_shape, M, cell_volume)
                 wu, wv, ww = idx % np.array(grid_shape)
                 grid[wu, wv, ww] += float(density_at_aniso(A, w, V, d_cart))
 
-    return np.conj(np.fft.ifftn(grid) * cell_volume)
+    return np.fft.ifftn(grid) * cell_volume
 
 
 def analytic_single_atom_F_aniso(coef9, u_cart, pos_frac, hkl, M):
-    """f(s) * exp(-2 pi^2 s.U.s) * exp(-2 pi i h.x), with s the CARTESIAN
+    """f(s) * exp(-2 pi^2 s.U.s) * exp(+2 pi i h.x), with s the CARTESIAN
     reciprocal vector in A^-1 -- the same s whose square reciprocal_inv_d2
     returns."""
     s_cart = hkl @ np.linalg.inv(M)                    # (n,3), A^-1
     stol2 = reciprocal_inv_d2(M, hkl) / 4.0
     dwf = np.exp(-2.0 * np.pi ** 2 * ((s_cart @ u_cart) * s_cart).sum(-1))
-    phase = np.exp(-2j * np.pi * (hkl @ pos_frac))
+    phase = np.exp(2j * np.pi * (hkl @ pos_frac))
     return calculate_sf(coef9, stol2) * dwf * phase
 
 

@@ -36,7 +36,7 @@ def analytic_single_atom_F_np(coef9, b_iso, pos_frac, hkl, M):
     stol2 = inv_d2 / 4.0
     f = calculate_sf(coef9, stol2)
     dwf = np.exp(-b_iso * stol2)
-    phase = np.exp(-2j * np.pi * (hkl @ pos_frac))
+    phase = np.exp(2j * np.pi * (hkl @ pos_frac))
     return f * dwf * phase
 
 
