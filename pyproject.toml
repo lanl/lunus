@@ -19,7 +19,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lunus"
-version = "0.2.0"
+version = "0.2.1"
 description = "Analysis and modeling of diffuse X-ray scattering from protein crystals"
 readme = { file = "README", content-type = "text/plain" }
 requires-python = ">=3.9"
