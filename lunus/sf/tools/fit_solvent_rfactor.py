@@ -174,17 +174,85 @@ def read_observations(path, d_min=None, crystal_symmetry=None, log=sys.stdout):
 
 # ------------------------------------------------------------------- the model
 
-def read_model(path, log=sys.stdout):
-    """Coordinates, isotropic-equivalent B, elements and occupancies, with the
-    crystal symmetry taken from the file's own CRYST1 rather than the command
-    line -- this tool is pointed at a deposited structure, which knows its own
-    cell."""
+def read_model(path, log=sys.stdout, special_position_weights=True):
+    """Coordinates, isotropic-equivalent B, elements and symmetry weights, with
+    the crystal symmetry taken from the file's own CRYST1 rather than the
+    command line -- this tool is pointed at a deposited structure, which knows
+    its own cell. The reader is used with its defaults: cctbx reads an atom
+    with occupancy below 1 as a general position, which is what makes the
+    half occupancy stated for an atom on a 2-fold in pre-cctbx depositions
+    come out as one full atom. See model_arrays for what occ holds and what
+    special_position_weights=False does.
+
+    With special_position_weights=False the reader's snapping is off as well
+    (min_distance_sym_equiv=0): a full-occupancy atom near a symmetry element
+    stays where the file put it, with its ANISOU as deposited rather than
+    symmetrized, and counts as a general position, so a complete cell is
+    taken exactly as given, every copy its own. How many atoms the default
+    reader would have moved is printed, so the flag used by mistake on one
+    asymmetric unit is visible."""
     from iotbx.pdb import hierarchy
 
-    from cctbx import adptbx
-
     pdb_in = hierarchy.input(file_name=path, sort_atoms=False)
-    xrs = pdb_in.input.xray_structure_simple()
+    if special_position_weights:
+        xrs = pdb_in.input.xray_structure_simple()
+    else:
+        xrs = pdb_in.input.xray_structure_simple(min_distance_sym_equiv=0.0)
+        # A diagnostic only: the default read can refuse a complete cell
+        # whose symmetry copies crowd a symmetry element ("special position
+        # not well defined"), which is the kind of model this path is for,
+        # so its failure must not take the read with it.
+        try:
+            n_would = special_position_count(pdb_in.input.xray_structure_simple())
+        except RuntimeError as e:
+            print("%s: cctbx's default read, which moves atoms onto special "
+                  "positions, fails on this file (%s); all atoms left where "
+                  "the file has them (special_position_weights=False)"
+                  % (path, str(e).strip()), file=log)
+        else:
+            print("%s: %d atom(s) cctbx would put on special positions left "
+                  "where the file has them, as general positions "
+                  "(special_position_weights=False)" % (path, n_would), file=log)
+    return (xrs,) + model_arrays(xrs, log, name=path,
+                                 special_position_weights=special_position_weights)
+
+
+def special_position_count(xrs):
+    """Scatterers whose site symmetry fixes them: multiplicity below order_z.
+    One with no site symmetry applied (multiplicity 0) is not counted."""
+    order_z = xrs.space_group().order_z()
+    return sum(1 for sc in xrs.scatterers() if 0 < sc.multiplicity() < order_z)
+
+
+def use_special_position_weights(no_special_position_weights, no_expand_symmetry):
+    """The run() rule: cctbx's symmetry weights only when the model is one
+    asymmetric unit that the grid expansion completes. A model placed once
+    (--no-expand-symmetry) or expanded as a fold (--no-special-position-weights)
+    keeps its deposited occupancies."""
+    return not (no_special_position_weights or no_expand_symmetry)
+
+
+def model_arrays(xrs, log=sys.stdout, name="model", special_position_weights=True):
+    """Per-atom arrays from an xray.structure, for build_density: elements,
+    isotropic-equivalent B, occ, fractional coordinates, the ANISOU count,
+    U_cart and the anisotropic mask. Converts xrs to isotropic in place.
+
+    occ is NOT the deposited occupancy. It is cctbx's scatterer weight,
+    occupancy * multiplicity / order_z, the weight cctbx's own direct
+    summation sums with over every operation of the space group. build_density
+    places each atom once and then symmetry-expands the grid under every
+    operation, so an atom on a special position lands on itself
+    order_z / multiplicity times, and the weight is what makes that sum count
+    it once. For an atom on a general position it equals the occupancy.
+
+    special_position_weights=False returns the deposited occupancies instead.
+    That is the right input when the model is NOT expanded (a complete cell
+    placed once, build_density(..., expand_symmetry=False)), and when a
+    complete cell with its space group in CRYST1 is expanded on purpose as
+    a fold, every copy of the asymmetric unit being its own: there each atom
+    must keep its own occupancy, and the expansion scales every atom by the
+    same order_z."""
+    from cctbx import adptbx
 
     # BEFORE convert_to_isotropic, which discards it. u_star is in the
     # fractional reciprocal basis; the kernel measures displacements in
@@ -225,17 +293,45 @@ def read_model(path, log=sys.stdout):
 
     elements = [s.scattering_type for s in xrs.scatterers()]
     b_per_atom = np.array(xrs.extract_u_iso_or_u_equiv()) * (8.0 * np.pi ** 2)
-    occ = np.array(xrs.scatterers().extract_occupancies())
+    raw_occ = np.array(xrs.scatterers().extract_occupancies())
+    n_special = special_position_count(xrs)
+    if special_position_weights:
+        # multiplicity is 0 until site symmetry has been applied
+        # (add_scatterer and xray_structure_simple do; appending to
+        # scatterers() does not), and weight() is then 0 for every atom: an
+        # empty density, not an error. The deposited occupancies below do
+        # not depend on it.
+        n_unset = sum(1 for sc in xrs.scatterers() if sc.multiplicity() == 0)
+        if n_unset:
+            raise ValueError("%s: %d scatterer(s) have no site symmetry applied "
+                             "(multiplicity 0), so their weight is undefined"
+                             % (name, n_unset))
+        occ = np.array([sc.weight() for sc in xrs.scatterers()])
+    else:
+        occ = raw_occ.copy()
+        if n_special:
+            print("%s: deposited occupancies kept for the %d atom(s) on special "
+                  "positions (special_position_weights=False)" % (name, n_special),
+                  file=log)
     frac = np.array(xrs.sites_frac()).reshape(-1, 3)
     # Isotropic scatterers get u_iso * I, which the anisotropic kernel
     # reproduces exactly -- but is_aniso keeps them on the fast path.
     u_cart[~is_aniso] = (np.array(xrs.extract_u_iso_or_u_equiv())[~is_aniso]
                          [:, None, None] * np.eye(3))
 
-    print("%s: %d atoms, B %.1f-%.1f, occupancy %.2f-%.2f, %d with ANISOU"
-          % (path, len(elements), b_per_atom.min(), b_per_atom.max(),
-             occ.min(), occ.max(), n_aniso), file=log)
-    return xrs, elements, b_per_atom, occ, frac, n_aniso, u_cart, is_aniso
+    print("%s: %d atoms, B %.1f-%.1f, occupancy %.2f-%.2f, %d on special "
+          "positions, %d with ANISOU"
+          % (name, len(elements), b_per_atom.min(), b_per_atom.max(),
+             raw_occ.min(), raw_occ.max(), n_special, n_aniso), file=log)
+    return elements, b_per_atom, occ, frac, n_aniso, u_cart, is_aniso
+
+
+def neutral_type(sym):
+    """cctbx's scattering type without its charge suffix: 'O1-' -> 'O',
+    'Zn2+' -> 'Zn', 'C' -> 'C'."""
+    import re
+
+    return re.sub(r"[0-9]*[+-]$", "", sym)
 
 
 def scattering_table(present, log=sys.stdout):
@@ -250,8 +346,6 @@ def scattering_table(present, log=sys.stdout):
     for ('N1+' is one) falls back to the neutral atom, which is what a
     refinement program would do too, and says so.
     """
-    import re
-
     from lunus.sf.elements import it92_coefficients
 
     table, fallback = {}, []
@@ -259,7 +353,7 @@ def scattering_table(present, log=sys.stdout):
         try:
             table[sym] = it92_coefficients([sym], source="cctbx")[sym]
         except (RuntimeError, ValueError):
-            neutral = re.sub(r"[0-9]*[+-]$", "", sym)
+            neutral = neutral_type(sym)
             table[sym] = it92_coefficients([neutral], source="cctbx")[neutral]
             fallback.append("%s -> %s" % (sym, neutral))
     if fallback:
@@ -271,13 +365,18 @@ def scattering_table(present, log=sys.stdout):
 def build_density(xrs, elements, b_per_atom, occ, frac, grid, device, dtype,
                   expand_symmetry, log=sys.stdout, u_cart=None,
                   is_aniso=None, cutoff=0.01):
-    """Splat, then symmetry-expand on the GRID.
+    """Place the density, then symmetry-expand on the GRID.
 
     expand_symmetry is True here and False for a trajectory, and the difference
     is a property of the input model rather than a preference: a deposited PDB
     is one asymmetric unit whose other copies genuinely need generating, while
     an MD box already contains them. Getting it backwards does not raise --
-    it symmetry-averages a model that was already complete.
+    it symmetry-averages a model that was already complete. occ is taken as
+    given: with the expansion it must be the symmetry weight read_model
+    returns, occupancy * multiplicity / order_z, which is what lets the
+    expansion count an atom on a special position once; without it, or for
+    a complete cell expanded as a fold, the deposited occupancy
+    (read_model(..., special_position_weights=False)).
     """
     from lunus.sf.cell_utils import orth_matrix
     from lunus.sf.density_torch import compute_density
@@ -823,6 +922,14 @@ def build_parser():
                         "the scaling model. Default 0, off")
     p.add_argument("--no-expand-symmetry", action="store_true",
                    help="the model already contains every symmetry copy")
+    p.add_argument("--no-special-position-weights", action="store_true",
+                   help="take the model exactly as deposited: occupancies "
+                        "rather than cctbx's symmetry weights (occupancy x "
+                        "multiplicity / order_z), and no atom moved onto a "
+                        "symmetry element or its ANISOU symmetrized. For a "
+                        "complete cell with its space group in CRYST1 that is "
+                        "expanded as a fold, every copy of the asymmetric unit "
+                        "being its own. Implied by --no-expand-symmetry")
     p.add_argument("--shells", type=int, default=10)
     return p
 
@@ -850,7 +957,8 @@ def run(args):
     print("=" * 78)
 
     xrs, elements, b_per_atom, occ, frac, n_aniso, u_cart, is_aniso = \
-        read_model(args.pdb)
+        read_model(args.pdb, special_position_weights=use_special_position_weights(
+            args.no_special_position_weights, args.no_expand_symmetry))
     F_obs_array, free_np = read_observations(
         args.cif, d_min=args.d_min, crystal_symmetry=xrs.crystal_symmetry())
     d_np = np.array(F_obs_array.d_spacings().data())

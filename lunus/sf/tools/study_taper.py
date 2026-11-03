@@ -135,6 +135,7 @@ def load_system(pdb, d_min, device, dtype, log, free="all", select="all",
     reflection list to d_min, which atoms exist and which are free to move."""
     from cctbx import miller
     from iotbx.pdb import hierarchy
+    from scitbx.array_family import flex
 
     xrs, elements, b_per_atom, occ, frac, _, _, _ = read_model(pdb, log)
     cache = hierarchy.input(file_name=pdb, sort_atoms=False).hierarchy \
@@ -145,20 +146,40 @@ def load_system(pdb, d_min, device, dtype, log, free="all", select="all",
     if select != "all":
         if not keep_np.any():
             raise SystemExit("--select %r keeps no atoms" % select)
-        from scitbx.array_family import flex
         xrs = xrs.select(flex.bool(keep_np.tolist()))
         elements = [e for e, k in zip(elements, keep_np) if k]
         b_per_atom, occ, frac = b_per_atom[keep_np], occ[keep_np], frac[keep_np]
         free_np = free_np[keep_np]
         print("%d of %d atoms kept (--select %r)"
               % (keep_np.sum(), len(keep_np), select), file=log)
+    # --b-iso and --occ-one are written back into xrs as well, so that
+    # --target exact (direct summation over xrs's scatterers) sums the same
+    # model the torch engine is built from.
     if b_iso is not None:
         b_per_atom = np.full_like(b_per_atom, b_iso)
+        xrs.set_b_iso(value=b_iso)
         print("every B set to %.1f A^2 (--b-iso)" % b_iso, file=log)
     if occ_one:
-        print("%d atoms with occupancy < 1 set to 1 (--occ-one)"
-              % int((occ < 1.0).sum()), file=log)
-        occ = np.ones_like(occ)
+        # occ is the symmetry weight (read_model), so "occupancy 1" is
+        # multiplicity / order_z per atom, not 1: plain ones would count an
+        # atom on a special position order_z / multiplicity times. The
+        # multiplicity comes from the site's own symmetry rather than from
+        # the scatterer, whose weight_without_occupancy() is 1 for an atom
+        # cctbx read as general only because its occupancy was below 1 (the
+        # half occupancy of the pre-cctbx convention): that atom is on the
+        # axis all the same, and a weight of 1 there would double it.
+        order_z = xrs.space_group().order_z()
+        weight_one = np.array([xrs.site_symmetry(sc.site).multiplicity() / order_z
+                               for sc in xrs.scatterers()])
+        print("%d atoms set to occupancy 1 (--occ-one)"
+              % int((np.abs(occ - weight_one) > 1e-9).sum()), file=log)
+        occ = weight_one
+        # The scatterer occupancy that makes sc.weight() equal weight_one:
+        # 1 for an atom cctbx classified itself, and the deposited 0.5 for
+        # one it read as general on the axis, which its direct summation
+        # already counts as one full atom.
+        xrs.set_occupancies(flex.double((weight_one / np.array(
+            [sc.weight_without_occupancy() for sc in xrs.scatterers()])).tolist()))
     if not free_np.any():
         raise SystemExit("--free %r selects no atoms" % free)
     print("%d of %d atoms free to move (--free %r)"
@@ -484,7 +505,12 @@ def build_parser():
     p.add_argument("--occ-one", action="store_true",
                    help="set every kept atom's occupancy to 1, so a model "
                         "reduced to one conformer by --select is a proper "
-                        "single-conformer model rather than a half-weight one")
+                        "single-conformer model rather than a half-weight one. "
+                        "An atom on a special position keeps its symmetry "
+                        "weight (multiplicity / order_z); one deposited at "
+                        "half occupancy on an axis, which cctbx reads as a "
+                        "general atom, becomes one full atom's worth at its "
+                        "site, not two")
     p.add_argument("--b-iso", type=float, default=None,
                    help="override every atom's B with this value, A^2 (for "
                         "testing how the B distribution affects convergence)")
