@@ -7,9 +7,7 @@ and cctbx's direct summations use:
     (optionally: F(hkl) *= exp(blur * 0.25 * inv_d2)  -- undoes gemmi's blur)
 
 ifftn already carries the +2 pi i sign (and the 1/N that, with the volume,
-makes the Riemann sum an integral), so nothing is conjugated: an earlier
-version conjugated here, copying xtraj.py's gemmi engine, and returned
-F(-hkl), i.e. every phase with its sign flipped.
+makes the Riemann sum an integral), so nothing is conjugated.
 
 torch.fft.ifftn is a standard differentiable linear operator, so this
 composes with density_torch.compute_density to give end-to-end gradients

@@ -2074,9 +2074,7 @@ EOF
           # no Friedel mate is involved and nothing is conjugated. ifftn
           # already carries the +2 pi i sign of
           # F(hkl) = integral rho exp(+2 pi i h.r), the convention cctbx's
-          # direct summation (engine=cctbx) uses. An earlier version
-          # conjugated here and returned F(-hkl), every phase with its sign
-          # flipped.
+          # direct summation (engine=cctbx) uses.
           u = h % Nu
           v = k % Nv
           w = l % Nw
