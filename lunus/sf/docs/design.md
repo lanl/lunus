@@ -216,11 +216,13 @@ model held 109 B/C/D conformers in place of A atoms. They read 0.147 /
    wider basin was tested and is wrong: setting every 7FPV B to 55 Å²
    makes the refinement worse, since broader atoms carry less information
    at 2 Å. Nor is it resolution: with the alternates in, 7FPV converges
-   from a 0.15 Å displacement at 2 Å (0.040 Å) and from 0.3 Å at 1.2 Å
-   (0.069 Å), which are statements about how far the degenerate
-   directions let it drift, not about the basin of a well-posed problem.
-   (Those two figures predate the 2026-11-03 `--select` fix described
-   below the table and have not been re-measured.)
+   from a 0.15 Å displacement at 2 Å (0.024 / 0.023 Å, hard / taper) and
+   from 0.3 Å at 1.2 Å (0.033 / 0.033 Å), which are statements about how
+   far the degenerate directions let it drift, not about the basin of a
+   well-posed problem. (Re-measured on CUDA on 2026-11-03 after the
+   `--select` fix, at the 1e-4 cutoff, `lbfgs_7fpv_heavy_d0p15_fixed.json`
+   and `lbfgs_7fpv_1p2_heavy_fixed.json`; before it they read 0.040 and
+   0.069 Å.)
 
 With the single-conformer heavy-atom model (1,270 atoms, `--occ-one`
 restoring the 220 kept A conformers to full occupancy), 11,011 reflections

@@ -48,15 +48,10 @@ dispatch rather than execution.
 """
 
 import argparse
-import os
-import sys
 import time
 
 import numpy as np
 import torch
-
-# tools/ is not a package; the selection helper lives next door.
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
 def load_structure(path, cell, space_group, selection_text):
@@ -77,7 +72,7 @@ def load_structure(path, cell, space_group, selection_text):
     # The scatterers are in file order; the hierarchy's atoms are grouped by
     # altloc, so its selection must be mapped back (a no-op for an MD box
     # with no altlocs, but not for 7FPV, whose altlocs are interleaved).
-    from fit_solvent_rfactor import selection_in_file_order
+    from lunus.sf.atom_order import selection_in_file_order
     from scitbx.array_family import flex
     sel = selection_in_file_order(pdb_in, selection_text)
     xrs = xrs.select(flex.bool(sel.tolist()))
