@@ -185,17 +185,19 @@ iterations, CPU checks on 2026-10-31):
 | free atoms | hard cutoff | taper 0.1 Å |
 |---|---|---|
 | every deposited atom (3,341; 1,527 are H, ∼350 water) | 0.250 Å | 0.283 Å |
-| heavy protein atoms (1,523), alternates included | 0.147 Å, line search failed\* | 0.158 Å, drifting\* |
+| heavy protein atoms (1,523), alternates included | 0.088 Å, stopped early (lowest 0.083) | 0.094 Å, drifting from 0.083 |
 | heavy protein atoms, alternates B/C/D excluded (1,270) | **0.019 Å** | **0.017 Å** |
-| heavy protein atoms with every B set to 55 Å² | 0.194 Å, failed\* | 0.345 Å, drifting\* |
+| heavy protein atoms with every B set to 55 Å² | 0.135 Å, stopped early (lowest 0.130) | 0.173 Å, drifting from 0.129 |
 
-\* Measured with `--select` applied in the hierarchy's atom order rather
-than the scatterers' file order, a bug fixed on 2026-11-03: the 1,523-atom
-"heavy protein" model held about 194 hydrogens and some water in place of
-heavy protein atoms (388 of 1,523 atoms wrong). Not yet re-measured. The
-1,270-atom row is the corrected run, from `lbfgs_7fpv_single_fixed.json`
-below (CUDA, 2026-11-03); before the fix it read 0.040 / 0.041 Å on a model
-holding 109 B/C/D conformers in place of A atoms.
+The three heavy-atom rows were re-measured on CUDA on 2026-11-03
+(`lbfgs_7fpv_heavy_fixed.json`, `lbfgs_7fpv_heavy_b55_fixed.json`, and the
+1e-4 entries of `lbfgs_7fpv_single_fixed.json` below) after a fix to
+`--select`, which had been applied in the hierarchy's atom order rather
+than the scatterers' file order. The earlier CPU checks ran on the wrong
+atoms: the 1,523-atom model held about 194 hydrogens and some water in
+place of heavy protein atoms (388 of 1,523 atoms wrong), and the 1,270-atom
+model held 109 B/C/D conformers in place of A atoms. They read 0.147 /
+0.158, 0.040 / 0.041 and 0.194 / 0.345 Å.
 
 1. **Hydrogens out.** The amplitudes barely constrain a hydrogen, so free
    hydrogens drift and, at 46% of the atoms, dominate the rmsd. They do
@@ -217,6 +219,8 @@ holding 109 B/C/D conformers in place of A atoms.
    from a 0.15 Å displacement at 2 Å (0.040 Å) and from 0.3 Å at 1.2 Å
    (0.069 Å), which are statements about how far the degenerate
    directions let it drift, not about the basin of a well-posed problem.
+   (Those two figures predate the 2026-11-03 `--select` fix described
+   below the table and have not been re-measured.)
 
 With the single-conformer heavy-atom model (1,270 atoms, `--occ-one`
 restoring the 220 kept A conformers to full occupancy), 11,011 reflections
