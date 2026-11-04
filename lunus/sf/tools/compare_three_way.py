@@ -46,12 +46,76 @@ import numpy as np
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from fit_solvent_rfactor import read_model, scattering_table  # noqa: E402
+from fit_solvent_rfactor import neutral_type, read_model, scattering_table  # noqa: E402
 
 
 def r_factor(a, ref):
     k = (a * ref).sum() / (a * a).sum()
     return float(np.abs(k * a - ref).sum() / ref.sum())
+
+
+def match_atoms_by_position(frac_a, elements_a, frac_b, elements_b, orth,
+                            tol=0.01):
+    """Index into (frac_b, elements_b) of each atom of (frac_a, elements_a):
+    the nearest unused scatterer of the same element, across cell
+    boundaries, with orth (3x3, fractional -> Cartesian) giving distances in
+    angstroms. Greedy, so atoms at identical coordinates (coincident altloc
+    records) pair off with each other instead of both claiming one
+    scatterer; which of two coincident same-element atoms gets which (B,
+    weight) pair does not change the density. Raises if any atom has no
+    partner of its element within tol angstroms -- two different atom sets
+    of equal size must not pair silently. Both sides should be FILE
+    coordinates (gemmi's, and file_fractionals: cctbx's read of the same
+    file with its snapping off, in scatterer order), which agree to float
+    precision, so tol is tight. cctbx
+    moves a full-occupancy atom near a special position onto the exact site,
+    by more than min_distance_sym_equiv where symmetry elements intersect,
+    so matching against the snapped scatterer sites would need a tolerance
+    with no safe bound. Element names are compared with cctbx's charge suffix
+    stripped ('Ca2+' matches 'Ca')."""
+    frac_a = np.asarray(frac_a, dtype=float).reshape(-1, 3)
+    frac_b = np.asarray(frac_b, dtype=float).reshape(-1, 3)
+    orth = np.asarray(orth, dtype=float)
+    bare_a = [neutral_type(e) for e in elements_a]
+    bare_b = np.array([neutral_type(e) for e in elements_b])
+    # The scatterers of each element, found once; each atom then searches
+    # only its own element's subset rather than masking the whole set.
+    candidates = {bare: np.flatnonzero(bare_b == bare) for bare in set(bare_a)}
+    used = np.zeros(len(frac_b), dtype=bool)
+    order = []
+    for f, el, bare in zip(frac_a, elements_a, bare_a):
+        idx = candidates[bare]
+        delta = frac_b[idx] - f
+        delta -= np.round(delta)          # minimum image, so no wrap is needed
+        dist = np.linalg.norm(delta @ orth.T, axis=1)
+        dist[used[idx]] = np.inf
+        k = int(np.argmin(dist)) if len(dist) else -1
+        if k < 0 or not dist[k] < tol:
+            raise ValueError("no unused %s scatterer within %g A of fractional %s"
+                             % (el, tol, np.round(f, 4).tolist()))
+        j = int(idx[k])
+        order.append(j)
+        used[j] = True
+    return order
+
+
+def file_fractionals(path):
+    """The file's own coordinates in scatterer order, as fractionals -- what
+    gemmi's atoms are matched against. Read by cctbx's own reader with its
+    snapping off (min_distance_sym_equiv=0, as read_model's
+    special_position_weights=False does), so every site is the file's, not
+    one cctbx moved onto a special position, and in the order the
+    scatterers are in. Fractionalizing the file's Cartesian coordinates
+    with the CRYST1 matrix would not do: xray_structure_simple and gemmi
+    both fractionalize through the file's SCALE records when those are
+    present, and on a file whose SCALE frame differs from the CRYST1
+    orthogonalization every atom would sit a rotation away from its
+    partner."""
+    from iotbx.pdb import hierarchy
+
+    xrs = hierarchy.input(file_name=path, sort_atoms=False).input \
+        .xray_structure_simple(min_distance_sym_equiv=0.0)
+    return np.array(xrs.sites_frac()).reshape(-1, 3)
 
 
 def main():
@@ -94,11 +158,30 @@ def main():
     print("%s: %d atoms (isotropic), %d reflections to %.2f A; direct summation %.1f s"
           % (args.pdb, len(elements), len(hkl), args.d_min, time.time() - t0))
 
+    cell = xrs.unit_cell().parameters()
+    M = orth_matrix(*cell)
+
     st = gemmi.read_structure(args.pdb)
     atoms = [cra.atom for cra in st[0].all()]
     assert len(atoms) == len(elements), "gemmi and cctbx read different atom counts"
-    for a, bb in zip(atoms, b):
-        a.b_iso = float(bb)
+    # cctbx (sort_atoms=False) keeps the file's atom order; gemmi walks chain
+    # by chain, so a chain's ions and waters listed after a later chain (1CM1:
+    # 142 of 1321 atoms) come earlier for gemmi. Match each gemmi atom to its
+    # cctbx scatterer by FILE coordinates (the hierarchy's, in scatterer
+    # order; the scatterer sites themselves may have been moved onto special
+    # positions) before handing it cctbx's site, B and weight. gemmi, like
+    # lunus.sf, places each atom once and symmetrizes the grid, so it too
+    # needs the symmetry weight read_model returns (occupancy times
+    # multiplicity / order_z), not the file's occupancy, for an atom on a
+    # special position to be counted once -- and the exact site cctbx moved
+    # that atom to, or gemmi sums an off-axis atom with its image.
+    order = match_atoms_by_position(
+        [st.cell.fractionalize(a.pos).tolist() for a in atoms],
+        [a.element.name for a in atoms], file_fractionals(args.pdb), elements, M)
+    for a, j in zip(atoms, order):
+        a.pos = st.cell.orthogonalize(gemmi.Fractional(*frac[j]))
+        a.b_iso = float(b[j])
+        a.occ = float(occ[j])
         a.aniso = gemmi.SMat33f(0, 0, 0, 0, 0, 0)
 
     def gemmi_F(cutoff):
@@ -112,8 +195,6 @@ def main():
         G = np.fft.ifftn(rho) * st.cell.volume
         return np.abs(G[hkl[:, 0] % grid[0], hkl[:, 1] % grid[1], hkl[:, 2] % grid[2]]), grid, calc
 
-    cell = xrs.unit_cell().parameters()
-    M = orth_matrix(*cell)
     present = sorted(set(elements))
     coeffs = scattering_table(present, null)
     grid_ops_cache = {}
