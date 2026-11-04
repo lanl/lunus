@@ -38,6 +38,8 @@ MPI notes.
 # and so the public surface is a deliberate list rather than whatever the
 # submodules happen to define.
 _EXPORTS = {
+    # atom order at the iotbx boundary (numpy only)
+    "selection_in_file_order": "atom_order",
     # cell geometry and grid sizing (numpy only)
     "orth_matrix": "cell_utils",
     "reciprocal_inv_d2": "cell_utils",

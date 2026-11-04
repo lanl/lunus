@@ -232,30 +232,6 @@ def use_special_position_weights(no_special_position_weights, no_expand_symmetry
     return not (no_special_position_weights or no_expand_symmetry)
 
 
-def selection_in_file_order(pdb_in, selection_text):
-    """An iotbx atom selection as a boolean mask in FILE order, the order
-    xray_structure_simple's scatterers (and so read_model's arrays) are in.
-
-    pdb_in is an iotbx.pdb hierarchy.input. Its hierarchy groups atoms by
-    altloc within each residue, so on a file whose altlocs are interleaved
-    atom by atom (7FPV) the hierarchy's order is not the file's, and a mask
-    from atom_selection_cache() applied to the scatterers lands on the wrong
-    atoms. The hierarchy's i_seq does not help: it is the hierarchy's own
-    order. The hierarchy's atoms are the input's own atom objects, reordered,
-    so each is matched to its file record by identity (memory_id). Labels
-    would not do: an MD box repeats them (the compare_gemmi box has 21,690
-    duplicates once water residue numbers wrap)."""
-    file_atoms = pdb_in.input.atoms()
-    where = {a.memory_id(): i for i, a in enumerate(file_atoms)}
-    perm = np.array([where[a.memory_id()] for a in pdb_in.hierarchy.atoms()],
-                    dtype=int)
-    in_hierarchy_order = np.array(
-        pdb_in.hierarchy.atom_selection_cache().selection(selection_text), dtype=bool)
-    mask = np.zeros(len(file_atoms), dtype=bool)
-    mask[perm[in_hierarchy_order]] = True
-    return mask
-
-
 def model_arrays(xrs, log=sys.stdout, name="model", special_position_weights=True):
     """Per-atom arrays from an xray.structure, for build_density: elements,
     isotropic-equivalent B, occ, fractional coordinates, the ANISOU count,

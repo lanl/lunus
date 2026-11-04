@@ -94,6 +94,7 @@ python ../../tools/compare_icalc_mtz.py icalc_gemmi.mtz icalc_torch.mtz
 |---|---|
 | `elements.py` | Reads IT92 neutral-atom Cromer-Mann coefficients from gemmi or cctbx at run time. Stores no table of its own, so any element those libraries know works without a code change. |
 | `kernel.py` | The real-space density kernel: reciprocal-space coefficients + effective B → the 5-Gaussian real-space form, derived from the closed-form Fourier transform of the Cromer-Mann sum (derivation in the module docstring). Also the per-atom (batched) variants. |
+| `atom_order.py` | `selection_in_file_order()`: an iotbx atom selection as a mask in file order, the order `xray_structure_simple()`'s scatterers and an MD trajectory's rows are in. iotbx's hierarchy groups altlocs within a residue, so its own mask lands on the wrong atoms of a file whose altlocs are interleaved. numpy only; the iotbx object is passed in. Used by `xtraj.py` and the tools. |
 | `cell_utils.py` | Orthogonalization matrix, 1/d², grid-size-from-resolution (matches gemmi's `requested_grid_spacing() = d_min / (2*rate)`). |
 | `density_torch.py` | The differentiable density calculation. Grouped by element, batched by atom-voxel PAIRS, restricted to the cutoff sphere rather than its bounding cube, with the hot blocks factored for `torch.compile` fusion. |
 | `kernel_torch.py` | Builds per-element or per-atom (A, lam, radius) as torch tensors. Not differentiated — B and blur are fixed hyperparameters. |

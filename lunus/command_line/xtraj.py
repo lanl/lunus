@@ -1040,17 +1040,66 @@ if __name__=="__main__":
 
 # read .pdb file. It's used as a template, so don't sort it.
 
+  # The selection is built on the hierarchy, whose atom order groups altlocs,
+  # but applied to scatterers and trajectory rows in file order;
+  # selection_in_file_order maps it. It matches atoms by object identity,
+  # which a pickled copy does not keep, so it runs on rank 0 before the
+  # broadcast. The two atom counts are for the check below. Any error on rank
+  # 0 is broadcast as text -- iotbx's selection errors cannot be pickled --
+  # so that every rank stops instead of waiting in a broadcast.
+  pdb_in = selection_mask = n_atoms_cctbx = n_atoms_mdtraj = None
+  setup_error = None
   if mpi_rank == 0:
-    pdb_in = hierarchy.input(file_name=top_file,sort_atoms=False)
+    try:
+      pdb_in = hierarchy.input(file_name=top_file,sort_atoms=False)
+      n_atoms_cctbx = pdb_in.input.atoms().size()
+      # For an mmCIF topology cctbx builds the scatterers in the hierarchy's
+      # altloc-grouped order while mdtraj reads the file's, so with altloc
+      # labels present the two are different atoms even when the counts
+      # agree. Refuse it, as for a PDB with alternates below.
+      if (pdb_in.input.file_type() == "mmcif" and
+          any(ag.altloc.strip() for ag in pdb_in.hierarchy.atom_groups())):
+        raise ValueError(
+          "xtraj: the mmCIF topology %s carries altloc labels; cctbx and "
+          "mdtraj order such atoms differently. Remove the alternates and "
+          "the altloc labels, or use a PDB topology." % top_file)
+      if selection_text.strip() == "all":
+        # The default needs no mapping, and so no lunus.sf import (see the
+        # note on deferred imports at the top of this file).
+        selection_mask = np.ones(n_atoms_cctbx, dtype=bool)
+      else:
+        from lunus.sf.atom_order import selection_in_file_order
+        selection_mask = selection_in_file_order(pdb_in, selection_text)
+      n_atoms_mdtraj = md.load_topology(top_file).n_atoms
+    except Exception as e:
+      if not mpi_enabled():
+        raise
+      setup_error = "%s: %s" % (type(e).__name__, e)
+      pdb_in = None
 
   if mpi_enabled():
     if mpi_rank == 0:
       pdb_bytes = pickle.dumps(pdb_in, protocol=4)
     else:
       pdb_bytes = None
-    pdb_bytes = mpi_comm.bcast(pdb_bytes,root=0)
+    pdb_bytes, setup_error, selection_mask, n_atoms_cctbx, n_atoms_mdtraj = mpi_comm.bcast(
+      (pdb_bytes, setup_error, selection_mask, n_atoms_cctbx, n_atoms_mdtraj), root=0)
     if mpi_rank != 0:
       pdb_in = pickle.loads(pdb_bytes)
+    if setup_error is not None:
+      raise SystemExit("xtraj: reading the topology %s failed on rank 0: %s"
+                       % (top_file, setup_error))
+
+  # mdtraj keeps only the first conformer of each atom; cctbx keeps them all.
+  # With alternate conformers in the topology the trajectory's rows and the
+  # scatterers are then different atoms, and every engine would compute from
+  # mismatched coordinates (the torch engine silently). Refuse instead.
+  if n_atoms_mdtraj != n_atoms_cctbx:
+    raise SystemExit(
+      "xtraj: the topology %s has %d atom records but mdtraj reads %d atoms "
+      "from it. The usual cause is alternate conformers, which mdtraj drops "
+      "(more than one MODEL is another): remove the alternates (keep one "
+      "conformer) and use the same topology for the trajectory." % (top_file, n_atoms_cctbx, n_atoms_mdtraj))
 
 # MEW use cctbx.xray.structure.customized_copy() here to change the unit cell and space group as needed
   symm = pdb_in.input.crystal_symmetry()
@@ -1066,8 +1115,7 @@ if __name__=="__main__":
   xrs = pdb_in.input.xray_structure_simple(crystal_symmetry=crystal.symmetry(unit_cell=unit_cell,space_group_info=space_group_info))
 
   space_group_str = str(space_group_info).replace(" ","")
-  selection_cache = pdb_in.hierarchy.atom_selection_cache()
-  selection = selection_cache.selection(selection_text)
+  selection = flex.bool(selection_mask.tolist())
   xrs.convert_to_isotropic()
   if apply_bfac:
     xrs.set_b_iso(20.0*d_min*d_min)

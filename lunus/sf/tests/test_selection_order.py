@@ -18,7 +18,6 @@ import pytest
 from conftest import REPO_ROOT
 
 pytest.importorskip("cctbx")
-torch = pytest.importorskip("torch")
 
 TOOLS = os.path.join(REPO_ROOT, "lunus", "sf", "tools")
 if TOOLS not in sys.path:
@@ -45,7 +44,7 @@ def write(tmp_path):
 
 
 def test_selection_in_file_order(tmp_path):
-    from fit_solvent_rfactor import selection_in_file_order
+    from lunus.sf.atom_order import selection_in_file_order
     from iotbx.pdb import hierarchy
 
     pdb_in = hierarchy.input(file_name=write(tmp_path), sort_atoms=False)
@@ -61,6 +60,7 @@ def test_selection_in_file_order(tmp_path):
 def test_study_taper_selects_the_named_conformer(tmp_path):
     """Through load_system: --select keeps N, CB A and OG A (not CB B), and
     --free marks OG A among the kept atoms."""
+    torch = pytest.importorskip("torch")
     from study_taper import load_system
 
     s = load_system(write(tmp_path), 3.0, "cpu", torch.float64, io.StringIO(),
@@ -77,7 +77,7 @@ def test_selection_survives_repeated_labels(tmp_path):
     """An MD box repeats atom labels once residue numbers wrap (the
     compare_gemmi box has 21,690 duplicates); the mapping must not depend on
     labels being unique."""
-    from fit_solvent_rfactor import selection_in_file_order
+    from lunus.sf.atom_order import selection_in_file_order
     from iotbx.pdb import hierarchy
 
     path = tmp_path / "repeats.pdb"
@@ -92,3 +92,43 @@ END
     np.testing.assert_array_equal(selection_in_file_order(pdb_in, "water"),
                                   [True, True, False])
     np.testing.assert_array_equal(selection_in_file_order(pdb_in, "all"), [True] * 3)
+
+
+def test_selection_after_a_pickled_copy_says_why(tmp_path):
+    """xtraj broadcasts its hierarchy.input by pickling it, and a pickled copy
+    no longer shares atoms between the file records and the hierarchy. The
+    mapping must say so, not fail with a bare KeyError: xtraj computes it
+    before the broadcast for this reason."""
+    import pickle
+
+    from iotbx.pdb import hierarchy
+    from lunus.sf.atom_order import selection_in_file_order
+
+    pdb_in = hierarchy.input(file_name=write(tmp_path), sort_atoms=False)
+    copy = pickle.loads(pickle.dumps(pdb_in, protocol=4))
+    with pytest.raises(ValueError, match="compute the selection before copying"):
+        selection_in_file_order(copy, ONE_CONFORMER)
+
+
+def test_selection_permutation_direction(tmp_path):
+    """A reordering that is not its own inverse, so the two directions of the
+    file/hierarchy permutation give different masks: file order N, CB A, C,
+    OG A, O; hierarchy order N, C, O, CB, OG."""
+    from iotbx.pdb import hierarchy
+    from lunus.sf.atom_order import selection_in_file_order
+
+    path = tmp_path / "cycle.pdb"
+    path.write_text("""\
+CRYST1   20.000   24.000   28.000  90.00  90.00  90.00 P 1
+ATOM      1  N   SER A   1       2.000   3.000   4.000  1.00 20.00           N
+ATOM      2  CB ASER A   1       3.000   3.000   4.000  1.00 20.00           C
+ATOM      3  C   SER A   1       5.000   7.000   9.000  1.00 20.00           C
+ATOM      4  OG ASER A   1       3.000   4.400   4.000  1.00 20.00           O
+ATOM      5  O   SER A   1       6.000   8.000  11.000  1.00 20.00           O
+END
+""")
+    pdb_in = hierarchy.input(file_name=str(path), sort_atoms=False)
+    np.testing.assert_array_equal(selection_in_file_order(pdb_in, "name CB"),
+                                  [False, True, False, False, False])
+    np.testing.assert_array_equal(selection_in_file_order(pdb_in, "name O"),
+                                  [False, False, False, False, True])
