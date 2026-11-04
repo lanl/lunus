@@ -185,9 +185,17 @@ iterations, CPU checks on 2026-10-31):
 | free atoms | hard cutoff | taper 0.1 Å |
 |---|---|---|
 | every deposited atom (3,341; 1,527 are H, ∼350 water) | 0.250 Å | 0.283 Å |
-| heavy protein atoms (1,523), alternates included | 0.147 Å, line search failed | 0.158 Å, drifting |
-| heavy protein atoms, alternates B/C/D excluded (1,270) | **0.040 Å** | **0.041 Å** |
-| heavy protein atoms with every B set to 55 Å² | 0.194 Å, failed | 0.345 Å, drifting |
+| heavy protein atoms (1,523), alternates included | 0.147 Å, line search failed\* | 0.158 Å, drifting\* |
+| heavy protein atoms, alternates B/C/D excluded (1,270) | **0.019 Å** | **0.017 Å** |
+| heavy protein atoms with every B set to 55 Å² | 0.194 Å, failed\* | 0.345 Å, drifting\* |
+
+\* Measured with `--select` applied in the hierarchy's atom order rather
+than the scatterers' file order, a bug fixed on 2026-11-03: the 1,523-atom
+"heavy protein" model held about 194 hydrogens and some water in place of
+heavy protein atoms (388 of 1,523 atoms wrong). Not yet re-measured. The
+1,270-atom row is the corrected run, from `lbfgs_7fpv_single_fixed.json`
+below (CUDA, 2026-11-03); before the fix it read 0.040 / 0.041 Å on a model
+holding 109 B/C/D conformers in place of A atoms.
 
 1. **Hydrogens out.** The amplitudes barely constrain a hydrogen, so free
    hydrogens drift and, at 46% of the atoms, dominate the rmsd. They do
@@ -213,22 +221,29 @@ iterations, CPU checks on 2026-10-31):
 With the single-conformer heavy-atom model (1,270 atoms, `--occ-one`
 restoring the 220 kept A conformers to full occupancy), 11,011 reflections
 against 3,810 coordinates, 2.9 per parameter, the box's ratio
-(`lbfgs_7fpv_single.json`):
+(`lbfgs_7fpv_single_fixed.json`, 2026-11-03):
 
 | cutoff | width | final rmsd (Å) | final loss | iterations of 300 |
 |---|---|---|---|---|
-| 1e-2 | hard | 0.034 | 5.4e-6 | 141, line search failed, after converging |
-| 1e-2 | 0.1 | 0.042 | 6.9e-5 | 300 |
-| 1e-3 | hard | 0.038 | 3.9e-5 | 165, line search failed, after converging |
-| 1e-3 | 0.1 | 0.036 | 3.0e-5 | 300 |
-| 1e-4 | hard | 0.040 | 6.5e-5 | 244, line search failed, after converging |
-| 1e-4 | 0.1 | 0.034 | 2.5e-5 | 300 |
+| 1e-2 | hard | 0.020 | 5.9e-5 | 155, stopped early |
+| 1e-2 | 0.1 | 0.009 | 1.4e-5 | 300 |
+| 1e-3 | hard | 0.009 | 1.2e-5 | 164, stopped early |
+| 1e-3 | 0.1 | 0.017 | 3.9e-5 | 253, stopped early |
+| 1e-4 | hard | 0.019 | 5.5e-5 | 174, stopped early |
+| 1e-4 | 0.1 | 0.017 | 3.9e-5 | 300 |
 
-Every run reaches 0.034 to 0.042 Å, with or without the taper, at every
-cutoff. The hard-cutoff runs do end on failed line searches, but at
-iteration 141 to 244, by which point their rmsd had stopped moving: the
-failure is the optimizer finding no descent direction on a kinked surface
-at the minimum, not a failure to reach it. The earlier 7FPV tables, at 2 Å
+Every run reaches 0.009 to 0.020 Å, with or without the taper, at every
+cutoff. Four runs stop early, the three hard-cutoff runs and the taper at
+1e-3, at iteration 155 to 253. Three of those had stopped moving first
+(by less than 0.001 Å over their last 40 records): the stop is the
+optimizer finding no descent direction near the minimum, not a failure to
+reach it. The exception is the hard cutoff at 1e-2, still improving when it
+stopped at 0.020 Å, the coarsest cutoff without the taper.
+
+These numbers replace a run of 2026-10-31 (`lbfgs_7fpv_single.json`) whose
+`--select` was applied in the wrong atom order, so its "single-conformer"
+model held 109 B/C/D conformers and 111 A conformers in place of the 220
+A conformers; that model reached 0.034 to 0.042 Å. The earlier 7FPV tables, at 2 Å
 with everything free (`lbfgs_7fpv.json`) and at 1.2 Å with and without
 the alternates (`lbfgs_7fpv_1p2*.json`), are superseded.
 
