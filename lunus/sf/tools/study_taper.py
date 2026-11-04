@@ -108,7 +108,8 @@ import torch
 
 # tools/ is not a package; the model reader lives next door.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from fit_solvent_rfactor import read_model, scattering_table  # noqa: E402
+from fit_solvent_rfactor import (read_model, scattering_table,  # noqa: E402
+                                 selection_in_file_order)
 
 from lunus.sf.cell_utils import (grid_shape_for_resolution, orth_matrix,  # noqa: E402
                                  reciprocal_inv_d2)
@@ -138,10 +139,11 @@ def load_system(pdb, d_min, device, dtype, log, free="all", select="all",
     from scitbx.array_family import flex
 
     xrs, elements, b_per_atom, occ, frac, _, _, _ = read_model(pdb, log)
-    cache = hierarchy.input(file_name=pdb, sort_atoms=False).hierarchy \
-        .atom_selection_cache()
-    keep_np = np.array(cache.selection(select), dtype=bool)
-    free_np = np.array(cache.selection(free), dtype=bool)
+    # Masks in file order, the order read_model's arrays are in -- not the
+    # hierarchy's, which groups altlocs (selection_in_file_order).
+    pdb_in = hierarchy.input(file_name=pdb, sort_atoms=False)
+    keep_np = selection_in_file_order(pdb_in, select)
+    free_np = selection_in_file_order(pdb_in, free)
     assert len(keep_np) == len(elements) == len(free_np)
     if select != "all":
         if not keep_np.any():
@@ -199,7 +201,6 @@ def load_system(pdb, d_min, device, dtype, log, free="all", select="all",
     hkl_np = np.array(list(ms.indices()), dtype=np.int64).reshape(-1, 3)
     keep = np.any(hkl_np != 0, axis=1)
     hkl_np = hkl_np[keep]
-    from scitbx.array_family import flex
     ms = ms.select(flex.bool(keep.tolist()))
 
     spacing = min(np.linalg.norm(M_np[:, i]) / grid[i] for i in range(3))
