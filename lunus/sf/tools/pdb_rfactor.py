@@ -131,6 +131,10 @@ def main():
                         "as mmtbx scales, beside the single-scale one; it "
                         "shows how much of a gap to mmtbx is the scaling "
                         "model. 0 omits it (default: 20)")
+    p.add_argument("--select", default="all", metavar="SEL",
+                   help="an iotbx atom selection applied to the model for "
+                        "BOTH methods, e.g. \"not element H\" to drop "
+                        "deposited hydrogens (default: all atoms)")
     p.epilog = ("Anything else -- after a bare '--' to be safe -- is passed "
                 "through to fit_solvent_rfactor.py: --mask gemmi, --device, "
                 "--mask-blur, --reference, ...")
@@ -148,6 +152,8 @@ def main():
             argv.append("--aniso-adp")
         if not args.iso_scale:
             argv.append("--aniso")
+        if args.select != "all":
+            argv += ["--select", args.select]
         argv += passthrough
         if args.binned_row:
             argv += ["--also-scale-bins", str(args.binned_row)]
@@ -166,22 +172,25 @@ def main():
             rows.append(("torch, %d scale bins" % r["scale_bins"],
                          r["R-work binned"], r["R-free binned"],
                          r["k_sol binned"], r["b_sol binned"]))
-        n_work, n_free = r["n_work"], r["n_free"]
+        n_work, n_free, n_atoms = r["n_work"], r["n_free"], r["n_atoms"]
     if args.method in ("mmtbx", "both"):
         if passthrough:
             print("\nnote: %s apply to the torch method only"
                   % " ".join(passthrough))
         r = fit_solvent_rfactor.mmtbx_fit(model, sf, args.d_min,
-                                          isotropic=not args.aniso_adp)
+                                          isotropic=not args.aniso_adp,
+                                          select=args.select)
         rows.append(("mmtbx.f_model", r["R-work"], r["R-free"], r["k_sol"],
                      r["b_sol"]))
-        n_work, n_free = r["n_work"], r["n_free"]
+        n_work, n_free, n_atoms = r["n_work"], r["n_free"], r["n_atoms"]
 
-    print("\n%s: %d work, %d free reflections%s, %s"
+    print("\n%s: %d work, %d free reflections%s, %s%s"
           % (args.pdb_id.upper(), n_work, n_free,
              "" if args.d_min is None else " to %.2f A" % args.d_min,
              "ADPs as deposited" if args.aniso_adp
-             else "ADPs flattened to isotropic"))
+             else "ADPs flattened to isotropic",
+             "" if args.select == "all"
+             else ", %d atoms (--select %r)" % (n_atoms, args.select)))
     print("  %-20s %8s %8s %8s %8s" % ("", "R-work", "R-free", "k_sol", "b_sol"))
     for name, rw, rf, ks, bs in rows:
         print("  %-20s %8.4f %8s %8s %8s"

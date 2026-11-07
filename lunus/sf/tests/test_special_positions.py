@@ -358,8 +358,9 @@ def test_run_passes_the_flags_to_read_model(tmp_path, monkeypatch):
 
     seen = {}
 
-    def stand_in(path, log=None, special_position_weights=True):
+    def stand_in(path, log=None, special_position_weights=True, select="all"):
         seen["flag"] = special_position_weights
+        seen["select"] = select
         raise RuntimeError("stop here")
 
     monkeypatch.setattr(fsr, "read_model", stand_in)
@@ -370,6 +371,12 @@ def test_run_passes_the_flags_to_read_model(tmp_path, monkeypatch):
         with pytest.raises(RuntimeError, match="stop here"):
             fsr.run(args)
         assert seen["flag"] is expected, extra
+        assert seen["select"] == "all"
+    args = fsr.build_parser().parse_args(
+        [pdb, str(tmp_path / "none.cif"), "--select", "not element H"])
+    with pytest.raises(RuntimeError, match="stop here"):
+        fsr.run(args)
+    assert seen["select"] == "not element H"
 
 
 def test_opt_out_keeps_file_coordinates_too(tmp_path):

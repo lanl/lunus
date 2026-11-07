@@ -174,7 +174,7 @@ def read_observations(path, d_min=None, crystal_symmetry=None, log=sys.stdout):
 
 # ------------------------------------------------------------------- the model
 
-def read_model(path, log=sys.stdout, special_position_weights=True):
+def read_model(path, log=sys.stdout, special_position_weights=True, select="all"):
     """Coordinates, isotropic-equivalent B, elements and symmetry weights, with
     the crystal symmetry taken from the file's own CRYST1 rather than the
     command line -- this tool is pointed at a deposited structure, which knows
@@ -190,7 +190,10 @@ def read_model(path, log=sys.stdout, special_position_weights=True):
     symmetrized, and counts as a general position, so a complete cell is
     taken exactly as given, every copy its own. How many atoms the default
     reader would have moved is printed, so the flag used by mistake on one
-    asymmetric unit is visible."""
+    asymmetric unit is visible.
+
+    select is an iotbx atom selection ("not element H"); only the atoms it
+    keeps are returned, see select_atoms. "all" keeps everything."""
     from iotbx.pdb import hierarchy
 
     pdb_in = hierarchy.input(file_name=path, sort_atoms=False)
@@ -213,8 +216,36 @@ def read_model(path, log=sys.stdout, special_position_weights=True):
             print("%s: %d atom(s) cctbx would put on special positions left "
                   "where the file has them, as general positions "
                   "(special_position_weights=False)" % (path, n_would), file=log)
+    xrs = select_atoms(pdb_in, xrs, select, log, name=path)
     return (xrs,) + model_arrays(xrs, log, name=path,
                                  special_position_weights=special_position_weights)
+
+
+def select_atoms(pdb_in, xrs, select, log=sys.stdout, name="model"):
+    """xrs restricted to the atoms an iotbx selection keeps. "all" (or None)
+    returns it unchanged.
+
+    The mask is taken in FILE order (atom_order.selection_in_file_order),
+    which is the order xray_structure_simple's scatterers are in. The
+    hierarchy's own order groups altlocs within a residue, so on a file whose
+    altlocs are interleaved atom by atom a mask from atom_selection_cache()
+    applied straight to the scatterers lands on the wrong atoms. xrs must be
+    the structure built from this same pdb_in, with no atoms dropped yet."""
+    if select in (None, "all"):
+        return xrs
+    from scitbx.array_family import flex
+
+    from lunus.sf.atom_order import selection_in_file_order
+
+    keep = selection_in_file_order(pdb_in, select)
+    if len(keep) != xrs.scatterers().size():
+        raise ValueError("%s: %d atoms in the file, %d scatterers"
+                         % (name, len(keep), xrs.scatterers().size()))
+    if not keep.any():
+        raise SystemExit("--select %r keeps no atoms of %s" % (select, name))
+    print("%s: %d of %d atoms kept (--select %r)"
+          % (name, keep.sum(), len(keep), select), file=log)
+    return xrs.select(flex.bool(keep.tolist()))
 
 
 def special_position_count(xrs):
@@ -753,9 +784,11 @@ def compare_masks(ours, gemmi_grid, F_ours, F_gemmi, d, log=sys.stdout):
     return agreement
 
 
-def mmtbx_fit(pdb, cif, d_min=None, isotropic=False):
+def mmtbx_fit(pdb, cif, d_min=None, isotropic=False, select="all"):
     """R-work, R-free, k_sol and b_sol from mmtbx.f_model on the deposited
-    model, with no lunus.sf code involved.
+    model, with no lunus.sf code involved. select restricts the model to an
+    iotbx atom selection, through the same select_atoms the torch path uses,
+    so the two methods see identical atoms.
 
     This is mmtbx's own bulk solvent and anisotropic scaling, run on the
     coordinates and ADPs exactly as deposited -- no refinement -- so it is the
@@ -774,8 +807,9 @@ def mmtbx_fit(pdb, cif, d_min=None, isotropic=False):
     from cctbx.array_family import flex
     from iotbx.pdb import hierarchy
 
-    xrs = hierarchy.input(
-        file_name=pdb, sort_atoms=False).input.xray_structure_simple()
+    pdb_in = hierarchy.input(file_name=pdb, sort_atoms=False)
+    xrs = select_atoms(pdb_in, pdb_in.input.xray_structure_simple(), select,
+                       log=_io.StringIO(), name=pdb)
     F_obs, free_np = read_observations(
         cif, d_min=d_min, crystal_symmetry=xrs.crystal_symmetry(),
         log=_io.StringIO())
@@ -794,10 +828,11 @@ def mmtbx_fit(pdb, cif, d_min=None, isotropic=False):
     return {"R-work": float(fmodel.r_work()), "R-free": float(fmodel.r_free()),
             "k_sol": float(k_sol), "b_sol": float(b_sol),
             "n_work": int(F_obs.size() - free_np.sum()),
-            "n_free": int(free_np.sum())}
+            "n_free": int(free_np.sum()),
+            "n_atoms": int(xrs.scatterers().size())}
 
 
-def external_reference(pdb, cif, d_min, log=sys.stdout):
+def external_reference(pdb, cif, d_min, log=sys.stdout, select="all"):
     """What this dataset supports, measured without any lunus code.
 
     Two numbers, and the harness's output cannot be read without them:
@@ -817,7 +852,7 @@ def external_reference(pdb, cif, d_min, log=sys.stdout):
           % ("", "R-work", "R-free", "k_sol", "b_sol"), file=log)
     for name, isotropic in (("deposited model, anisotropic ADPs", False),
                             ("same model, isotropic ADPs", True)):
-        r = mmtbx_fit(pdb, cif, d_min, isotropic=isotropic)
+        r = mmtbx_fit(pdb, cif, d_min, isotropic=isotropic, select=select)
         print("  %-34s %8.4f %8.4f %8.3f %8.1f"
               % (name, r["R-work"], r["R-free"], r["k_sol"], r["b_sol"]),
               file=log)
@@ -930,6 +965,14 @@ def build_parser():
                         "complete cell with its space group in CRYST1 that is "
                         "expanded as a fold, every copy of the asymmetric unit "
                         "being its own. Implied by --no-expand-symmetry")
+    p.add_argument("--select", default="all", metavar="SEL",
+                   help="an iotbx atom selection; only the atoms it keeps "
+                        "are used, by this fit and by --reference alike, so "
+                        "both methods see the same model (\"not element H\" "
+                        "drops deposited hydrogens). The gemmi calibration "
+                        "target and --mask gemmi are measured on the file as "
+                        "deposited; gemmi's masker ignores hydrogens itself, "
+                        "so for that selection the two agree. Default: all")
     p.add_argument("--shells", type=int, default=10)
     return p
 
@@ -958,7 +1001,8 @@ def run(args):
 
     xrs, elements, b_per_atom, occ, frac, n_aniso, u_cart, is_aniso = \
         read_model(args.pdb, special_position_weights=use_special_position_weights(
-            args.no_special_position_weights, args.no_expand_symmetry))
+            args.no_special_position_weights, args.no_expand_symmetry),
+            select=args.select)
     F_obs_array, free_np = read_observations(
         args.cif, d_min=args.d_min, crystal_symmetry=xrs.crystal_symmetry())
     d_np = np.array(F_obs_array.d_spacings().data())
@@ -1002,6 +1046,9 @@ def run(args):
     target, gemmi_grid = gemmi_mask_occupancy(args.pdb, grid, args.radii_set)
     print("  gemmi %s geometric mask on the same model and grid: occupancy %.4f"
           % (args.radii_set, target))
+    if args.select != "all":
+        print("  (gemmi's mask is built from the file as deposited, not from "
+              "--select %r; its masker ignores hydrogens)" % args.select)
     if args.target_occupancy is not None:
         target = args.target_occupancy
         print("  overridden by --target-occupancy %.4f" % target)
@@ -1076,7 +1123,8 @@ def run(args):
           % ("conventional", "-", "0.35 / 46"))
 
     print("\noverall")
-    result = {"k_sol": float(fit1["k_sol"]), "b_sol": float(fit1["b_sol"]),
+    result = {"n_atoms": len(elements),
+              "k_sol": float(fit1["k_sol"]), "b_sol": float(fit1["b_sol"]),
               "k_overall": float(torch.exp(fit1["log_k"])),
               "n_work": int(work.sum()), "n_free": int(free_np.sum())}
     for name, sel in (("R-work", work), ("R-free", free_np)):
@@ -1132,7 +1180,7 @@ def run(args):
                  100.0 * float(solvent_share[sel].mean())))
 
     if args.reference:
-        external_reference(args.pdb, args.cif, args.d_min)
+        external_reference(args.pdb, args.cif, args.d_min, select=args.select)
 
     print("\ncaveats, in descending order of how much they cost")
     if args.aniso_adp:

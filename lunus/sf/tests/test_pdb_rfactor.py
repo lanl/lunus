@@ -94,3 +94,63 @@ def test_charged_scattering_types_get_coefficients():
     assert table["O1-"] != table["O"]            # a real ion entry, not a copy
     assert table["N1+"] == fit_solvent_rfactor.scattering_table(["N"])["N"]
     assert "N1+ -> N" in log.getvalue()
+
+
+def file_records(pdb):
+    """(element, xyz) of every ATOM/HETATM record, in file order."""
+    out = []
+    for line in open(pdb):
+        if line.startswith(("ATOM", "HETATM")):
+            out.append((line[76:78].strip().upper(),
+                        [float(line[30:38]), float(line[38:46]), float(line[46:54])]))
+    return out
+
+
+def test_select_keeps_the_file_order_atoms():
+    """--select on 7FPV, whose altlocs are interleaved atom by atom: the atoms
+    kept must be exactly the file's non-hydrogen records, coordinates and all.
+    A mask taken in hierarchy order would keep the right NUMBER of atoms and
+    the wrong ones."""
+    import io
+
+    import numpy as np
+
+    import fit_solvent_rfactor
+
+    pdb = os.path.join(COMPARE, "7FPV.pdb")
+    records = file_records(pdb)
+    heavy = np.array([xyz for el, xyz in records if el != "H"])
+    assert 0 < len(heavy) < len(records)
+
+    xrs, elements, *_ = fit_solvent_rfactor.read_model(
+        pdb, log=io.StringIO(), select="not element H")
+    assert len(elements) == len(heavy)
+    assert "H" not in elements
+    assert np.allclose(np.array(xrs.sites_cart()), heavy, atol=1e-3)
+
+    xrs_all, elements_all, *_ = fit_solvent_rfactor.read_model(pdb, log=io.StringIO())
+    assert len(elements_all) == len(records)
+
+
+def test_select_reaches_the_mmtbx_path():
+    import fit_solvent_rfactor
+
+    pdb = os.path.join(COMPARE, "7FPV.pdb")
+    n_heavy = sum(1 for el, _ in file_records(pdb) if el != "H")
+    r = fit_solvent_rfactor.mmtbx_fit(
+        pdb, os.path.join(COMPARE, "7FPV-sf.cif"),
+        d_min=3.0, isotropic=True, select="not element H")
+    assert r["n_atoms"] == n_heavy
+    assert 0.10 < r["R-work"] < 0.30
+
+
+def test_select_keeping_nothing_is_an_error():
+    import io
+
+    import pytest
+
+    import fit_solvent_rfactor
+
+    with pytest.raises(SystemExit):
+        fit_solvent_rfactor.read_model(os.path.join(COMPARE, "7FPV.pdb"),
+                                       log=io.StringIO(), select="element Xx")
