@@ -11,7 +11,9 @@ does not.
 
 The point is the gradients. On CPU, gemmi is faster per core (see
 [docs/performance.md](docs/performance.md)); what this buys you is
-`loss.backward()` reaching every atom in every configuration.
+`loss.backward()` reaching every atom in every configuration. Scaling the
+result against experimental Bragg amplitudes is not yet a library feature;
+[docs/scaling-design.md](docs/scaling-design.md) is the proposal for it.
 
 ## Installing
 
