@@ -184,6 +184,27 @@ Notes on the signature:
 - float64 is the default because the tool's numbers were measured in it;
   float32 is a measurement to make, not a default to assume.
 
+Two additions for the first client (the SW40 refinement study, below):
+
+- `fit(..., warm=True)` starts the scan and the LBFGS from the current
+  state instead of from the conventional values. The study refits after
+  displacing the coordinates and wants the same basin the baseline found;
+  the warm-start remark under `refit` covers `refit` but not `fit`. With
+  `warm=True` the scan is a narrow one around the current (k_sol, b_sol)
+  rather than the full grid.
+- The scaler keeps a record of what it holds and when it last moved each
+  parameter: the iteration or call count at the last `fit`, at the last
+  `refit` of each kind, and the mode in force (`what`), exposed as
+  `last_refit` in `state_dict()`. The study holds the scale parameters
+  between refits and wants its run record to say whether the solvent mask
+  was live or frozen over the same interval. The mask is rebuilt on every
+  forward call inside `structure_factors_one_config` today; a frozen-mask
+  mode is on `docs/solvent-design.md`'s list and is not this module's to
+  build. What the scaler can do is report its own cadence, so that the
+  record is complete whichever way the mask was run.
+
+Neither addition changes the sampleworks path.
+
 The tool becomes a client: `fit_solvent_rfactor.run()` builds a
 `BraggScaler`, calls `fit`, prints its own tables from `shell_table` and
 `r_factors`. `pdb_rfactor.py` does not change. The module ships; the tool
@@ -227,15 +248,80 @@ of that.
 - **Shapes and placement.** Works on CUDA and CPU, float32 and float64, and
   the float32 R differs from float64 by less than the printed precision.
 
+## First refinement client: displacement refinement on SW40
+
+The first use of `BraggScaler` outside the tool is a study the manuscript
+needs: on every entry of the SW40 test set, do coordinates displaced from
+the deposited model return to it when refined against the deposited
+amplitudes with lunus.sf's gradients? The taper study answered this with
+the model's own amplitudes as the target (`docs/design.md`, "What the taper
+study measured"). This is the same test with the real target, which is only
+possible once scaling and solvent sit inside the loss. It is a tool and may
+depend on cctbx.
+
+**Per entry.**
+
+- Model: deposited coordinates, heavy protein atoms, conformer A at full
+  occupancy, hydrogens excluded, selections applied in file order
+  (`atom_order.selection_in_file_order`; the `--select` / `--occ-one` path
+  `tools/study_taper.py` already has). ADPs as deposited through the
+  anisotropic kernel, or flattened to isotropic; the record states which.
+- Target: French-Wilson amplitudes and the deposited free set from the
+  entry's structure-factor file, through `fit_solvent_rfactor.read_observations`.
+- Baseline: `BraggScaler.fit` on the undisplaced model; record R-work and
+  R-free. These must match the R-factor tool's rows for the entry in the
+  SW40 report's `table_data.json` to four decimals. If they do not, the
+  study stops there.
+- Start: displace every free coordinate by 0.3 Å rms, one recorded seed,
+  then `fit(warm=True)` on the displaced model, so the optimizer is not
+  started from scales fitted to a different structure.
+- Refine: L-BFGS over the coordinates, 300 iterations, strong-Wolfe line
+  search, tolerances off so that an early stop is a failed line search.
+  Loss on the work set only. Each evaluation: `structure_factors_one_config`
+  with `solvent=` on, `refit("bins")`, `apply`, residual against F_obs.
+  k_sol, b_sol and B_cart held from the start-of-run fit by default;
+  `refit("solvent")` every N iterations as a variable.
+- Record, one JSON row per entry: atoms free, reflections per coordinate,
+  rmsd to the deposited coordinates at start and end, R-work and R-free at
+  baseline, start and end, iterations completed, whether the line search
+  failed, the scale parameters at baseline and end, and the scaler's
+  `last_refit` record.
+
+**What is read from it.**
+
+- Per entry: how much of the 0.3 Å is recovered, and whether R-free ends
+  near the baseline. An entry where R-work falls while R-free rises is a
+  statement about what the amplitudes alone determine at that resolution
+  with no restraints, not about the engine; the table is ordered by
+  reflections per coordinate so that reading is available.
+- For the module: open question 2, the refit cadence for k_sol and b_sol,
+  by running a subset of entries at never, every 50 and every 10
+  iterations and comparing end R-free and rmsd; and open question 1, the
+  anisotropic B_cart held or refit, by the same comparison with
+  `refit_aniso` on and off. These are the measurements the policy table
+  says it is waiting for.
+- For the taper: optionally, each entry at the production taper and with
+  the hard cutoff, which ties this to the taper study's conclusion that
+  where the taper matters depends on the system.
+
+**Cost.** The taper study's 7FPV refinements ran at `d_min` 2.0 on 11,011
+reflections and 1,270 free atoms. The SW40 entries at full resolution carry
+56,000 to 326,000 reflections and, from the 12 cached locally, 1,500 to
+5,200 heavy atoms, with the largest entries of the forty several times that
+again, so expect minutes per entry on the GPU rather than seconds, and an
+afternoon for forty entries at one condition.
+
 ## Open questions
 
 1. **Anisotropic B_cart during guidance.** Held or refit, and whether a
    non-orthorhombic cell makes the off-diagonals meaningful enough to matter.
    The tool's note that orthorhombic symmetry forces them to zero is a cheap
-   correctness check in either mode.
+   correctness check in either mode. To be measured by the SW40 refinement
+   study ("First refinement client", above), `refit_aniso` on against off.
 2. **Refit cadence for k_sol and b_sol.** Never, every N steps, or on a
-   schedule tied to the sampler's noise level. Needs a measurement on a real
-   guidance run, not a default chosen here.
+   schedule tied to the sampler's noise level. To be measured by the SW40
+   refinement study at never, every 50 and every 10 iterations; a guidance
+   run, where the noise level matters too, remains to be measured after it.
 3. **Amplitudes versus intensities.** The tool, the R-factor and the
    sampleworks Bragg term are all on amplitudes. If a guidance loss on
    intensities is wanted later, the closed-form bin scale changes
