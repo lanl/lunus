@@ -1,0 +1,16 @@
+#!/usr/bin/env ccp4-python
+import gemmi
+sg = gemmi.find_spacegroup_by_name('I 2 3')
+ops = sg.operations()
+asu = gemmi.ReciprocalAsu(sg)
+print('I23 is_in((1,0,0)):', asu.is_in((1,0,0)))
+print('I23 is_in((0,1,0)):', asu.is_in((0,1,0)))
+print('I23 is_in((0,1,1)):', asu.is_in((0,1,1)))
+print('I23 absent (1,0,0):', ops.is_systematically_absent((1,0,0)))
+print('I23 absent (0,1,1):', ops.is_systematically_absent((0,1,1)))
+print('I23 absent (1,1,1):', ops.is_systematically_absent((1,1,1)))
+sg2 = gemmi.find_spacegroup_by_name('P 21 21 21')
+ops2 = sg2.operations()
+print('P212121 absent (0,0,1):', ops2.is_systematically_absent((0,0,1)))
+print('P212121 absent (0,0,2):', ops2.is_systematically_absent((0,0,2)))
+print('P212121 absent (1,0,0):', ops2.is_systematically_absent((1,0,0)))
