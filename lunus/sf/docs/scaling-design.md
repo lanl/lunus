@@ -1,3 +1,11 @@
+Notes:
+
+o After deciding on a binned scaling method, also add an option to export the synthetic data as a .mtz.
+o Add mention of files that will be touched to make this modification
+o Function/ signature changes that are needed for implementation (e.g. providing experimental data for forward calculation)
+o Forward model in SW should take a single .mtz file (synthetic or Fo). Flag for activating scaling. 
+o Needs from the SW side: Script to generate scaled synthetic data. Functions in that script should be re-used in sampleworks forward guidance 
+
 # Design note: Bragg scaling for lunus.sf
 
 Status: **proposed, nothing implemented.** Written 2026-11-06 from the state
