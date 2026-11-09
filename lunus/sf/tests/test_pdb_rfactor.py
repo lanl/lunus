@@ -5,8 +5,9 @@ Nothing here touches the network. The cache test runs against the tracked
 so a regression that re-fetches a file that is already present fails loudly
 rather than silently costing a download. The torch path is
 fit_solvent_rfactor.run(), which the design note validates by hand on 7FPV at
-full resolution; at ~2 minutes it is not a unit test, so only the cheap mmtbx
-path is run here, truncated to 3 A.
+full resolution (~2 minutes); here it runs only truncated to 3 A, a couple of
+seconds, to check how the binned rows are wired, alongside the cheap mmtbx
+path at the same truncation.
 """
 
 import os
@@ -78,6 +79,9 @@ def test_binned_row_is_extra_and_off_in_the_torch_tool_by_default():
     assert (plain.scale_bins, plain.also_scale_bins) == (0, 0)
     extra = parse(["m.pdb", "m-sf.cif", "--also-scale-bins", "20"])
     assert (extra.scale_bins, extra.also_scale_bins) == (0, 20)
+    # 'log' (mmtbx's own bins) likewise leaves the main fit single-scale.
+    log_bins = parse(["m.pdb", "m-sf.cif", "--also-scale-bins", "log"])
+    assert (log_bins.scale_bins, log_bins.also_scale_bins) == (0, "log")
 
 
 def test_charged_scattering_types_get_coefficients():
@@ -154,3 +158,82 @@ def test_select_keeping_nothing_is_an_error():
     with pytest.raises(SystemExit):
         fit_solvent_rfactor.read_model(os.path.join(COMPARE, "7FPV.pdb"),
                                        log=io.StringIO(), select="element Xx")
+
+
+def test_binned_row_defaults_to_mmtbx_log_bins():
+    """pdb_rfactor's binned row uses mmtbx's own bins unless told otherwise,
+    and an integer still means that many equal-count bins."""
+    import pdb_rfactor
+
+    parse = pdb_rfactor.build_parser().parse_known_args
+    assert parse(["7FPV"])[0].binned_row == "log"
+    assert parse(["7FPV", "--binned-row", "20"])[0].binned_row == 20
+
+
+def test_log_binned_row_through_run_on_7fpv_at_3a():
+    """The wiring: run() hands the binned fit cctbx's d spacings and reports
+    mmtbx's 6 bins for 7FPV cut to 3 A, while the main fit stays
+    single-scale."""
+    import contextlib
+    import io
+
+    import fit_solvent_rfactor
+
+    args = fit_solvent_rfactor.build_parser().parse_args(
+        [os.path.join(COMPARE, "7FPV.pdb"), os.path.join(COMPARE, "7FPV-sf.cif"),
+         "--d-min", "3.0", "--aniso", "--also-scale-bins", "log", "--shells", "3"])
+    with contextlib.redirect_stdout(io.StringIO()) as out:
+        r = fit_solvent_rfactor.run(args)
+    assert r["main_scale_bins"] == 0 and r["main_bin_scheme"] is None
+    assert (r["scale_bins"], r["bin_scheme"]) == (6, "6 log bins")
+    assert "binned row: 6 log bins" in out.getvalue()
+    # Pinned, so that some other 6-bin partition cannot pass: 6 equal-count
+    # bins give R-free 0.1958 here, mmtbx's bins 0.1929.
+    assert abs(r["R-work binned"] - 0.1880) < 5e-4
+    assert abs(r["R-free binned"] - 0.1929) < 1e-3
+
+
+def test_main_fit_with_log_bins_through_run_on_7fpv_at_3a():
+    """--scale-bins log makes the main fit itself binned on mmtbx's bins."""
+    import contextlib
+    import io
+
+    import fit_solvent_rfactor
+
+    args = fit_solvent_rfactor.build_parser().parse_args(
+        [os.path.join(COMPARE, "7FPV.pdb"), os.path.join(COMPARE, "7FPV-sf.cif"),
+         "--d-min", "3.0", "--aniso", "--scale-bins", "log", "--shells", "3"])
+    with contextlib.redirect_stdout(io.StringIO()) as out:
+        r = fit_solvent_rfactor.run(args)
+    assert (r["main_scale_bins"], r["main_bin_scheme"]) == (6, "6 log bins")
+    assert "overall scale per resolution bin: 6 log bins" in out.getvalue()
+    assert "fitted per resolution bin (6 bins)" in out.getvalue()
+    assert abs(r["R-free"] - 0.1929) < 1e-3
+
+
+def test_main_forwards_the_default_binned_row(monkeypatch, capsys):
+    """pdb_rfactor's main() hands run() --also-scale-bins log by default and
+    an integer when given one, and prints the bin scheme under the table."""
+    import pdb_rfactor
+
+    seen = []
+
+    def fake_run(args):
+        seen.append(args.also_scale_bins)
+        return {"R-work no solvent": 0.3, "R-free no solvent": 0.3,
+                "R-work": 0.2, "R-free": 0.2, "k_sol": 0.35, "b_sol": 46.0,
+                "n_work": 100, "n_free": 5, "n_atoms": 10,
+                "main_scale_bins": 0, "main_bin_scheme": None,
+                "scale_bins": 6, "bin_scheme": "6 log bins",
+                "R-work binned": 0.19, "R-free binned": 0.19,
+                "k_sol binned": 0.35, "b_sol binned": 46.0}
+    monkeypatch.setattr(pdb_rfactor, "fetch_entry",
+                        lambda *a, **k: ("m.pdb", "m-sf.cif"))
+    monkeypatch.setattr(pdb_rfactor.fit_solvent_rfactor, "run", fake_run)
+    for extra, expected in (([], "log"), (["--binned-row", "20"], 20)):
+        monkeypatch.setattr(sys, "argv",
+                            ["pdb_rfactor.py", "7FPV", "--method", "torch"] + extra)
+        pdb_rfactor.main()
+        assert seen[-1] == expected
+    out = capsys.readouterr().out
+    assert "torch, 6 scale bins" in out and "scale bins: 6 log bins" in out
