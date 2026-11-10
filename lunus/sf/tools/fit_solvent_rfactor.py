@@ -99,7 +99,8 @@ def read_observations(path, d_min=None, crystal_symmetry=None, log=sys.stdout,
          taking "the first intensity array" instead picked an unmerged
          dataset and fell over on its missing symmetry.
       2. The observations may be INTENSITIES (7FPV: anomalous, 142,372
-         Bijvoet-separate, with sigmas) or AMPLITUDES (1VME). Intensities go
+         Bijvoet-separate, with sigmas) or AMPLITUDES (1VME); when a block,
+         or an MTZ, holds both, the intensities are used. Intensities go
          through french_wilson(), which converts I to F properly, i.e.
          without simply discarding the negative intensities a weak reflection
          legitimately produces; it rejects a couple of hundred and is chatty
@@ -109,7 +110,9 @@ def read_observations(path, d_min=None, crystal_symmetry=None, log=sys.stdout,
          reflection.
       3. A block without symmetry takes it from the MODEL (crystal_symmetry),
          which is what every refinement program does.
-      4. The R-free set is encoded one of two ways. _refln.status is a string
+      4. The R-free set is encoded one of two ways in mmCIF (an MTZ carries
+         an integer flag column under one of several names, found by
+         iotbx's word list). _refln.status is a string
          per reflection, 'f' for free, 'o' for work, 'x' for unobserved.
          pdbx_r_free_flag is an integer whose convention varies: 7FPV uses
          CCP4 bins 0-19 with the test set in bin 0 (3,716 reflections, 5.0%,
@@ -126,7 +129,30 @@ def read_observations(path, d_min=None, crystal_symmetry=None, log=sys.stdout,
         crystal_symmetry=crystal_symmetry, force_symmetry=True)
 
     def block(a):
-        return a.info().label_string().split(",")[0]
+        # mmCIF arrays are labelled "<data block>,_refln.<item>,..." and a
+        # deposited file can hold several blocks (point 1 above). MTZ labels
+        # carry no block, so every MTZ array counts as one block -- otherwise
+        # an MTZ's free-flag column is never matched to its amplitudes.
+        labels = a.info().label_string()
+        return labels.split(",")[0] if "_refln" in labels else ""
+
+    def is_flag_array(a):
+        # iotbx's word list (free, test, cross, status, flag), applied
+        # case-insensitively to every label but the mmCIF block name. Not
+        # iotbx's looks_like_r_free_flags_info itself: that reads only the
+        # LAST label of an array with at most two, and 1VME's status column
+        # arrives as "r1vmesf,_refln.status,wavelength_id=1". Covers
+        # _refln.status and _refln.pdbx_r_free_flag in mmCIF, and
+        # FreeR_flag, R-free-flags, FREE and r_free_flags in MTZ.
+        if a.is_xray_intensity_array() or a.is_xray_amplitude_array():
+            return False                      # an observation column named F_test is not a flag
+        if not (a.is_integer_array() or a.is_string_array()):
+            return False                      # flags are integers or status letters
+        labels = a.info().labels
+        if block(a):
+            labels = labels[1:]
+        return any(word in label.lower() for label in labels
+                   for word in ("free", "test", "cross", "status", "flag"))
 
     obs = [a for a in arrays
            if a.is_xray_intensity_array() or a.is_xray_amplitude_array()]
@@ -142,6 +168,30 @@ def read_observations(path, d_min=None, crystal_symmetry=None, log=sys.stdout,
     if I_or_F.space_group_info() is None:
         raise SystemExit("%s carries no space group; pass the model's" % path)
 
+    # An AMPLITUDE deposited as exactly zero is excluded, because the
+    # depositors' own refinements excluded it: it is either a placeholder for
+    # an unobserved reflection (sigma 0, status '<' or 'h'; 2GOY: 24,664 of
+    # 110,066, the whole 2.62-2.49 A shell) or a weak measurement truncated to
+    # F = 0 that an F > 0 cutoff removed (sigma > 0; on 6KZ9 and 5KRF the
+    # REMARK 3 reflection counts and R match ours only without them). Kept,
+    # mmtbx finds a bin with nothing in it and raises "min() argument is an
+    # empty array", and our R counts |0 - F_c|. They go BEFORE the merge, so
+    # that a zero deposited for one Bijvoet mate or symmetry equivalent is
+    # dropped rather than averaged into its partner. Intensities are left
+    # alone: French-Wilson is what turns a weak or negative intensity into an
+    # amplitude, and it applies its own rejection (I/sigma below -4, and
+    # sigma <= 0 with I <= 0, see cctbx.french_wilson), which is what keeps
+    # the information in weak and negative intensities.
+    zero_note = ""
+    if I_or_F.is_xray_amplitude_array():
+        nonzero = I_or_F.data() != 0
+        n_zero = nonzero.count(False)
+        if n_zero:
+            I_or_F = I_or_F.select(nonzero)
+            zero_note = ("%s: %d amplitude(s) deposited as exactly zero dropped, "
+                         "as the depositors' refinement did" % (path, n_zero))
+            print(zero_note, file=log)
+
     with contextlib.redirect_stdout(io.StringIO()):
         F = I_or_F.merge_equivalents().array().average_bijvoet_mates()
         if F.is_xray_intensity_array():
@@ -149,9 +199,7 @@ def read_observations(path, d_min=None, crystal_symmetry=None, log=sys.stdout,
     if d_min is not None:
         F = F.resolution_filter(d_min=d_min)
 
-    flags = [a for a in arrays if block(a) == first
-             and ("r_free_flag" in a.info().label_string()
-                  or "status" in a.info().label_string())]
+    flags = [a for a in arrays if block(a) == first and is_flag_array(a)]
     free_mask = np.zeros(F.size(), dtype=bool)
     if flags:
         raw = flags[0]
@@ -173,7 +221,7 @@ def read_observations(path, d_min=None, crystal_symmetry=None, log=sys.stdout,
     if info is not None:
         # For callers that silence log but still need to say what was
         # dropped (mmtbx_fit, for a run of that method alone).
-        info["absent_note"] = note
+        info["dropped_note"] = "\n".join(n for n in (zero_note, note) if n)
     return F, free_mask
 
 
@@ -192,6 +240,11 @@ def drop_unfittable_reflections(F, free_mask, log=sys.stdout, name="observations
     --no-expand-symmetry and a model that does not have its declared
     symmetry the model's F there is not exactly zero; dropping them is
     still what every program does.)
+
+    Amplitudes deposited as exactly zero are a different matter -- excluded
+    because the depositors' refinements excluded them -- and
+    read_observations removes them from the raw array before merging, where
+    a zero mate cannot be averaged into a real one.
 
     Returns (F, free_mask, note): note is the printed line, or "" when
     nothing was absent. A miller array's select() needs a flex.bool, not a
@@ -1335,7 +1388,7 @@ def mmtbx_fit(pdb, cif, d_min=None, isotropic=False, select="all"):
             "n_work": int(F_obs.size() - free_np.sum()),
             "n_free": int(free_np.sum()),
             "n_atoms": int(xrs.scatterers().size()),
-            "absent_note": info["absent_note"]}
+            "dropped_note": info["dropped_note"]}
 
 
 def external_reference(pdb, cif, d_min, log=sys.stdout, select="all"):

@@ -50,7 +50,7 @@ def test_mmtbx_fit_on_7fpv():
         os.path.join(COMPARE, "7FPV.pdb"), os.path.join(COMPARE, "7FPV-sf.cif"),
         d_min=3.0, isotropic=True)
     assert r["n_free"] > 0 and r["n_work"] > 10 * r["n_free"]
-    assert r["absent_note"] == ""                # 7FPV's file carries none
+    assert r["dropped_note"] == ""                # 7FPV's file carries none
     # Unrefined-against-this-truncation scales on a deposited model: a real
     # fit lands well inside this, a broken reading path or an un-updated
     # scale does not.
@@ -400,11 +400,11 @@ def test_absent_reflections_are_dropped_by_the_reader_and_mmtbx_fit(tmp_path):
     assert "4 systematically absent reflection(s) of P 21 21 2 dropped" in log.getvalue()
 
     r = fit_solvent_rfactor.mmtbx_fit(str(pdb), str(mtz), isotropic=True)
-    assert "4 systematically absent reflection(s)" in r["absent_note"]
+    assert "4 systematically absent reflection(s)" in r["dropped_note"]
     assert r["n_work"] == F.size() - 4 and r["R-work"] == r["R-work"]
 
 
-def test_main_prints_the_absent_note_on_an_mmtbx_only_run(monkeypatch, capsys):
+def test_main_prints_the_dropped_note_on_an_mmtbx_only_run(monkeypatch, capsys):
     """With --method mmtbx the torch run is not there to print the drop
     line, so main() prints the note mmtbx_fit returns; with both methods it
     does not repeat it."""
@@ -414,7 +414,7 @@ def test_main_prints_the_absent_note_on_an_mmtbx_only_run(monkeypatch, capsys):
 
     def fake_mmtbx(model, sf, d_min, isotropic, select):
         return {"R-work": 0.2, "R-free": 0.25, "k_sol": 0.35, "b_sol": 46.0,
-                "n_work": 100, "n_free": 5, "n_atoms": 10, "absent_note": note}
+                "n_work": 100, "n_free": 5, "n_atoms": 10, "dropped_note": note}
 
     def fake_run(args):
         return {"R-work no solvent": 0.3, "R-free no solvent": 0.3, "R-work": 0.2,
@@ -433,3 +433,172 @@ def test_main_prints_the_absent_note_on_an_mmtbx_only_run(monkeypatch, capsys):
                                       "--binned-row", "0"])
     pdb_rfactor.main()
     assert note not in capsys.readouterr().out     # the (stubbed) torch run would have printed it
+
+
+def test_zero_amplitudes_are_dropped_only_from_amplitude_data(tmp_path):
+    """A deposited AMPLITUDE of exactly zero is an unobserved placeholder and
+    is dropped (2GOY), from the raw array, so a zero on one Bijvoet mate
+    goes rather than being averaged into its partner; deposited INTENSITIES
+    go through French-Wilson and nothing is dropped for being zero or
+    (mildly) negative."""
+    import io
+
+    import numpy as np
+    from cctbx import crystal, miller
+    from cctbx.array_family import flex
+
+    import fit_solvent_rfactor
+
+    cs = crystal.symmetry(unit_cell=(30, 36, 42, 90, 90, 90), space_group_symbol="P 1")
+    ms = miller.build_set(cs, anomalous_flag=False, d_min=3.0)
+    n = ms.size()
+    rng = np.random.default_rng(1)
+    amp = rng.uniform(50.0, 500.0, n)
+    amp[::7] = 0.0                                       # placeholders
+    n_zero = int((amp == 0).sum())
+    F = ms.array(data=flex.double(amp)).set_observation_type_xray_amplitude()
+    mtz_f = tmp_path / "amp.mtz"
+    F.as_mtz_dataset(column_root_label="FOBS").mtz_object().write(file_name=str(mtz_f))
+    log = io.StringIO()
+    F_read, free = fit_solvent_rfactor.read_observations(str(mtz_f), crystal_symmetry=cs, log=log)
+    assert F_read.size() == n - n_zero and (np.array(F_read.data()) > 0).all()
+    assert len(free) == F_read.size()
+    assert "%d amplitude(s) deposited as exactly zero dropped" % n_zero in log.getvalue()
+
+    # a zero deposited for one mate of an anomalous pair: dropped before the
+    # Bijvoet average, so the surviving mate keeps its value
+    ms_an = miller.build_set(cs, anomalous_flag=True, d_min=3.0)
+    amp_an = rng.uniform(50.0, 500.0, ms_an.size())
+    minus = np.array(ms_an.indices())[:, 0] < 0
+    amp_an[minus] = 0.0
+    F_an = ms_an.array(data=flex.double(amp_an)).set_observation_type_xray_amplitude()
+    mtz_an = tmp_path / "anom.mtz"
+    F_an.as_mtz_dataset(column_root_label="FOBS").mtz_object().write(file_name=str(mtz_an))
+    F_an_read, _ = fit_solvent_rfactor.read_observations(str(mtz_an), crystal_symmetry=cs,
+                                                         log=io.StringIO())
+    assert F_an_read.size() == ms_an.size() // 2 and float(flex.min(F_an_read.data())) >= 50.0
+
+    # the same reflections as intensities, some zero and some negative at
+    # -0.5 sigma: the zero-amplitude rule does not apply, and French-Wilson
+    # keeps weak and mildly negative intensities (it rejects only below its
+    # -4 sigma criterion) rather than stripping them
+    inten = amp ** 2
+    inten[::7] = 0.0
+    inten[1::7] = -5.0
+    I = ms.array(data=flex.double(inten), sigmas=flex.double(np.full(n, 10.0))) \
+        .set_observation_type_xray_intensity()
+    mtz_i = tmp_path / "int.mtz"
+    I.as_mtz_dataset(column_root_label="IOBS").mtz_object().write(file_name=str(mtz_i))
+    log = io.StringIO()
+    F_from_I, _ = fit_solvent_rfactor.read_observations(str(mtz_i), crystal_symmetry=cs, log=log)
+    assert "deposited as exactly zero" not in log.getvalue()
+    kept = set(map(tuple, F_from_I.indices()))
+    hkl = list(map(tuple, ms.indices()))
+    assert all(h in kept for h in hkl[::7]) and all(h in kept for h in hkl[1::7])
+
+
+@pytest.mark.parametrize("flag_label", ["r_free_flags", "R-free-flags", "FreeR_flag"])
+def test_zero_amplitudes_reach_the_note_and_the_free_set(tmp_path, flag_label):
+    """Through the whole path: an amplitude MTZ with a free-flag column (under
+    each of the usual names) and zeros in both the work and the free set.
+    The zeros leave both sets, every surviving reflection keeps its own
+    flag, the note names the count, and mmtbx_fit returns the same note
+    (what pdb_rfactor prints on an mmtbx-only run). A model is built
+    alongside so mmtbx_fit can run."""
+    import io
+
+    import numpy as np
+    from cctbx import crystal, miller, xray
+    from cctbx.array_family import flex
+
+    import fit_solvent_rfactor
+
+    cs = crystal.symmetry(unit_cell=(30, 36, 42, 90, 90, 90), space_group_symbol="P 1")
+    xrs = xray.structure(crystal_symmetry=cs)
+    rng = np.random.default_rng(2)
+    for i in range(30):
+        xrs.add_scatterer(xray.scatterer(label="C%d" % i, site=tuple(rng.uniform(0.0, 1.0, 3)),
+                                         scattering_type="C", b=20.0))
+    pdb = tmp_path / "toy.pdb"
+    pdb.write_text(xrs.as_pdb_file())
+    f = xrs.structure_factors(d_min=3.0, algorithm="direct").f_calc()
+    amp = np.array(abs(f).data())
+    n = len(amp)
+    zero = np.zeros(n, dtype=bool)
+    zero[::9] = True
+    amp[zero] = 0.0
+    flags = np.zeros(n, dtype=int)
+    flags[::5] = 1                                    # ~20% free, some of them zero
+    n_zero_free = int((zero & (flags == 1)).sum())
+    assert n_zero_free > 0
+    F = f.set().array(data=flex.double(amp)).set_observation_type_xray_amplitude()
+    R = f.set().array(data=flex.int(flags.tolist()))
+    ds = F.as_mtz_dataset(column_root_label="FOBS")
+    ds.add_miller_array(R, column_root_label=flag_label)
+    mtz = tmp_path / "toy.mtz"
+    ds.mtz_object().write(file_name=str(mtz))
+
+    info = {}
+    F_read, free = fit_solvent_rfactor.read_observations(str(mtz), crystal_symmetry=cs,
+                                                         log=io.StringIO(), info=info)
+    assert F_read.size() == n - int(zero.sum())
+    assert (np.array(F_read.data()) > 0).all()
+    # the flags followed their reflections, index by index, not just in count
+    expected_free = {tuple(h) for h, fl, z in zip(f.indices(), flags, zero) if fl == 1 and not z}
+    got_free = {tuple(h) for h, m in zip(F_read.indices(), free) if m}
+    assert got_free == expected_free and len(got_free) > 0
+    kept = {tuple(h) for h in F_read.indices()}
+    for h, z in zip(f.indices(), zero):
+        assert (tuple(h) in kept) == (not z)
+    assert "%d amplitude(s) deposited as exactly zero dropped" % int(zero.sum()) in info["dropped_note"]
+
+    r = fit_solvent_rfactor.mmtbx_fit(str(pdb), str(mtz), isotropic=True)
+    assert r["dropped_note"] == info["dropped_note"]
+    assert r["n_free"] == int(((flags == 1) & ~zero).sum())
+    assert r["n_work"] + r["n_free"] == n - int(zero.sum())
+
+
+def test_status_column_with_wavelength_id_is_still_the_free_set(tmp_path):
+    """Deposited mmCIF with a wavelength_id column: iotbx labels the status
+    array "<block>,_refln.status,wavelength_id=1" (three labels; 1VME and 10
+    of the 1,000 torchref entries). The flag matcher must still find it --
+    iotbx's looks_like_r_free_flags_info, which reads only the last label
+    of a two-label array, silently did not, and R-free was lost. Zero
+    amplitudes are dropped from this file too."""
+    import io
+
+    import numpy as np
+    from cctbx import crystal
+
+    import fit_solvent_rfactor
+
+    rng = np.random.default_rng(0)
+    hkl = [(h, k, l) for h in range(4) for k in range(4) for l in range(4) if (h, k, l) != (0, 0, 0)]
+    rows, n_free_expected, n_zero = [], 0, 0
+    for i, (h, k, l) in enumerate(hkl):
+        status = "f" if i % 5 == 0 else "o"
+        F = 0.0 if i % 9 == 0 else float(rng.uniform(50, 500))
+        if F == 0.0:
+            n_zero += 1
+        elif status == "f":
+            n_free_expected += 1
+        for w in (1, 2):                       # two wavelength ids give the suffixed labels
+            rows.append("1 %d 1 %d %d %d %s %.1f %.1f" % (w, h, k, l, status, F, 0.0 if F == 0 else 5.0))
+    cif = ("data_toy\n_cell.length_a 30.0\n_cell.length_b 36.0\n_cell.length_c 42.0\n"
+           "_cell.angle_alpha 90.0\n_cell.angle_beta 90.0\n_cell.angle_gamma 90.0\n"
+           "_symmetry.space_group_name_H-M 'P 1'\nloop_\n_refln.crystal_id\n_refln.wavelength_id\n"
+           "_refln.scale_group_code\n_refln.index_h\n_refln.index_k\n_refln.index_l\n_refln.status\n"
+           "_refln.F_meas_au\n_refln.F_meas_sigma_au\n" + "\n".join(rows) + "\n")
+    path = tmp_path / "toy-sf.cif"
+    path.write_text(cif)
+    from iotbx.reflection_file_reader import any_reflection_file
+    labels = [a.info().label_string() for a in any_reflection_file(file_name=str(path)).as_miller_arrays()]
+    assert "toy,_refln.status,wavelength_id=1" in labels   # the three-label form is what is tested
+
+    cs = crystal.symmetry(unit_cell=(30, 36, 42, 90, 90, 90), space_group_symbol="P 1")
+    log = io.StringIO()
+    F, free = fit_solvent_rfactor.read_observations(str(path), crystal_symmetry=cs, log=log)
+    assert "no R-free flags found" not in log.getvalue()
+    assert int(free.sum()) == n_free_expected and n_free_expected > 0
+    assert F.size() == len(hkl) - n_zero
+    assert "%d amplitude(s) deposited as exactly zero dropped" % n_zero in log.getvalue()
