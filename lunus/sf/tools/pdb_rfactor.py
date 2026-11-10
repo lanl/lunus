@@ -202,6 +202,11 @@ def main():
         rows.append(("mmtbx.f_model", r["R-work"], r["R-free"], r["k_sol"],
                      r["b_sol"]))
         n_work, n_free, n_atoms = r["n_work"], r["n_free"], r["n_atoms"]
+        if r["absent_note"] and args.method == "mmtbx":
+            # The torch run prints this line itself when it runs; print it
+            # here when it did not, so the reflection count is not silently
+            # short of the file's.
+            print(r["absent_note"])
 
     print("\n%s: %d work, %d free reflections%s, %s%s"
           % (args.pdb_id.upper(), n_work, n_free,

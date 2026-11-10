@@ -50,6 +50,7 @@ def test_mmtbx_fit_on_7fpv():
         os.path.join(COMPARE, "7FPV.pdb"), os.path.join(COMPARE, "7FPV-sf.cif"),
         d_min=3.0, isotropic=True)
     assert r["n_free"] > 0 and r["n_work"] > 10 * r["n_free"]
+    assert r["absent_note"] == ""                # 7FPV's file carries none
     # Unrefined-against-this-truncation scales on a deposited model: a real
     # fit lands well inside this, a broken reading path or an un-updated
     # scale does not.
@@ -325,3 +326,110 @@ def test_equal_count_bins_keep_the_exponential_solvent_by_default():
     with contextlib.redirect_stdout(io.StringIO()):
         main = fit_solvent_rfactor.run(parse(base + ["--scale-bins", "6"]))
     assert main["solvent_scheme"] == "exponential" and main["main_bin_scheme"] == "6 equal-count bins"
+
+
+def test_drop_unfittable_reflections():
+    """Systematically absent reflections and (0,0,0) leave the array and the
+    free mask together; everything else, including an allowed axial
+    reflection, stays, and the drop is reported. The (0,0,0) case also
+    covers the select() that used to raise on a Python list."""
+    import io
+
+    import numpy as np
+    from cctbx import crystal, miller
+    from cctbx.array_family import flex
+
+    import fit_solvent_rfactor
+
+    cs = crystal.symmetry(unit_cell=(40, 50, 60, 90, 90, 90), space_group_symbol="P 21 21 2")
+    hkl = [(0, 0, 0), (0, 5, 0), (0, 4, 0), (3, 0, 0), (2, 0, 0), (1, 1, 1), (0, 0, 7)]
+    F = miller.set(cs, flex.miller_index(hkl), anomalous_flag=False).array(
+        data=flex.double([1.0, 8.2, 300.0, 6.1, 250.0, 120.0, 90.0]))
+    free = np.array([False, True, False, False, True, False, True])
+    log = io.StringIO()
+    F2, free2, note = fit_solvent_rfactor.drop_unfittable_reflections(F, free, log=log, name="toy")
+    kept = [tuple(h) for h in F2.indices()]
+    # P 21 21 2: h00 and 0k0 absent for odd h, k; 00l is allowed (no screw along c)
+    assert kept == [(0, 4, 0), (2, 0, 0), (1, 1, 1), (0, 0, 7)]
+    assert list(free2) == [False, True, False, True]
+    assert note.startswith("toy: 2 systematically absent reflection(s) of P 21 21 2")
+    assert log.getvalue().strip() == note
+    # nothing to drop: untouched, silent
+    F3, free3, note3 = fit_solvent_rfactor.drop_unfittable_reflections(F2, free2, log=io.StringIO())
+    assert F3.size() == 4 and list(free3) == list(free2) and note3 == ""
+
+
+def test_absent_reflections_are_dropped_by_the_reader_and_mmtbx_fit(tmp_path):
+    """The fix end to end: a model and an MTZ in P 21 21 2 whose data hold
+    odd 0k0 reflections with non-zero |F|. read_observations (which run()
+    also calls) drops them and says so; mmtbx_fit reads through the same
+    function, returns the note, and runs -- with the absences left in,
+    mmtbx's aniso_u_scaler raises MMTBX_ASSERT(fm_abs > 0) here too."""
+    import io
+
+    import numpy as np
+    from cctbx import crystal, miller, xray
+    from cctbx.array_family import flex
+
+    import fit_solvent_rfactor
+
+    cs = crystal.symmetry(unit_cell=(30, 36, 42, 90, 90, 90), space_group_symbol="P 21 21 2")
+    xrs = xray.structure(crystal_symmetry=cs)
+    rng = np.random.default_rng(0)
+    for i in range(40):
+        xrs.add_scatterer(xray.scatterer(label="C%d" % i, site=tuple(rng.uniform(0.05, 0.45, 3)),
+                                         scattering_type="C", b=20.0))
+    pdb = tmp_path / "toy.pdb"
+    pdb.write_text(xrs.as_pdb_file())
+    # calculated amplitudes plus deliberate non-zero values on four odd 0k0
+    # reflections, as a deposited file can carry
+    f = xrs.structure_factors(d_min=2.5, algorithm="direct").f_calc()
+    absent_idx = [(0, k, 0) for k in (1, 3, 5, 7)]
+    all_idx = flex.miller_index(list(f.indices()) + absent_idx)
+    amp = flex.double(list(abs(f).data()) + [5.0, 6.0, 7.0, 8.0])
+    F = miller.set(cs, all_idx, anomalous_flag=False).array(data=amp) \
+        .set_observation_type_xray_amplitude()
+    assert F.sys_absent_flags().data().count(True) == 4
+    mtz = tmp_path / "toy.mtz"
+    F.as_mtz_dataset(column_root_label="FOBS").mtz_object().write(file_name=str(mtz))
+
+    log = io.StringIO()
+    F_read, free = fit_solvent_rfactor.read_observations(str(mtz), crystal_symmetry=cs, log=log)
+    assert F_read.sys_absent_flags().data().count(True) == 0
+    assert F_read.size() == F.size() - 4 and len(free) == F_read.size()
+    assert "4 systematically absent reflection(s) of P 21 21 2 dropped" in log.getvalue()
+
+    r = fit_solvent_rfactor.mmtbx_fit(str(pdb), str(mtz), isotropic=True)
+    assert "4 systematically absent reflection(s)" in r["absent_note"]
+    assert r["n_work"] == F.size() - 4 and r["R-work"] == r["R-work"]
+
+
+def test_main_prints_the_absent_note_on_an_mmtbx_only_run(monkeypatch, capsys):
+    """With --method mmtbx the torch run is not there to print the drop
+    line, so main() prints the note mmtbx_fit returns; with both methods it
+    does not repeat it."""
+    import pdb_rfactor
+
+    note = "m-sf.cif: 42 systematically absent reflection(s) of P 21 21 2 dropped, as refinement programs do"
+
+    def fake_mmtbx(model, sf, d_min, isotropic, select):
+        return {"R-work": 0.2, "R-free": 0.25, "k_sol": 0.35, "b_sol": 46.0,
+                "n_work": 100, "n_free": 5, "n_atoms": 10, "absent_note": note}
+
+    def fake_run(args):
+        return {"R-work no solvent": 0.3, "R-free no solvent": 0.3, "R-work": 0.2,
+                "R-free": 0.2, "k_sol": 0.35, "b_sol": 46.0, "n_work": 100,
+                "n_free": 5, "n_atoms": 10, "main_scale_bins": 0, "main_bin_scheme": None,
+                "solvent_scheme": "exponential", "timing": {"total": 1.0}}
+    monkeypatch.setattr(pdb_rfactor, "fetch_entry", lambda *a, **k: ("m.pdb", "m-sf.cif"))
+    monkeypatch.setattr(pdb_rfactor.fit_solvent_rfactor, "mmtbx_fit", fake_mmtbx)
+    monkeypatch.setattr(pdb_rfactor.fit_solvent_rfactor, "run", fake_run)
+
+    monkeypatch.setattr(sys, "argv", ["pdb_rfactor.py", "7FPV", "--method", "mmtbx"])
+    pdb_rfactor.main()
+    assert capsys.readouterr().out.count(note) == 1
+
+    monkeypatch.setattr(sys, "argv", ["pdb_rfactor.py", "7FPV", "--method", "both",
+                                      "--binned-row", "0"])
+    pdb_rfactor.main()
+    assert note not in capsys.readouterr().out     # the (stubbed) torch run would have printed it

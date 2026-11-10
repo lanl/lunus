@@ -83,7 +83,8 @@ import torch
 
 # ---------------------------------------------------------------- observations
 
-def read_observations(path, d_min=None, crystal_symmetry=None, log=sys.stdout):
+def read_observations(path, d_min=None, crystal_symmetry=None, log=sys.stdout,
+                      info=None):
     """
     Deposited structure factors -> (miller_array of F, free-set boolean mask).
 
@@ -168,14 +169,49 @@ def read_observations(path, d_min=None, crystal_symmetry=None, log=sys.stdout):
     else:
         print("no R-free flags found: R-free will not be reported", file=log)
 
-    # (0,0,0) carries no measurable amplitude and would sit alone in the
-    # lowest-resolution shell with an infinite d.
-    keep = np.array([hkl != (0, 0, 0) for hkl in F.indices()])
-    if not keep.all():
-        F = F.select(keep.tolist())
-        free_mask = free_mask[keep]
-
+    F, free_mask, note = drop_unfittable_reflections(F, free_mask, log=log, name=path)
+    if info is not None:
+        # For callers that silence log but still need to say what was
+        # dropped (mmtbx_fit, for a run of that method alone).
+        info["absent_note"] = note
     return F, free_mask
+
+
+def drop_unfittable_reflections(F, free_mask, log=sys.stdout, name="observations"):
+    """Remove from a miller array (and the matching free-set mask) the
+    reflections no scaling can fit: (0,0,0), which carries no measurable
+    amplitude and would sit alone in the lowest-resolution shell with an
+    infinite d, and the systematically absent reflections of the space
+    group, on which a model with that symmetry has F exactly zero. Deposited
+    files do carry those (2ZFX: 42 odd 0k0 in P 21 21 2 at a median |F| of
+    23 against 184; 1VME: 26; 23 of the 1,000 torchref entries, at most 0.3%
+    of an entry's reflections), refinement programs drop them on input, and
+    mmtbx's anisotropic scaler asserts on the zero (MMTBX_ASSERT(fm_abs > 0),
+    the 2ZFX and 8P0O failures of the torchref1000 run, 2026-11-10). Both
+    methods read through here, so both see the same reflections. (With
+    --no-expand-symmetry and a model that does not have its declared
+    symmetry the model's F there is not exactly zero; dropping them is
+    still what every program does.)
+
+    Returns (F, free_mask, note): note is the printed line, or "" when
+    nothing was absent. A miller array's select() needs a flex.bool, not a
+    Python list -- the list raised ArgumentError on every file holding
+    (0,0,0) (reported on 3DHK and 2ZG0 in the torchref set)."""
+    from cctbx.array_family import flex
+
+    origin = (np.array(F.indices()).reshape(-1, 3) == 0).all(axis=1)
+    absent = np.array(F.sys_absent_flags().data(), dtype=bool)
+    n_absent = int(absent.sum())
+    note = ""
+    if n_absent:
+        note = ("%s: %d systematically absent reflection(s) of %s dropped, as "
+                "refinement programs do" % (name, n_absent, F.space_group_info()))
+        print(note, file=log)
+    keep = ~(origin | absent)
+    if not keep.all():
+        F = F.select(flex.bool(keep))
+        free_mask = free_mask[keep]
+    return F, free_mask, note
 
 
 # ------------------------------------------------------------------- the model
@@ -1275,9 +1311,13 @@ def mmtbx_fit(pdb, cif, d_min=None, isotropic=False, select="all"):
     pdb_in = hierarchy.input(file_name=pdb, sort_atoms=False)
     xrs = select_atoms(pdb_in, pdb_in.input.xray_structure_simple(), select,
                        log=_io.StringIO(), name=pdb)
+    # The reader's chatter goes to a sink, but what it dropped is returned,
+    # so that a run of this method alone can say why its reflection count is
+    # short of the file's.
+    info = {}
     F_obs, free_np = read_observations(
         cif, d_min=d_min, crystal_symmetry=xrs.crystal_symmetry(),
-        log=_io.StringIO())
+        log=_io.StringIO(), info=info)
     free_flags = F_obs.customized_copy(
         data=flex.bool(free_np.tolist())).set_observation_type(None)
 
@@ -1294,7 +1334,8 @@ def mmtbx_fit(pdb, cif, d_min=None, isotropic=False, select="all"):
             "k_sol": float(k_sol), "b_sol": float(b_sol),
             "n_work": int(F_obs.size() - free_np.sum()),
             "n_free": int(free_np.sum()),
-            "n_atoms": int(xrs.scatterers().size())}
+            "n_atoms": int(xrs.scatterers().size()),
+            "absent_note": info["absent_note"]}
 
 
 def external_reference(pdb, cif, d_min, log=sys.stdout, select="all"):
