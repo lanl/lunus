@@ -173,7 +173,8 @@ def test_binned_row_defaults_to_mmtbx_log_bins():
 def test_log_binned_row_through_run_on_7fpv_at_3a():
     """The wiring: run() hands the binned fit cctbx's d spacings and reports
     mmtbx's 6 bins for 7FPV cut to 3 A, while the main fit stays
-    single-scale."""
+    single-scale. --solvent-bins off keeps the exponential solvent, which is
+    what the pinned numbers were measured with."""
     import contextlib
     import io
 
@@ -181,12 +182,14 @@ def test_log_binned_row_through_run_on_7fpv_at_3a():
 
     args = fit_solvent_rfactor.build_parser().parse_args(
         [os.path.join(COMPARE, "7FPV.pdb"), os.path.join(COMPARE, "7FPV-sf.cif"),
-         "--d-min", "3.0", "--aniso", "--also-scale-bins", "log", "--shells", "3"])
+         "--d-min", "3.0", "--aniso", "--also-scale-bins", "log", "--shells", "3",
+         "--solvent-bins", "off"])
     with contextlib.redirect_stdout(io.StringIO()) as out:
         r = fit_solvent_rfactor.run(args)
     assert r["main_scale_bins"] == 0 and r["main_bin_scheme"] is None
     assert (r["scale_bins"], r["bin_scheme"]) == (6, "6 log bins")
-    assert "binned row: 6 log bins" in out.getvalue()
+    assert r["solvent_scheme binned"] == "exponential"
+    assert "binned row: 6 log bins, solvent exponential" in out.getvalue()
     # Pinned, so that some other 6-bin partition cannot pass: 6 equal-count
     # bins give R-free 0.1958 here, mmtbx's bins 0.1929.
     assert abs(r["R-work binned"] - 0.1880) < 5e-4
@@ -208,7 +211,17 @@ def test_main_fit_with_log_bins_through_run_on_7fpv_at_3a():
     assert (r["main_scale_bins"], r["main_bin_scheme"]) == (6, "6 log bins")
     assert "overall scale per resolution bin: 6 log bins" in out.getvalue()
     assert "fitted per resolution bin (6 bins)" in out.getvalue()
-    assert abs(r["R-free"] - 0.1929) < 1e-3
+    # The main fit with bins also scales the solvent per bin by default
+    # (measured 2026-11-10: 0.1886 / 0.1935), and the exponential is one
+    # flag away (0.1880 / 0.1929, the numbers before per-bin solvent).
+    assert r["solvent_scheme"] == "per bin"
+    assert "solvent scale is one value per bin" in out.getvalue()
+    assert abs(r["R-work"] - 0.1886) < 5e-4 and abs(r["R-free"] - 0.1935) < 1e-3
+    args.solvent_bins = "off"
+    with contextlib.redirect_stdout(io.StringIO()):
+        r2 = fit_solvent_rfactor.run(args)
+    assert r2["solvent_scheme"] == "exponential"
+    assert abs(r2["R-work"] - 0.1880) < 5e-4 and abs(r2["R-free"] - 0.1929) < 1e-3
 
 
 def test_main_forwards_the_default_binned_row(monkeypatch, capsys):
@@ -224,7 +237,9 @@ def test_main_forwards_the_default_binned_row(monkeypatch, capsys):
                 "R-work": 0.2, "R-free": 0.2, "k_sol": 0.35, "b_sol": 46.0,
                 "n_work": 100, "n_free": 5, "n_atoms": 10,
                 "main_scale_bins": 0, "main_bin_scheme": None,
+                "solvent_scheme": "exponential",
                 "scale_bins": 6, "bin_scheme": "6 log bins",
+                "solvent_scheme binned": "per bin",
                 "R-work binned": 0.19, "R-free binned": 0.19,
                 "k_sol binned": 0.35, "b_sol binned": 46.0}
     monkeypatch.setattr(pdb_rfactor, "fetch_entry",
@@ -236,4 +251,59 @@ def test_main_forwards_the_default_binned_row(monkeypatch, capsys):
         pdb_rfactor.main()
         assert seen[-1] == expected
     out = capsys.readouterr().out
-    assert "torch, 6 scale bins" in out and "scale bins: 6 log bins" in out
+    assert "torch, 6 scale bins" in out and "scale bins: 6 log bins, solvent per bin" in out
+
+
+def test_binned_row_defaults_to_per_bin_solvent_on_7fpv_at_3a():
+    """The default binned row scales the solvent per bin, reports the curve,
+    and quotes k_sol/b_sol as the exponential nearest it; the single-scale
+    row is untouched."""
+    import contextlib
+    import io
+
+    import fit_solvent_rfactor
+
+    args = fit_solvent_rfactor.build_parser().parse_args(
+        [os.path.join(COMPARE, "7FPV.pdb"), os.path.join(COMPARE, "7FPV-sf.cif"),
+         "--d-min", "3.0", "--aniso", "--also-scale-bins", "log", "--shells", "3"])
+    with contextlib.redirect_stdout(io.StringIO()) as out:
+        r = fit_solvent_rfactor.run(args)
+    text = out.getvalue()
+    # The binned row scales the solvent per bin; the single-scale main fit
+    # keeps the exponential, and the two are reported under separate keys.
+    assert r["solvent_scheme binned"] == "per bin"
+    assert r["solvent_scheme"] == "exponential"
+    assert "binned row: 6 log bins, solvent per bin" in text
+    assert "solvent scale per bin (low to high resolution):" in text
+    # Measured 2026-11-10 on this branch; the exponential gives 0.1880 / 0.1929.
+    assert abs(r["R-work binned"] - 0.1886) < 5e-4
+    assert abs(r["R-free binned"] - 0.1935) < 1e-3
+    assert abs(r["R-work"] - 0.1901) < 5e-4          # single-scale row unchanged
+    assert 0.0 <= r["b_sol binned"] <= 150.0 and 0.0 <= r["k_sol binned"] <= 0.6
+
+
+def test_equal_count_bins_keep_the_exponential_solvent_by_default():
+    """With equal-count bins the lowest bin reaches to about 3 A, so one flat
+    solvent scale over it is worse than the exponential (7FPV, 20 bins:
+    R-free +0.0035). 'auto' therefore means per-bin solvent for log bins
+    only; 'on' forces it."""
+    import contextlib
+    import io
+
+    import fit_solvent_rfactor
+
+    base = [os.path.join(COMPARE, "7FPV.pdb"), os.path.join(COMPARE, "7FPV-sf.cif"),
+            "--d-min", "3.0", "--aniso", "--shells", "3"]
+    parse = fit_solvent_rfactor.build_parser().parse_args
+    with contextlib.redirect_stdout(io.StringIO()):
+        auto = fit_solvent_rfactor.run(parse(base + ["--also-scale-bins", "6"]))
+        on = fit_solvent_rfactor.run(parse(base + ["--also-scale-bins", "6",
+                                                   "--solvent-bins", "on"]))
+    assert auto["solvent_scheme binned"] == "exponential"
+    assert on["solvent_scheme binned"] == "per bin"
+    assert auto["bin_scheme"] == "6 equal-count bins"
+    assert auto["R-free binned"] == auto["R-free binned"]   # a number, not nan
+    # the main fit follows the same rule
+    with contextlib.redirect_stdout(io.StringIO()):
+        main = fit_solvent_rfactor.run(parse(base + ["--scale-bins", "6"]))
+    assert main["solvent_scheme"] == "exponential" and main["main_bin_scheme"] == "6 equal-count bins"
