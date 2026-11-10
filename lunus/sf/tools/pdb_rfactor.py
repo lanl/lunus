@@ -144,7 +144,7 @@ def build_parser():
                         "deposited hydrogens (default: all atoms)")
     p.epilog = ("Anything else -- after a bare '--' to be safe -- is passed "
                 "through to fit_solvent_rfactor.py: --mask gemmi, --device, "
-                "--mask-blur, --reference, ...")
+                "--mask-blur, --protein-blur, --reference, ...")
     return p
 
 
@@ -228,6 +228,9 @@ def main():
                if r_torch.get(k)]
     if schemes:
         print("  scale bins: %s" % "; ".join(schemes))
+    if r_torch.get("protein_blur"):
+        print("  protein blur: %.1f A^2 placed and removed again (sharpest "
+              "atom B %.1f)" % (r_torch["protein_blur"], r_torch["b_sharpest"]))
     # Wall time of each method; the torch run's own per-phase table is above.
     parts = []
     if r_torch.get("timing"):

@@ -192,9 +192,11 @@ def test_log_binned_row_through_run_on_7fpv_at_3a():
     assert r["solvent_scheme binned"] == "exponential"
     assert "binned row: 6 log bins, solvent exponential" in out.getvalue()
     # Pinned, so that some other 6-bin partition cannot pass: 6 equal-count
-    # bins give R-free 0.1958 here, mmtbx's bins 0.1929.
-    assert abs(r["R-work binned"] - 0.1880) < 5e-4
-    assert abs(r["R-free binned"] - 0.1929) < 1e-3
+    # bins give R-free 0.1986 here, mmtbx's bins 0.1975. (With
+    # --protein-blur 0, the placement before 2026-11-10, the pins were
+    # 0.1880 / 0.1929; at 3 A the 1 A voxels alias 7FPV's B = 10 atoms.)
+    assert abs(r["R-work binned"] - 0.1847) < 5e-4
+    assert abs(r["R-free binned"] - 0.1975) < 1e-3
 
 
 def test_main_fit_with_log_bins_through_run_on_7fpv_at_3a():
@@ -213,16 +215,17 @@ def test_main_fit_with_log_bins_through_run_on_7fpv_at_3a():
     assert "overall scale per resolution bin: 6 log bins" in out.getvalue()
     assert "fitted per resolution bin (6 bins)" in out.getvalue()
     # The main fit with bins also scales the solvent per bin by default
-    # (measured 2026-11-10: 0.1886 / 0.1935), and the exponential is one
-    # flag away (0.1880 / 0.1929, the numbers before per-bin solvent).
+    # (measured 2026-11-10: 0.1852 / 0.1985), and the exponential is one
+    # flag away (0.1847 / 0.1975). Before the protein blur (--protein-blur 0)
+    # these were 0.1886 / 0.1935 and 0.1880 / 0.1929.
     assert r["solvent_scheme"] == "per bin"
     assert "solvent scale is one value per bin" in out.getvalue()
-    assert abs(r["R-work"] - 0.1886) < 5e-4 and abs(r["R-free"] - 0.1935) < 1e-3
+    assert abs(r["R-work"] - 0.1852) < 5e-4 and abs(r["R-free"] - 0.1985) < 1e-3
     args.solvent_bins = "off"
     with contextlib.redirect_stdout(io.StringIO()):
         r2 = fit_solvent_rfactor.run(args)
     assert r2["solvent_scheme"] == "exponential"
-    assert abs(r2["R-work"] - 0.1880) < 5e-4 and abs(r2["R-free"] - 0.1929) < 1e-3
+    assert abs(r2["R-work"] - 0.1847) < 5e-4 and abs(r2["R-free"] - 0.1975) < 1e-3
 
 
 def test_main_forwards_the_default_binned_row(monkeypatch, capsys):
@@ -281,10 +284,11 @@ def test_binned_row_defaults_to_per_bin_solvent_on_7fpv_at_3a():
     assert r["solvent_scheme"] == "exponential"
     assert "binned row: 6 log bins, solvent per bin" in text
     assert "solvent scale per bin (low to high resolution):" in text
-    # Measured 2026-11-10 on this branch; the exponential gives 0.1880 / 0.1929.
-    assert abs(r["R-work binned"] - 0.1886) < 5e-4
-    assert abs(r["R-free binned"] - 0.1935) < 1e-3
-    assert abs(r["R-work"] - 0.1901) < 5e-4          # single-scale row unchanged
+    # Measured 2026-11-10 with the protein blur; the exponential gives
+    # 0.1847 / 0.1975 (before the blur: 0.1886 / 0.1935, single 0.1901).
+    assert abs(r["R-work binned"] - 0.1852) < 5e-4
+    assert abs(r["R-free binned"] - 0.1985) < 1e-3
+    assert abs(r["R-work"] - 0.1868) < 5e-4    # single-scale row: not moved by the binned row
     assert 0.0 <= r["b_sol binned"] <= 150.0 and 0.0 <= r["k_sol binned"] <= 0.6
     # per-phase timing: every phase this run goes through is present, none
     # negative, the phases do not exceed the total, and the table is printed
@@ -602,3 +606,195 @@ def test_status_column_with_wavelength_id_is_still_the_free_set(tmp_path):
     assert int(free.sum()) == n_free_expected and n_free_expected > 0
     assert F.size() == len(hkl) - n_zero
     assert "%d amplitude(s) deposited as exactly zero dropped" % n_zero in log.getvalue()
+
+
+def sharp_toy(tmp_path, d_min=2.5, sharp=True, aniso=False):
+    """A P1 cell with atoms at B = 20 and, with sharp, at B = 2 (narrower
+    than the d_min/3 voxel), and an MTZ whose 'observations' are the exact
+    |F_calc| of that model from cctbx direct summation, so that any R above a
+    few 1e-3 in the no-solvent fit is the grid's error and nothing else. With
+    aniso, one more atom carries an ANISOU with principal B 1.6, 2.4, 3.2
+    (U = 0.02, 0.03, 0.04 A^2, rotated off the axes)."""
+    from cctbx.array_family import flex
+    import iotbx.pdb
+
+    lines = ["CRYST1   20.000   22.000   24.000  90.00  90.00  90.00 P 1           1"]
+    atoms = [("C", 12.0, 14.0, 15.0, 20.0), ("N", 15.5, 14.5, 15.5, 20.0), ("O", 12.5, 18.0, 16.0, 20.0)]
+    if sharp:
+        atoms += [("C", 4.0, 5.0, 6.0, 2.0), ("N", 7.5, 5.5, 6.5, 2.0), ("O", 4.5, 9.0, 7.0, 2.0)]
+    for i, (el, x, y, z, b) in enumerate(atoms, 1):
+        lines.append("ATOM  %5d  %-3s ALA A%4d    %8.3f%8.3f%8.3f  1.00%6.2f          %2s"
+                     % (i, el, i, x, y, z, b, el))
+    if aniso:
+        i = len(atoms) + 1
+        # U_cart = R diag(0.02, 0.03, 0.04) R^T for a 30 degree rotation about z,
+        # in 1e-4 A^2 as ANISOU stores it: U11 U22 U33 U12 U13 U23
+        u11, u22, u12 = 225, 275, -43          # 0.0225, 0.0275, -0.00433
+        lines.append("ATOM  %5d  %-3s ALA A%4d    %8.3f%8.3f%8.3f  1.00%6.2f          %2s"
+                     % (i, "S", i, 9.0, 16.0, 9.5, 8 * 3.14159265 ** 2 * 0.03, "S"))
+        lines.append("ANISOU%5d  %-3s ALA A%4d  %7d%7d%7d%7d%7d%7d       %2s"
+                     % (i, "S", i, u11, u22, 400, u12, 0, 0, "S"))
+    lines.append("END")
+    pdb = tmp_path / "sharp.pdb"
+    pdb.write_text("\n".join(lines) + "\n")
+    xrs = iotbx.pdb.input(file_name=str(pdb)).xray_structure_simple()
+    xrs.scattering_type_registry(table="it1992")
+    fc = xrs.structure_factors(d_min=d_min, algorithm="direct").f_calc()
+    F = fc.customized_copy(data=flex.abs(fc.data())).set_observation_type_xray_amplitude()
+    mtz = tmp_path / "sharp.mtz"
+    F.as_mtz_dataset(column_root_label="FOBS").mtz_object().write(file_name=str(mtz))
+    return str(pdb), str(mtz)
+
+
+@requires_cctbx
+def test_protein_blur_fixes_sharp_atoms_on_the_default_grid(tmp_path):
+    """An atom at B = 2 A^2 is a Gaussian narrower than the default d_min/3
+    voxel and aliases when placed on the grid: against exact |F_calc| the
+    no-solvent fit cannot get below R ~ 0.1. Placing the density with
+    recommended_blur's extra B and removing it from F_protein (the default,
+    --protein-blur auto) brings the same fit to the few-1e-3 floor of the
+    grid; --protein-blur 0 reproduces the aliased placement. The threshold
+    mask's smoothing is reduced by the same B, which the run says."""
+    import contextlib
+    import io
+
+    import fit_solvent_rfactor
+
+    pdb, mtz = sharp_toy(tmp_path)
+
+    def fit(*extra):
+        args = fit_solvent_rfactor.build_parser().parse_args(
+            [pdb, mtz, "--shells", "2"] + list(extra))
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            r = fit_solvent_rfactor.run(args)
+        return r, out.getvalue()
+
+    r, text = fit()
+    assert r["R-work no solvent"] < 0.01, (
+        "default run: no-solvent R-work %.4f against exact |F_calc|; the B = 2 "
+        "atoms alias on the grid" % r["R-work no solvent"])
+    assert r["b_sharpest"] == pytest.approx(2.0)
+    assert r["protein_blur"] > 10.0, r["protein_blur"]
+    assert "protein density placed with B + %.1f A^2" % r["protein_blur"] in text
+    assert "(%.1f of it already in the placed density)" % r["protein_blur"] in text
+
+    r0, text0 = fit("--protein-blur", "0")
+    assert r0["protein_blur"] == 0.0
+    assert "placed as is (--protein-blur 0;" in text0
+    assert "clears the grid's blur target" not in text0     # 0 was asked for, not earned
+    assert r0["R-work no solvent"] > 0.05, r0["R-work no solvent"]
+    assert "already in the placed density" not in text0
+
+    # an explicit value wins over the rule, and reaches the density: a third
+    # of the recommended blur lands between the aliased and the corrected fit
+    r12, _ = fit("--protein-blur", "12.5")
+    assert r12["protein_blur"] == 12.5
+    assert r0["R-work no solvent"] > r12["R-work no solvent"] > r["R-work no solvent"]
+
+
+@requires_cctbx
+def test_protein_blur_reaches_the_anisotropic_kernel(tmp_path):
+    """With --aniso-adp the anisotropic kernel builder gets the same blur, and
+    the sharpest B is the smallest principal B of the ANISOU atom (1.6 A^2
+    here), not its equivalent isotropic B (2.4) nor the isotropic minimum
+    (2.0); without --aniso-adp the atom is placed with its equivalent B and
+    the isotropic minimum rules."""
+    import contextlib
+    import io
+
+    import numpy as np
+
+    import fit_solvent_rfactor
+
+    pdb, mtz = sharp_toy(tmp_path, aniso=True)
+
+    def fit(*extra):
+        args = fit_solvent_rfactor.build_parser().parse_args(
+            [pdb, mtz, "--shells", "2"] + list(extra))
+        with contextlib.redirect_stdout(io.StringIO()):
+            return fit_solvent_rfactor.run(args)
+
+    r = fit("--aniso-adp")
+    assert r["b_sharpest"] == pytest.approx(0.02 * 8 * np.pi ** 2, abs=0.02)
+    assert r["protein_blur"] > 10.0
+    assert r["R-work no solvent"] < 0.01, r["R-work no solvent"]
+    r0 = fit("--aniso-adp", "--protein-blur", "0")
+    assert r0["R-work no solvent"] > 0.05, r0["R-work no solvent"]
+    r_iso = fit()
+    assert r_iso["b_sharpest"] == pytest.approx(2.0)
+    assert r_iso["R-work no solvent"] < 0.01
+
+
+@requires_cctbx
+def test_protein_blur_leaves_the_threshold_mask_as_shipped(tmp_path):
+    """--mask-blur is a total: the mask is thresholded from a density smoothed
+    by mask_blur in all, whether the protein blur put part of it there or
+    not. On a model with nothing sharp (B = 20 only, so nothing aliases) the
+    calibrated cutoff and the occupancy with the blur match those without it;
+    smoothing twice would move the cutoff."""
+    import contextlib
+    import io
+
+    import fit_solvent_rfactor
+
+    pdb, mtz = sharp_toy(tmp_path, sharp=False)
+
+    def fit(*extra):
+        args = fit_solvent_rfactor.build_parser().parse_args(
+            [pdb, mtz, "--shells", "2"] + list(extra))
+        with contextlib.redirect_stdout(io.StringIO()):
+            return fit_solvent_rfactor.run(args)
+
+    r = fit()
+    r0 = fit("--protein-blur", "0")
+    assert r["protein_blur"] > 5.0 and r0["protein_blur"] == 0.0
+    assert r["mask_cutoff"] == pytest.approx(r0["mask_cutoff"], rel=2e-3)
+    # the occupancy is calibrated to gemmi's target either way, so it cannot
+    # tell the two apart; the cutoff is the quantity that moves
+    assert r["mask_occupancy"] == pytest.approx(r0["mask_occupancy"], abs=2e-3)
+    # the same density smoothed by the full --mask-blur on top of the protein
+    # blur is what the remainder rule prevents: run it as if it were not a
+    # total, by asking for a mask blur larger by the protein blur
+    r2 = fit("--mask-blur", "%.3f" % (100.0 + r["protein_blur"]))
+    assert abs(r2["mask_cutoff"] - r0["mask_cutoff"]) > 5e-3 * r0["mask_cutoff"]
+
+
+@requires_cctbx
+def test_sharpest_b_and_protein_blur_setting():
+    """sharpest_b is the smallest B the density is placed with: isotropic B,
+    or an anisotropic atom's smallest principal B; protein_blur resolves
+    'auto' through recommended_blur and takes a number as given."""
+    import numpy as np
+
+    import fit_solvent_rfactor
+    from lunus.sf.cell_utils import orth_matrix, recommended_blur
+
+    b = np.array([30.0, 12.0, 45.0])
+    assert fit_solvent_rfactor.sharpest_b(b) == 12.0
+    assert fit_solvent_rfactor.sharpest_b(b, occ=np.array([1.0, 0.0, 0.5])) == 30.0
+    assert fit_solvent_rfactor.sharpest_b(b, occ=np.zeros(3)) == 12.0      # all zero: keep all
+    u = np.zeros((3, 3, 3))
+    u[2] = np.diag([0.05, 0.2, 0.3])                    # principal B 3.9, 15.8, 23.7
+    is_aniso = np.array([False, False, True])
+    assert abs(fit_solvent_rfactor.sharpest_b(b, u, is_aniso) - 0.05 * 8 * np.pi ** 2) < 1e-9
+    u[2] = np.diag([0.5, 0.6, 0.7])                     # all above the isotropic 12
+    assert fit_solvent_rfactor.sharpest_b(b, u, is_aniso) == 12.0
+    assert fit_solvent_rfactor.sharpest_b(b, u, np.zeros(3, dtype=bool)) == 12.0
+
+    M = orth_matrix(20.0, 22.0, 24.0, 90.0, 90.0, 90.0)
+    grid = (24, 27, 30)
+    assert fit_solvent_rfactor.protein_blur("auto", 2.0, grid, M, 2.5) == \
+        recommended_blur(2.0, grid, M, d_min=2.5)
+    assert fit_solvent_rfactor.protein_blur("AUTO", 500.0, grid, M, 2.5) == 0.0
+    assert fit_solvent_rfactor.protein_blur("0", 2.0, grid, M, 2.5) == 0.0
+    assert fit_solvent_rfactor.protein_blur(7.5, 2.0, grid, M, 2.5) == 7.5
+    # a negative blur would place the atoms sharper than the model says and
+    # sharpen F_protein's error: rejected at the parser and in the resolver
+    with pytest.raises(ValueError, match=">= 0"):
+        fit_solvent_rfactor.protein_blur(-1.0, 2.0, grid, M, 2.5)
+    parse = fit_solvent_rfactor.build_parser().parse_args
+    assert parse(["m.pdb", "d.mtz", "--protein-blur", "AUTO"]).protein_blur == "auto"
+    assert parse(["m.pdb", "d.mtz", "--protein-blur", "12.5"]).protein_blur == 12.5
+    for bad in ("-1", "yes"):
+        with pytest.raises(SystemExit):
+            parse(["m.pdb", "d.mtz", "--protein-blur", bad])
