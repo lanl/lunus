@@ -840,6 +840,94 @@ def solvent_weight(fit, inv_d2):
     return fit["k_sol"] * torch.exp(-0.25 * fit["b_sol"] * inv_d2)
 
 
+def scan_grids(fit_solvent, like):
+    """The (k_sol, b_sol, B_overall) grids of fit_scales' coarse scan, on
+    like's dtype and device. One place, so that the equivalence tests scan
+    the grid the fit scans. Without the solvent the first two are the single
+    node 0."""
+    dtype, device = like.dtype, like.device
+    b_grid = torch.linspace(-20.0, 80.0, 26, dtype=dtype, device=device)
+    if fit_solvent:
+        k_grid = torch.linspace(0.0, 1.2, 25, dtype=dtype, device=device)
+        # Deliberately wider than any physical b_sol. A scan that stops at 200
+        # returns 199 for a mask carrying too much high-resolution content,
+        # which reads as a fit rather than as the pinned boundary it is.
+        bs_grid = torch.linspace(0.0, 400.0, 41, dtype=dtype, device=device)
+    else:
+        k_grid = torch.zeros(1, dtype=dtype, device=device)
+        bs_grid = torch.zeros(1, dtype=dtype, device=device)
+    return k_grid, bs_grid, b_grid
+
+
+def coarse_scan(Fo, Fp, Fm, s2, k_grid, bs_grid, b_grid):
+    """Stage 1 of fit_scales: the node of the (k_sol, b_sol, B_overall) grid
+    with the smallest least-squares residual, the overall scale solved
+    exactly at every node. Returns (k_sol, b_sol, B_overall, log_k) as
+    floats, the same node coarse_scan_reference finds.
+
+    Batched: for each b_sol the amplitudes |F_p + k_sol w(b_sol) F_m| are
+    formed for every k_sol at once, (n_k, n_refl), and the two sums the
+    residual needs at every (k_sol, B_overall) node,
+
+        num = sum_h Fo e^{-B s^2/4} |F_c|,   den = sum_h e^{-B s^2/4 * 2} |F_c|^2,
+
+    are two matrix products against the (n_B, n_refl) table of overall-B
+    factors. The residual at the exact scale k = num/den is
+    sum Fo^2 - num^2/den, which is the loop's sum (Fo - k g)^2 expanded, so
+    nothing is fitted differently. What changes is the shape of the work:
+    the loop ran 26,650 nodes as separate small kernels and read each
+    residual back as a Python float, which on a GPU is a device
+    synchronisation per node and was ~4 s of every entry's wall time there
+    (measured on the torchref1000 pilot, 2026-11-10); here it is 41 passes
+    of a few batched operations and one synchronisation at the end. The
+    minimum is taken in the loop's own order (k_sol outermost, B_overall
+    innermost) so a tie resolves to the same node."""
+    with torch.no_grad():
+        n_k, n_bs, n_b = len(k_grid), len(bs_grid), len(b_grid)
+        E = torch.exp(-0.25 * b_grid[:, None] * s2[None, :])        # (n_b, n)
+        E2 = E * E
+        Fo_sq = (Fo * Fo).sum()
+        num = torch.empty(n_k, n_bs, n_b, dtype=s2.dtype, device=s2.device)
+        den = torch.empty_like(num)
+        Fm_row = None if Fm is None else Fm[None, :]
+        for j in range(n_bs):
+            # _f_calc broadcasts: (n_k, 1) k_sol against (1, n) reflections
+            # gives the (n_k, n) table; without a mask it is the (1, n) row,
+            # which the assignments below broadcast over n_k (then 1).
+            mag = torch.abs(_f_calc(Fp[None, :], Fm_row, s2[None, :],
+                                    k_grid[:, None], bs_grid[j]))
+            num[:, j, :] = (mag * Fo[None, :]) @ E.T                 # (n_k, n_b)
+            den[:, j, :] = (mag * mag) @ E2.T
+        k = torch.clamp(num / den, min=1e-12)
+        # sum (Fo - k g)^2 at the clamped k, exactly as the loop evaluated it
+        resid = Fo_sq - 2.0 * k * num + k * k * den
+        idx = torch.argmin(resid.reshape(-1))                        # first minimum, loop order
+        i = idx // (n_bs * n_b)
+        j = idx // n_b % n_bs
+        m = idx % n_b
+        # One read-back for all four, the only synchronisation in the scan.
+        return tuple(torch.stack([k_grid[i], bs_grid[j], b_grid[m],
+                                  torch.log(k.reshape(-1)[idx])]).tolist())
+
+
+def coarse_scan_reference(Fo, Fp, Fm, s2, k_grid, bs_grid, b_grid):
+    """The scan as a Python loop over nodes, kept as the reference the
+    vectorised coarse_scan is tested against. Not used by the fit."""
+    best = None
+    with torch.no_grad():
+        for k_sol in k_grid:
+            for b_sol in bs_grid:
+                mag = torch.abs(_f_calc(Fp, Fm, s2, k_sol, b_sol))
+                for b_ov in b_grid:
+                    g = torch.exp(-0.25 * b_ov * s2) * mag
+                    log_k = optimal_log_k(Fo, g)
+                    resid = float(((Fo - torch.exp(log_k) * g) ** 2).sum())
+                    if best is None or resid < best[0]:
+                        best = (resid, float(k_sol), float(b_sol),
+                                float(b_ov), float(log_k))
+    return best[1:]
+
+
 def fit_scales(F_obs, F_protein, F_mask, inv_d2, s_cart, work, aniso,
                fit_solvent=True, bins=None, solvent_bins=False, log=sys.stdout):
     """
@@ -850,9 +938,9 @@ def fit_scales(F_obs, F_protein, F_mask, inv_d2, s_cart, work, aniso,
     a local minimum that depends on where it began:
 
       1. A coarse scan over (k_sol, b_sol), with the overall scale solved
-         exactly at every node and the overall B scanned alongside. Cheap:
-         everything is a vector op over ~70k reflections and the two structure
-         factor sets are computed once, before the scan.
+         exactly at every node and the overall B scanned alongside
+         (coarse_scan: batched, one synchronisation; the two structure
+         factor sets are computed once, before the scan).
       2. LBFGS on every parameter at once from the best node.
 
       3. Only with bins (resolution_bins or log_resolution_bins): the
@@ -897,33 +985,8 @@ def fit_scales(F_obs, F_protein, F_mask, inv_d2, s_cart, work, aniso,
     s2 = inv_d2[work]
     s = s_cart[work]
 
-    b_grid = torch.linspace(-20.0, 80.0, 26, dtype=inv_d2.dtype,
-                            device=inv_d2.device)
-    if fit_solvent:
-        k_grid = torch.linspace(0.0, 1.2, 25, dtype=inv_d2.dtype,
-                                device=inv_d2.device)
-        # Deliberately wider than any physical b_sol. A scan that stops at 200
-        # returns 199 for a mask carrying too much high-resolution content,
-        # which reads as a fit rather than as the pinned boundary it is.
-        bs_grid = torch.linspace(0.0, 400.0, 41, dtype=inv_d2.dtype,
-                                 device=inv_d2.device)
-    else:
-        k_grid = torch.zeros(1, dtype=inv_d2.dtype, device=inv_d2.device)
-        bs_grid = torch.zeros(1, dtype=inv_d2.dtype, device=inv_d2.device)
-
-    best = None
-    with torch.no_grad():
-        for k_sol in k_grid:
-            for b_sol in bs_grid:
-                mag = torch.abs(_f_calc(Fp, Fm, s2, k_sol, b_sol))
-                for b_ov in b_grid:
-                    g = torch.exp(-0.25 * b_ov * s2) * mag
-                    log_k = optimal_log_k(Fo, g)
-                    resid = float(((Fo - torch.exp(log_k) * g) ** 2).sum())
-                    if best is None or resid < best[0]:
-                        best = (resid, float(k_sol), float(b_sol),
-                                float(b_ov), float(log_k))
-    _, k_sol0, b_sol0, b_ov0, log_k0 = best
+    k_sol0, b_sol0, b_ov0, log_k0 = coarse_scan(Fo, Fp, Fm, s2,
+                                                *scan_grids(fit_solvent, inv_d2))
     print("  coarse scan: k_sol %.3f, b_sol %.1f, B_overall %.1f"
           % (k_sol0, b_sol0, b_ov0), file=log)
 
