@@ -75,6 +75,7 @@ B_SOL_DEFAULT = 46.0     # A^2
 # agreement with Phenix's 1.11 A solvent radius a corroboration rather than a
 # fit. mask_blur=0.0 restores the unsmoothed threshold, and changes results.
 MASK_BLUR_DEFAULT = 100.0    # A^2
+SOURCE_B_DEFAULT = 20.0      # A^2; see mask_source_weights() and SolventModel.source_b
 
 # Occupancies outside this band are reported. The band is deliberately much
 # wider than the 0.3-0.7 a protein crystal actually shows: the point is to
@@ -224,8 +225,68 @@ def shell_voxels(mask):
     return int(((mask > 1e-6) & (mask < 1.0 - 1e-6)).sum())
 
 
+def mask_source_weights(elements_per_atom, coeff_table):
+    """Per-atom weights that turn a density placement into an ATOM-PRESENCE
+    field: 1 / f(0), the electron count the kernel integrates to, so every
+    atom contributes the same unit Gaussian whatever its element.
+
+    THE MASK SHOULD NOT FOLLOW THE ELECTRON DENSITY. A geometric mask is
+    built from atom positions and radii; it does not care that a sulfur has
+    16 electrons and a carbon 6, nor what each atom's B is. A threshold on
+    the electron density does both, and at low resolution and high B the
+    boundary it draws is far from the geometric one. Placing every atom with
+    the same weight and the same B (SOURCE_B_DEFAULT) and thresholding THAT
+    took the binned R-free gap to mmtbx on 20 entries at 2.6-3.0 A from
+    +0.0105 to +0.0046 (every entry better; gemmi's geometric mask on the
+    same grid reaches -0.0015), on 20 entries at 1.8-2.6 A from +0.0062 to
+    +0.0017, and on 39 SW40 entries at 0.9-2.5 A from +0.0010 to -0.0005
+    (35 better), measured 2026-11-10. Each atom is its element's IT92 sum of
+    Gaussians divided by its electron count, so the field keeps a slight
+    element dependence in shape, none in weight. Multiply the occupancies by
+    these before placing the mask's source with uniform-B kernels. The width
+    that matters is the TOTAL, source_b plus mask_blur: with the default
+    smoothing of 100 A^2, totals of 70-110 A^2 measure alike at low resolution
+    and 120 is marginally better on SW40, which is where 20 comes from."""
+    import numpy as np
+
+    return np.array([1.0 / (sum(coeff_table[e][0:4]) + coeff_table[e][8])
+                     for e in elements_per_atom], dtype=float)
+
+
+def close_mask(mask, orth_matrix, blur_b, level, taper=0.1, inv_d2_grid=None):
+    """The shrink step a geometric mask has and a density threshold lacks.
+
+    A geometric mask dilates the atoms by the probe radius and then shrinks
+    the protein back, so crevices narrower than the probe stay filled while
+    the outer surface returns towards the atoms. The threshold mask's
+    smoothing (mask_blur) plays the probe's role but has no shrink: it moves
+    the whole boundary out, and the calibration then pulls it back everywhere
+    at once. This is the shrink, differentiably: the soft mask (1 = solvent)
+    is smoothed by exp(-blur_b s^2/4) and thresholded again at `level`: a
+    voxel is protein where no more than `level` of its neighbourhood was
+    solvent, fully solvent from `level + taper` up, with a C^1 taper (in mask
+    units) between -- the window lies above the level, as solvent_mask's lies
+    below its cutoff. level < 0.5 grows the solvent
+    (erodes the protein), the shrink; 0.5 smooths without bias; > 0.5 grows
+    the protein. The first-stage cutoff is calibrated through this step
+    (calibrate_cutoff's `finish`), so the FINAL occupancy meets the target
+    and the first stage over-dilates by exactly what the shrink takes back.
+
+    MEASURED AND NOT SHIPPED. On 20 entries at 2.6-3.0 A every setting tried
+    (B2 20-100 A^2, level 0.2-0.5) made the gap to mmtbx worse by 0.003-0.011,
+    for the same reason a wider mask_blur does: more smoothing of the boundary
+    is the wrong direction. Kept, with its tests, for a later look; the
+    atom-presence source (mask_source_weights) is what worked.
+    """
+    if blur_b <= 0.0:
+        return mask
+    smoothed = blur_density(mask, orth_matrix, blur_b, inv_d2_grid)
+    # taper_factor is 1 well below its cutoff: feed it the protein fraction
+    return taper_factor(1.0 - smoothed, 1.0 - level, taper)
+
+
 def calibrate_cutoff(density, target_occupancy, taper_width_frac=0.5,
-                     iterations=60):
+                     iterations=60, finish=None):
     """
     The cutoff at which the mask calls `target_occupancy` of the cell solvent.
 
@@ -248,7 +309,15 @@ def calibrate_cutoff(density, target_occupancy, taper_width_frac=0.5,
 
     Bisection on a monotone quantity, so it is deterministic and needs no
     gradients; run once at setup, not per configuration.
+
+    finish, if given, maps the thresholded mask to the mask actually used
+    (close_mask), and the occupancy that meets the target is the finished
+    one's; it must keep the occupancy monotone in the cutoff, which a
+    smoothing followed by a threshold does.
     """
+    if finish is None:
+        def finish(mask):
+            return mask
     if not 0.0 < target_occupancy < 1.0:
         raise ValueError("target_occupancy must be in (0, 1), got %r"
                          % (target_occupancy,))
@@ -261,8 +330,8 @@ def calibrate_cutoff(density, target_occupancy, taper_width_frac=0.5,
     lo, hi = 1e-12, float(density.max())
 
     def occ_at(c):
-        return float(mask_occupancy(
-            solvent_mask(density, c, taper_width_frac * c)))
+        return float(mask_occupancy(finish(
+            solvent_mask(density, c, taper_width_frac * c))))
 
     floor, ceiling = occ_at(lo), occ_at(hi)
     if not floor - 1e-6 <= target_occupancy <= ceiling + 1e-6:
@@ -277,8 +346,7 @@ def calibrate_cutoff(density, target_occupancy, taper_width_frac=0.5,
 
     for _ in range(iterations):
         mid = 0.5 * (lo + hi)
-        occ = float(mask_occupancy(
-            solvent_mask(density, mid, taper_width_frac * mid)))
+        occ = occ_at(mid)
         if occ > target_occupancy:
             hi = mid
         else:
@@ -395,6 +463,15 @@ class SolventModel:
                     Phenix and REFMAC do per macro-cycle. That model is the
                     better long-term design and is not implementable here yet,
                     because nothing can pin a mask across calls.
+      source_b      None (default): the mask is thresholded from the electron
+                    density itself. A number: the caller places a SECOND field
+                    for the mask, every atom a unit-weight Gaussian at this B
+                    (mask_source_weights, uniform-B kernels), and hands it in
+                    as `source`; see mask_source_weights for why and what it
+                    buys. SOURCE_B_DEFAULT is the measured value; the
+                    R-factor tool ships it, the library leaves it opt-in so
+                    that structure_factors_one_config needs no second kernel
+                    set unless asked.
       check_occupancy
                     measure the mask ONCE, on the first configuration, and
                     warn if it is degenerate (default True). The check costs
@@ -407,14 +484,14 @@ class SolventModel:
 
     __slots__ = ("cutoff", "taper_width", "k_sol", "b_sol", "k_overall",
                  "u_aniso", "detach_mask", "check_occupancy",
-                 "density_scale", "mask_blur", "last_occupancy",
+                 "density_scale", "mask_blur", "source_b", "last_occupancy",
                  "last_shell_voxels", "_inv_d2_grid", "_inv_d2_key",
                  "_warned_blur")
 
     def __init__(self, cutoff, taper_width, k_sol=K_SOL_DEFAULT,
                  b_sol=B_SOL_DEFAULT, k_overall=1.0, u_aniso=None,
                  detach_mask=False, check_occupancy=True, density_scale=1.0,
-                 mask_blur=MASK_BLUR_DEFAULT):
+                 mask_blur=MASK_BLUR_DEFAULT, source_b=None):
         if taper_width <= 0:
             raise ValueError(
                 "taper_width must be > 0; a hard threshold has no usable "
@@ -433,6 +510,9 @@ class SolventModel:
         self.check_occupancy = check_occupancy
         self.density_scale = density_scale
         self.mask_blur = mask_blur
+        if source_b is not None and source_b <= 0:
+            raise ValueError("source_b must be > 0 A^2 or None")
+        self.source_b = source_b
         self.last_occupancy = None
         self.last_shell_voxels = None
         self._inv_d2_grid = None
@@ -449,9 +529,10 @@ class SolventModel:
             self._inv_d2_key = key
         return self._inv_d2_grid
 
-    def mask_source(self, density, orth_matrix, pipeline_blur=0.0):
-        """The grid the mask is thresholded from: detached if detach_mask, and
-        smoothed to a TOTAL of mask_blur.
+    def mask_source(self, density, orth_matrix, pipeline_blur=0.0, source=None):
+        """The grid the mask is thresholded from: `source` when given (the
+        atom-presence field of source_b, placed by the caller), else the
+        density; detached if detach_mask, and smoothed to a TOTAL of mask_blur.
 
         pipeline_blur is the blur already folded into the density by the
         caller -- the FFT-artifact trick, where atoms are placed on the grid with an
@@ -475,7 +556,13 @@ class SolventModel:
         on 7FPV, that misses the requested occupancy by more than a third.
         calibrate() below does this correctly; anything hand-rolled must too.
         """
-        rho = density.detach() if self.detach_mask else density
+        if source is None and self.source_b is not None:
+            raise ValueError(
+                "SolventModel.source_b is set, so the mask expects the "
+                "atom-presence field as `source`; structure_factors_one_config "
+                "builds it from mask_kernels= (see mask_source_weights)")
+        field = density if source is None else source
+        rho = field.detach() if self.detach_mask else field
         remaining = self.mask_blur - pipeline_blur
         if remaining <= 0.0:
             if pipeline_blur > self.mask_blur and not self._warned_blur:
@@ -492,22 +579,23 @@ class SolventModel:
         return blur_density(rho, orth_matrix, remaining,
                             self._cached_inv_d2(rho, orth_matrix))
 
-    def build_mask(self, density, orth_matrix, pipeline_blur=0.0):
+    def build_mask(self, density, orth_matrix, pipeline_blur=0.0, source=None):
         """density -> the solvent mask, including the one-time occupancy check.
 
         The single place a mask is built. structure_factor_torch's supercell
         path used to inline its own copy of this, which is how a mask_blur
         added in one place would have silently not applied in the other.
+        `source`, when given, is thresholded instead of the density (source_b).
         """
         mask = solvent_mask(
-            self.mask_source(density, orth_matrix, pipeline_blur),
+            self.mask_source(density, orth_matrix, pipeline_blur, source),
             self.cutoff, self.taper_width)
         if self.check_occupancy and self.last_occupancy is None:
             self._check(mask)
         return mask
 
     def calibrate(self, density, orth_matrix, target_occupancy,
-                  taper_width_frac=0.5, pipeline_blur=0.0):
+                  taper_width_frac=0.5, pipeline_blur=0.0, source=None):
         """Set cutoff and taper_width so the mask calls target_occupancy of the
         cell solvent, measured on the grid the mask will actually see.
 
@@ -515,8 +603,8 @@ class SolventModel:
         configuration -- the cutoff is a calibration and not a constant, but it
         is not so unstable that it needs redoing per frame.
         """
-        source = self.mask_source(density, orth_matrix, pipeline_blur)
-        self.cutoff = calibrate_cutoff(source, target_occupancy,
+        grid = self.mask_source(density, orth_matrix, pipeline_blur, source)
+        self.cutoff = calibrate_cutoff(grid, target_occupancy,
                                        taper_width_frac=taper_width_frac)
         self.taper_width = taper_width_frac * self.cutoff
         return self.cutoff
@@ -547,14 +635,15 @@ class SolventModel:
                 SolventMaskWarning, stacklevel=3)
 
     def apply(self, density, F_protein, cell_volume, hkl, orth_matrix,
-              density_scale=1.0, pipeline_blur=0.0):
+              density_scale=1.0, pipeline_blur=0.0, source=None):
         """
-        density must ALREADY be symmetry-expanded -- see the module docstring.
+        density must ALREADY be symmetry-expanded -- see the module docstring;
+        so must `source`, the mask's field when source_b is set.
 
         Returns (F_total, mask), the mask being handed back so callers can
         report mask_occupancy() without recomputing it.
         """
-        mask = self.build_mask(density, orth_matrix, pipeline_blur)
+        mask = self.build_mask(density, orth_matrix, pipeline_blur, source)
         F_mask = f_solvent(mask, cell_volume, hkl, orth_matrix)
         inv_d2 = reciprocal_inv_d2(orth_matrix, hkl)
         F = f_total(
@@ -569,9 +658,11 @@ class SolventModel:
 
     def __repr__(self):
         return ("SolventModel(cutoff=%r, taper_width=%r, k_sol=%r, b_sol=%r, "
-                "k_overall=%r, u_aniso=%s, detach_mask=%r, occupancy=%s)"
+                "k_overall=%r, u_aniso=%s, detach_mask=%r, source_b=%r, "
+                "occupancy=%s)"
                 % (self.cutoff, self.taper_width, self.k_sol, self.b_sol,
                    self.k_overall,
                    "None" if self.u_aniso is None else "set", self.detach_mask,
+                   self.source_b,
                    "unmeasured" if self.last_occupancy is None
                    else "%.4f" % self.last_occupancy))

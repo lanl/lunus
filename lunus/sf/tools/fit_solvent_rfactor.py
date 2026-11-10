@@ -83,9 +83,29 @@ too large (7FPV at 3 A: occupancy 0.19, R-free 0.1895, against 0.26 and
 0.1634 on 0.7 A voxels). Beyond ~2.1 A run --mask gemmi with --max-voxel 0.7;
 the run warns when the voxels are no finer than the shrink radius.
 
---mask-blur B smooths the density with exp(-B s^2/4) BEFORE thresholding, which
-is the threshold mask's analogue of the probe radius a geometric mask is built
-with. It defaults to SolventModel's own value, so a plain run reports the
+--mask-source atoms|density is what the threshold is cut from (2026-11-10).
+The default, atoms, is an ATOM-PRESENCE FIELD: every atom placed as a
+unit-weight Gaussian at one B (--mask-source-b, default 20 A^2), from the
+same coordinates, blur and symmetry expansion as the density, so the mask no
+longer follows the electron count or the B of each atom, as a geometric mask
+does not. On 20 entries at 2.6-3.0 A the binned R-free gap to mmtbx fell from
++0.0105 to +0.0046 (every entry better; gemmi's geometric mask on the same
+grid reaches -0.0015), on 20 at 1.8-2.6 A from +0.0062 to +0.0017, on SW40
+(0.9-2.5 A) from +0.0010 to -0.0005 (35 of 39 better), and on 7FPV cut to
+3 A from 0.1921 to 0.1845 against mmtbx's 0.1811. The
+alternatives measured on the same 20 low-resolution entries and rejected: a
+wider or narrower --mask-blur (50 / 150 / 200 A^2: 0, +0.004, +0.009), a
+differentiable closing after the threshold (every setting +0.003 to +0.011;
+solvent_torch.close_mask, kept), hydrogens left out of the source (+0.001),
+and a uniform-B source still weighted by electrons (B 10-60: -0.002 to
+-0.006, half the gain); afterwards, widths scaled per element by the van der
+Waals radius squared (+0.0044, within noise of the uniform +0.0046). F_protein is always the density's; the field is a
+second placement with uniform-B kernels, see solvent_torch.mask_source_weights
+and SolventModel.source_b. 'density' is every run before.
+
+--mask-blur B smooths the mask's source with exp(-B s^2/4) BEFORE
+thresholding, which is the threshold mask's analogue of the probe radius a
+geometric mask is built with. It defaults to SolventModel's own value, so a plain run reports the
 SHIPPED configuration; --mask-blur 0 disables it and reproduces what the model
 did before this existed, which is where the unphysical scales come from (with
 --protein-blur 0 as well: the placement blur below is the same smoothing, and
@@ -710,6 +730,19 @@ def sharpest_b(b_per_atom, u_cart=None, is_aniso=None, occ=None):
         if scatters.any():
             keep = scatters
     return float(b[keep].min())
+
+
+def positive_float_arg(option):
+    """argparse type: a float > 0, named in the error."""
+    def parse(text):
+        try:
+            value = float(text)
+        except ValueError:
+            raise argparse.ArgumentTypeError("%s expects a number, got %r" % (option, text))
+        if value <= 0.0:
+            raise argparse.ArgumentTypeError("%s must be > 0, got %g" % (option, value))
+        return value
+    return parse
 
 
 def keyword_or_number_arg(keyword, option, unit, allow_zero):
@@ -1695,6 +1728,11 @@ def shell_table(d, F_obs, model_no_solvent, model_solvent, work, free,
 
 
 def build_parser():
+    try:
+        from lunus.sf.solvent_torch import SOURCE_B_DEFAULT
+    except ImportError:            # --help without the repo on PYTHONPATH
+        SOURCE_B_DEFAULT = 20.0
+
     p = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1744,8 +1782,21 @@ def build_parser():
                         "F_protein is corrected for, so sharp atoms do not "
                         "alias on the grid. auto (default): "
                         "cell_utils.recommended_blur, as xtraj; 0 disables it")
+    p.add_argument("--mask-source", default="atoms", choices=["atoms", "density"],
+                   help="what the threshold mask is cut from: 'atoms' (default "
+                        "since 2026-11-10), an atom-presence field in which every "
+                        "atom is a unit-weight Gaussian at --mask-source-b, or "
+                        "'density', the electron density itself, as every run "
+                        "before. See solvent_torch.mask_source_weights")
+    p.add_argument("--mask-source-b", type=positive_float_arg("--mask-source-b"),
+                   default=SOURCE_B_DEFAULT, metavar="B",
+                   help="the B every atom is placed with in the 'atoms' mask "
+                        "source (default %g A^2). What matters is the TOTAL "
+                        "width, this plus --mask-blur: totals of 70-110 A^2 "
+                        "measure alike at low resolution and 120 is marginally "
+                        "better on SW40" % SOURCE_B_DEFAULT)
     p.add_argument("--mask-blur", type=float, default=None, metavar="B",
-                   help="smooth the density by exp(-B s^2/4) before "
+                   help="smooth the mask's source by exp(-B s^2/4) before "
                         "thresholding; the threshold mask's probe radius "
                         "(default: SolventModel's own, so the tool reports "
                         "the shipped configuration; 0 disables it)")
@@ -1818,7 +1869,7 @@ def run(args):
     from lunus.sf.cell_utils import grid_shape_for_resolution, orth_matrix
     from lunus.sf.solvent_torch import (
         MASK_BLUR_DEFAULT, SolventMaskWarning, calibrate_cutoff, f_solvent,
-        mask_occupancy, shell_voxels, solvent_mask,
+        mask_occupancy, mask_source_weights, shell_voxels, solvent_mask,
     )
     if args.mask_blur is None:
         args.mask_blur = MASK_BLUR_DEFAULT
@@ -1887,6 +1938,31 @@ def run(args):
         expand_symmetry=not args.no_expand_symmetry,
         u_cart=u_cart if args.aniso_adp else None, is_aniso=is_aniso,
         cutoff=args.density_cutoff, timing=timing, blur=blur)
+
+    # THE MASK'S SOURCE: an atom-presence field, every atom a unit-weight
+    # Gaussian at one B, placed from the same coordinates with the same
+    # protein blur and symmetry expansion; F_protein stays the density's.
+    # solvent_torch.mask_source_weights says why and what it measured.
+    # --mask gemmi thresholds nothing, so no field is placed for it.
+    mask_density = density
+    mask_source = args.mask_source if args.mask != "gemmi" else "none (--mask gemmi)"
+    if args.mask == "gemmi":
+        print("mask source: none (--mask gemmi uses that mask as it is)")
+    elif args.mask_source == "atoms":
+        coeffs = scattering_table(sorted(set(elements)), log=io.StringIO())
+        m_occ = np.asarray(occ, dtype=float) * mask_source_weights(elements, coeffs)
+        m_b = np.full(len(elements), float(args.mask_source_b))
+        with timed(timing, "mask source field", device):
+            mask_density, _, _ = build_density(
+                xrs, elements, m_b,
+                m_occ, frac, grid, device, dtype,
+                expand_symmetry=not args.no_expand_symmetry,
+                u_cart=None, is_aniso=np.zeros(len(elements), dtype=bool),
+                cutoff=args.density_cutoff, blur=blur, log=io.StringIO())
+        print("mask source: atom-presence field, %d atoms of unit weight at "
+              "B = %.1f A^2 (--mask-source atoms)" % (len(elements), args.mask_source_b))
+    else:
+        print("mask source: the electron density (--mask-source density)")
 
     hkl = torch.tensor(hkl_np, dtype=torch.long, device=device)
     F_obs = torch.tensor(fobs_np, dtype=dtype, device=device)
@@ -1977,7 +2053,7 @@ def run(args):
             # the aliasing the protein blur removes. Nothing here can
             # sharpen a density placed with more than --mask-blur.
             mask_blur = max(args.mask_blur - blur, 0.0)
-            source = blur_density(density, orth, mask_blur)
+            source = blur_density(mask_density, orth, mask_blur)
             if blur > args.mask_blur:
                 warnings.warn(
                     "the protein blur (%.1f A^2) exceeds --mask-blur (%.1f), "
@@ -2005,9 +2081,10 @@ def run(args):
             mask = solvent_mask(source, cutoff, args.taper_frac * cutoff)
         occupancy, shell = float(mask_occupancy(mask)), shell_voxels(mask)
         cutoff = float(cutoff)
-        print("  threshold mask calibrated to it: cutoff %.4g e/A^3 "
-              "(%.3f of peak %.3f)" % (cutoff, cutoff / float(source.max()),
-                                       float(source.max())))
+        print("  threshold mask calibrated to it: cutoff %.4g %s "
+              "(%.3f of peak %.3f)"
+              % (cutoff, "atoms/A^3" if args.mask_source == "atoms" else "e/A^3",
+                 cutoff / float(source.max()), float(source.max())))
         print("  occupancy %.4f, taper shell %d voxels (%.2f%% of the grid)"
               % (occupancy, shell, 100.0 * shell / np.prod(grid)))
 
@@ -2077,6 +2154,8 @@ def run(args):
               "max_voxel": None if args.max_voxel is None else float(args.max_voxel),
               "grid_rule": grid_rule,     # says whether the cap or --rate set the grid
               "target_occupancy": float(target),
+              "mask_source": mask_source,
+              "mask_source_b": float(args.mask_source_b) if mask_source == "atoms" else None,
               "target_source": target_source,
               "target_spacing": args.target_spacing,
               "gemmi_occupancy_working_grid": float(occ_working),

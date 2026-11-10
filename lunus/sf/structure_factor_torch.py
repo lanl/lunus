@@ -59,6 +59,7 @@ def structure_factors_one_config(
     grid_shape, orth_matrix, cell_volume,
     hkl, taper_width, blur=0.0, max_atoms_per_batch=50_000,
     grid_ops=None, compile_core=True, solvent=None, supercell=None,
+    mask_kernels=None, mask_occ=None,
 ):
     """One configuration, start to finish: density -> symmetrize -> FFT ->
     extract F(hkl). Differentiable with respect to frac_coords. atom_A/atom_lam/
@@ -100,9 +101,27 @@ def structure_factors_one_config(
     Without solvent, supercell= changes nothing observable: placing atoms
     into the small grid already folds them, via the modulo in the scatter.
     symmetry_torch.supercell_factors() derives the factors and rejects a
-    non-integer ratio, for which no exact grid folding exists."""
+    non-integer ratio, for which no exact grid folding exists.
+
+    mask_kernels: (atom_A, atom_lam, elem_offsets, atom_radius_ang,
+    taper_width) for the MASK's source field when solvent.source_b is set --
+    uniform-B kernels built with that B (kernel_torch.build_atom_kernels_torch
+    with b_per_atom filled with source_b and the same blur), with mask_occ the
+    occupancies times solvent_torch.mask_source_weights(). The field is placed
+    from the same coordinates, symmetry-expanded and folded exactly like the
+    density, and the mask is thresholded from it instead; F_protein is
+    untouched. Required when solvent.source_b is not None, ignored otherwise."""
     from .density_torch import compute_density
     from .symmetry_torch import fold_supercell, symmetrize_sum
+
+    if solvent is not None and solvent.source_b is not None and (
+            mask_kernels is None or mask_occ is None):
+        # both, not either: the kernels alone would place the field with the
+        # elements' electron counts, the half-gain variant the docs reject
+        raise ValueError(
+            "solvent.source_b is set, so mask_kernels= and mask_occ= are "
+            "both needed to place the mask's atom-presence field; see "
+            "solvent_torch.mask_source_weights")
 
     if supercell is None:
         dens_grid, dens_orth, dens_frac = grid_shape, orth_matrix, frac_coords
@@ -128,13 +147,23 @@ def structure_factors_one_config(
         dens_grid, dens_orth, taper_width,
         max_atoms_per_batch=max_atoms_per_batch, compile_core=compile_core,
     )
+    source = None
+    if solvent is not None and solvent.source_b is not None:
+        m_A, m_lam, m_offsets, m_radius, m_taper = mask_kernels
+        source = compute_density(
+            dens_frac, element_idx, mask_occ,
+            m_A, m_lam, m_offsets, m_radius,
+            dens_grid, dens_orth, m_taper,
+            max_atoms_per_batch=max_atoms_per_batch, compile_core=compile_core,
+        )
 
     # The mask is built BEFORE folding, where the boundary still exists.
     mask = None
     if solvent is not None and supercell is not None:
         # dens_orth, not orth_matrix: the mask is built in the SUPERCELL's
         # frame, so the blur's frequency grid has to be the supercell's too.
-        mask = solvent.build_mask(density, dens_orth, pipeline_blur=blur)
+        mask = solvent.build_mask(density, dens_orth, pipeline_blur=blur,
+                                  source=source)
 
     if supercell is not None:
         density = fold_supercell(density, n)
@@ -143,6 +172,8 @@ def structure_factors_one_config(
 
     if grid_ops:
         density = symmetrize_sum(density, grid_ops)
+        if source is not None:
+            source = symmetrize_sum(source, grid_ops)
     F_protein = compute_fcalc(density, cell_volume, hkl, orth_matrix, blur=blur)
     if solvent is None:
         return F_protein
@@ -164,7 +195,8 @@ def structure_factors_one_config(
     # grid is retained for every configuration at once and the peak memory
     # checkpointing exists to control comes straight back.
     F_total, _mask = solvent.apply(density, F_protein, cell_volume, hkl,
-                                   orth_matrix, pipeline_blur=blur)
+                                   orth_matrix, pipeline_blur=blur,
+                                   source=source)
     return F_total
 
 
@@ -175,6 +207,7 @@ def structure_factors_batch(
     hkl, taper_width, blur=0.0, max_atoms_per_batch=50_000,
     grid_ops=None, compile_core=True,
     use_checkpoint=False, solvent=None, supercell=None,
+    mask_kernels=None, mask_occ=None,
 ):
     """N configurations at once: (N, n_atoms, 3) -> (N, n_refl) complex.
 
@@ -279,7 +312,24 @@ def structure_factors_batch(
             "occ must be (n_atoms,) or (n_configs, n_atoms), got %s"
             % (tuple(occ.shape),))
 
-    def one(frac_coords, occ_row):
+    # the mask's occupancies, when the mask has its own source field, follow
+    # the same layout as occ: shared, or one row per configuration
+    if mask_occ is None:
+        mask_rows = [None] * n_configs
+    elif mask_occ.dim() == 1:
+        if mask_occ.shape[0] != n_atoms:
+            raise ValueError(
+                "mask_occ has %d entries but each configuration has %d atoms"
+                % (mask_occ.shape[0], n_atoms))
+        mask_rows = [mask_occ] * n_configs
+    elif tuple(mask_occ.shape) == (n_configs, n_atoms):
+        mask_rows = list(mask_occ)
+    else:
+        raise ValueError(
+            "mask_occ must be (n_atoms,) or (n_configs, n_atoms), got %s"
+            % (tuple(mask_occ.shape),))
+
+    def one(frac_coords, occ_row, mask_row):
         return structure_factors_one_config(
             frac_coords, element_idx, occ_row,
             atom_A, atom_lam, elem_offsets, atom_radius_ang,
@@ -288,11 +338,13 @@ def structure_factors_batch(
             max_atoms_per_batch=max_atoms_per_batch,
             grid_ops=grid_ops, compile_core=compile_core,
             solvent=solvent, supercell=supercell,
+            mask_kernels=mask_kernels, mask_occ=mask_row,
         )
 
     if not use_checkpoint:
         return torch.stack(
-            [one(fc, oc) for fc, oc in zip(frac_coords_batch, occ_rows)], dim=0)
+            [one(fc, oc, mo) for fc, oc, mo
+             in zip(frac_coords_batch, occ_rows, mask_rows)], dim=0)
 
     from torch.utils.checkpoint import checkpoint
 
@@ -305,8 +357,8 @@ def structure_factors_batch(
     # preserve_rng_state=False: the density calculation draws no random numbers, so there is
     # no RNG state worth saving and restoring per configuration.
     return torch.stack(
-        [checkpoint(one, fc, oc, use_reentrant=False, preserve_rng_state=False)
-         for fc, oc in zip(frac_coords_batch, occ_rows)],
+        [checkpoint(one, fc, oc, mo, use_reentrant=False, preserve_rng_state=False)
+         for fc, oc, mo in zip(frac_coords_batch, occ_rows, mask_rows)],
         dim=0,
     )
 

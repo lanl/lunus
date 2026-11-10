@@ -965,3 +965,256 @@ def test_recommended_blur_engages_only_where_sampling_is_marginal():
     with _w.catch_warnings():
         _w.simplefilter("error")
         recommended_blur(2.0, (100, 144, 288), M, d_min=2.0)   # rate 2.9, fine
+
+
+def test_close_mask_is_the_shrink_step():
+    """close_mask smooths a soft mask and thresholds it again: with a level
+    below 0.5 the solvent grows back into the protein (the shrink of a
+    geometric mask), at 0.5 small features go both ways, above 0.5 the
+    protein grows; it is a no-op at blur 0, stays in [0, 1], and is
+    differentiable in the mask."""
+    import torch
+
+    from lunus.sf.solvent_torch import close_mask
+
+    orth = torch.tensor(orth_matrix(20.0, 20.0, 20.0, 90.0, 90.0, 90.0), dtype=torch.float64)
+    n = 40
+    mask = torch.ones((n, n, n), dtype=torch.float64)      # all solvent
+    # a protein ball of radius 4 A with a 1-voxel (0.5 A) crevice through it
+    i = torch.arange(n, dtype=torch.float64) * 0.5
+    X, Y, Z = torch.meshgrid(i, i, i, indexing="ij")
+    ball = (X - 10) ** 2 + (Y - 10) ** 2 + (Z - 10) ** 2 < 4.0 ** 2
+    mask[ball] = 0.0
+    mask[ball & (torch.abs(Y - 10) < 0.3)] = 1.0            # the crevice
+    occ0 = float(mask.mean())
+
+    assert torch.equal(close_mask(mask, orth, 0.0, 0.35), mask)
+    shrunk = close_mask(mask, orth, 50.0, 0.35)
+    grown = close_mask(mask, orth, 50.0, 0.65)
+    mid = close_mask(mask, orth, 50.0, 0.5)
+    for m in (shrunk, grown, mid):
+        assert float(m.min()) >= 0.0 and float(m.max()) <= 1.0
+    assert float(shrunk.mean()) > occ0 > float(grown.mean())
+    # the crevice is filled at every level: it is narrower than the smoothing
+    crevice = ball & (torch.abs(Y - 10) < 0.3) & ((X - 10) ** 2 + (Z - 10) ** 2 < 2.0 ** 2)
+    assert float(mid[crevice].mean()) < 0.5 < float(mask[crevice].mean())
+    # differentiable
+    m = mask.clone().requires_grad_(True)
+    close_mask(m, orth, 50.0, 0.35).sum().backward()
+    assert m.grad is not None and float(m.grad.abs().sum()) > 0.0
+
+
+def test_calibrate_cutoff_finish_meets_the_target_after_the_closing():
+    """With a finish step the bisection targets the FINISHED mask's
+    occupancy, so the first-stage cutoff over-dilates by what the closing
+    takes back; without the finish the first stage alone meets it."""
+    import torch
+
+    from lunus.sf.solvent_torch import (calibrate_cutoff, close_mask,
+                                        mask_occupancy, solvent_mask)
+
+    orth = torch.tensor(orth_matrix(20.0, 20.0, 20.0, 90.0, 90.0, 90.0), dtype=torch.float64)
+    n = 40
+    i = torch.arange(n, dtype=torch.float64) * 0.5
+    X, Y, Z = torch.meshgrid(i, i, i, indexing="ij")
+    density = torch.zeros((n, n, n), dtype=torch.float64)
+    for c in ((7.0, 10.0, 10.0), (13.0, 10.0, 10.0), (10.0, 7.0, 10.0)):
+        density += torch.exp(-((X - c[0]) ** 2 + (Y - c[1]) ** 2 + (Z - c[2]) ** 2) / 4.0)
+    target = 0.8
+
+    def finish(m):
+        return close_mask(m, orth, 50.0, 0.35)
+
+    c_plain = calibrate_cutoff(density, target)
+    c_close = calibrate_cutoff(density, target, finish=finish)
+    occ_plain = float(mask_occupancy(solvent_mask(density, c_plain, 0.5 * c_plain)))
+    occ_close = float(mask_occupancy(finish(solvent_mask(density, c_close, 0.5 * c_close))))
+    assert abs(occ_plain - target) < 2e-3 and abs(occ_close - target) < 2e-3
+    # the first stage of the closed mask calls less solvent than the target:
+    # the shrink gives the rest back
+    occ_stage1 = float(mask_occupancy(solvent_mask(density, c_close, 0.5 * c_close)))
+    assert occ_stage1 < target and c_close < c_plain
+
+
+def _mask_kernels(sys, source_b=20.0):
+    """Uniform-B, unit-weight kernels for the mask's source on the test
+    system (one element, so the weights are one constant)."""
+    from lunus.sf.solvent_torch import mask_source_weights
+
+    A, lam, offsets, radius, taper_w, _ = build_element_kernels_torch(
+        ["C"], IT92_COEFFS, source_b, 0.0, GRID, orth_matrix(*CELL), cutoff=0.01,
+        device="cpu", dtype=DTYPE)
+    idx = sys["element_idx"]
+    w = torch.tensor(mask_source_weights(["C"] * len(idx), IT92_COEFFS), dtype=DTYPE)
+    return (A[idx], lam[idx], offsets, radius[idx], taper_w), sys["occ"] * w
+
+
+def test_atom_presence_source_moves_the_mask_and_not_f_protein():
+    """With source_b set the mask is thresholded from a unit-weight,
+    uniform-B field placed from the same coordinates: F_protein is the
+    density's as before, the mask differs from the density-thresholded one,
+    and the model refuses to run without the field it was told to expect."""
+    from lunus.sf.solvent_torch import SolventModel, mask_occupancy, solvent_mask
+
+    sys = _system(seed=3)
+    density = _density(sys)
+    # the fixture's carbons are all at B = 20, so a 20 A^2 source would be the
+    # density up to one factor and give the same calibrated mask; 60 differs
+    kernels, mask_occ = _mask_kernels(sys, source_b=60.0)
+    source = compute_density(
+        sys["frac"], sys["element_idx"], mask_occ, *kernels[:4],
+        sys["grid_shape"], sys["orth"], kernels[4], compile_core=False)
+    # every atom has the same unit weight: the field integrates to the atom count
+    vol = sys["cell_volume"]
+    assert abs(float(source.sum()) * vol / source.numel() - len(mask_occ)) < 0.1 * len(mask_occ)   # the 0.01 cutoff truncates a little
+
+    plain = SolventModel(cutoff=1.0, taper_width=0.5, check_occupancy=False)
+    plain.calibrate(density, sys["orth"], 0.6)
+    atoms = SolventModel(cutoff=1.0, taper_width=0.5, check_occupancy=False, source_b=60.0)
+    atoms.calibrate(density, sys["orth"], 0.6, source=source)
+    m_plain = plain.build_mask(density, sys["orth"])
+    m_atoms = atoms.build_mask(density, sys["orth"], source=source)
+    assert abs(float(mask_occupancy(m_plain)) - 0.6) < 2e-3
+    assert abs(float(mask_occupancy(m_atoms)) - 0.6) < 2e-3
+    assert float((m_plain - m_atoms).abs().max()) > 0.05       # a different boundary
+
+    with pytest.raises(ValueError):
+        atoms.build_mask(density, sys["orth"])                  # source_b set, no field
+
+    F_none = _sf(sys)
+    F_plain = _sf(sys, solvent=plain)
+    F_atoms = _sf(sys, solvent=atoms, mask_kernels=kernels, mask_occ=mask_occ)
+    assert not torch.allclose(F_atoms, F_plain)
+    assert not torch.allclose(F_atoms, F_none)
+    with pytest.raises(ValueError):
+        _sf(sys, solvent=atoms)                                 # no mask_kernels
+    # the solvent term is the only difference: the same k_sol = 0 collapses both
+    plain.k_sol = atoms.k_sol = 0.0
+    assert torch.allclose(_sf(sys, solvent=plain), F_none)
+    assert torch.allclose(_sf(sys, solvent=atoms, mask_kernels=kernels, mask_occ=mask_occ), F_none)
+
+
+def test_mask_source_weights_make_the_elements_interchangeable():
+    """The weights are what makes the field an atom-presence field: with
+    them, swapping one carbon for a sulfur at the same position leaves the
+    calibrated mask (almost) unchanged; without them the sulfur's 16
+    electrons against 6 move the boundary. Per-atom kernels, two elements."""
+    from lunus.sf.kernel_torch import build_atom_kernels_torch
+    from lunus.sf.solvent_torch import (calibrate_cutoff, mask_occupancy,
+                                        mask_source_weights, solvent_mask)
+
+    sys = _system(seed=5)
+    M = orth_matrix(*CELL)
+    n = len(sys["occ"])
+
+    def field(elements, weighted):
+        A, lam, offsets, radius, taper_w, e2i = build_atom_kernels_torch(
+            elements, sorted(set(elements)), IT92_COEFFS, [20.0] * n, 0.0, GRID, M,
+            cutoff=0.01, device="cpu", dtype=DTYPE)
+        idx = torch.tensor([e2i[e] for e in elements], dtype=torch.long)
+        w = (torch.tensor(mask_source_weights(elements, IT92_COEFFS), dtype=DTYPE)
+             if weighted else torch.ones(n, dtype=DTYPE))
+        return compute_density(sys["frac"], idx, sys["occ"] * w, A, lam, offsets,
+                               radius, GRID, sys["orth"], taper_w, compile_core=False)
+
+    target = 0.985            # six atoms in a 20 A cell: almost all solvent
+
+    def mask(f):
+        c = calibrate_cutoff(f, target)
+        m = solvent_mask(f, c, 0.5 * c)
+        assert abs(float(mask_occupancy(m)) - target) < 2e-3
+        return m
+
+    all_c = ["C"] * n
+    one_s = ["S"] + ["C"] * (n - 1)
+    d_weighted = float((mask(field(all_c, True)) - mask(field(one_s, True))).abs().mean())
+    d_plain = float((mask(field(all_c, False)) - mask(field(one_s, False))).abs().mean())
+    # what remains with the weights is the IT92 shape difference between S
+    # and C at B = 20 (a sulfur's profile is a little broader), a fraction
+    # of the electron-count effect
+    assert d_weighted < 0.5 * d_plain, (d_weighted, d_plain)
+    assert d_plain > 0.001
+    # the weighted field integrates to the atom count whatever the elements
+    vol = sys["cell_volume"]
+    for els in (all_c, one_s):
+        f = field(els, True)
+        assert abs(float(f.sum()) * vol / f.numel() - n) < 0.1 * n
+
+
+def test_atom_presence_source_is_expanded_and_folded_like_the_density():
+    """With grid_ops the field is symmetry-expanded exactly as the density
+    is, so the mask built from it meets the target on the expanded grid and
+    the result differs from the P1 one; with supercell= the field is built
+    in the supercell frame and used before folding."""
+    from lunus.sf.solvent_torch import SolventModel
+    from lunus.sf.symmetry_torch import build_grid_ops, symmetrize_sum
+
+    sys = _system(seed=6)
+    kernels, mask_occ = _mask_kernels(sys, source_b=60.0)
+    # a two-fold along c: the test cell is orthogonal, so this is a valid op
+    ops = build_grid_ops([np.diag([-1, -1, 1])], [np.zeros(3)], GRID)
+    assert len(ops) == 1
+    source = compute_density(
+        sys["frac"], sys["element_idx"], mask_occ, *kernels[:4],
+        sys["grid_shape"], sys["orth"], kernels[4], compile_core=False)
+    source_sym = symmetrize_sum(source, ops)
+    density_sym = symmetrize_sum(_density(sys), ops)
+    atoms = SolventModel(cutoff=1.0, taper_width=0.5, source_b=60.0)
+    atoms.calibrate(density_sym, sys["orth"], 0.6, source=source_sym)
+    F_sym = _sf(sys, solvent=atoms, mask_kernels=kernels, mask_occ=mask_occ, grid_ops=ops)
+    assert abs(atoms.last_occupancy - 0.6) < 2e-3          # measured on the expanded field
+    F_p1 = _sf(sys, solvent=atoms, mask_kernels=kernels, mask_occ=mask_occ)
+    assert not torch.allclose(F_sym, F_p1)
+    # the same answer as handing the expanded field to apply() by hand
+    F_hand, _ = atoms.apply(density_sym, compute_fcalc(density_sym, sys["cell_volume"], sys["hkl"], sys["orth"]),
+                            sys["cell_volume"], sys["hkl"], sys["orth"], source=source_sym)
+    assert torch.allclose(F_sym, F_hand)
+
+    # supercell path: builds and runs, the mask in the supercell frame
+    F_super = structure_factors_one_config(
+        sys["frac"], sys["element_idx"], sys["occ"],
+        sys["atom_A"], sys["atom_lam"], sys["elem_offsets"], sys["atom_radius_ang"],
+        sys["grid_shape"], sys["orth"], sys["cell_volume"], sys["hkl"], sys["taper_width"],
+        compile_core=False, solvent=atoms, supercell=(1, 1, 2),
+        mask_kernels=kernels, mask_occ=mask_occ)
+    assert F_super.shape == F_p1.shape and torch.isfinite(F_super).all()
+
+
+def test_atom_presence_source_in_the_batch_path():
+    """structure_factors_batch threads mask_kernels and a shared or
+    per-configuration mask_occ, with and without checkpointing."""
+    from lunus.sf.solvent_torch import SolventModel
+
+    sys = _system(seed=4)
+    kernels, mask_occ = _mask_kernels(sys)
+    atoms = SolventModel(cutoff=1.0, taper_width=0.5, check_occupancy=False, source_b=20.0)
+    source = compute_density(
+        sys["frac"], sys["element_idx"], mask_occ, *kernels[:4],
+        sys["grid_shape"], sys["orth"], kernels[4], compile_core=False)
+    atoms.calibrate(_density(sys), sys["orth"], 0.6, source=source)
+    fracs = torch.stack([sys["frac"], sys["frac"] + 0.01])
+    kw = dict(hkl=sys["hkl"], taper_width=sys["taper_width"], compile_core=False,
+              solvent=atoms, mask_kernels=kernels)
+    args = (fracs, sys["element_idx"], sys["occ"], sys["atom_A"], sys["atom_lam"],
+            sys["elem_offsets"], sys["atom_radius_ang"], sys["grid_shape"],
+            sys["orth"], sys["cell_volume"])
+    F = structure_factors_batch(*args, mask_occ=mask_occ, **kw)
+    F_ck = structure_factors_batch(*args, mask_occ=mask_occ, use_checkpoint=True, **kw)
+    assert torch.allclose(F, F_ck)
+    one = _sf(sys, solvent=atoms, mask_kernels=kernels, mask_occ=mask_occ)
+    assert torch.allclose(F[0], one)
+    # per-configuration rows that differ: each configuration gets its own
+    rows = torch.stack([mask_occ, 0.5 * mask_occ])
+    F_rows = structure_factors_batch(*args, mask_occ=rows, **kw)
+    F_rows_ck = structure_factors_batch(*args, mask_occ=rows, use_checkpoint=True, **kw)
+    assert torch.allclose(F_rows, F_rows_ck)
+    assert torch.allclose(F_rows[0], one)
+    second = structure_factors_one_config(
+        fracs[1], sys["element_idx"], sys["occ"], sys["atom_A"], sys["atom_lam"],
+        sys["elem_offsets"], sys["atom_radius_ang"], sys["grid_shape"], sys["orth"],
+        sys["cell_volume"], sys["hkl"], sys["taper_width"], compile_core=False,
+        solvent=atoms, mask_kernels=kernels, mask_occ=0.5 * mask_occ)
+    assert torch.allclose(F_rows[1], second)
+    assert not torch.allclose(F_rows[1], F[1])
+    with pytest.raises(ValueError):
+        structure_factors_batch(*args, mask_occ=torch.ones(3, 7), **kw)

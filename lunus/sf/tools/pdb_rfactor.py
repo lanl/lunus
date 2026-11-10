@@ -144,7 +144,8 @@ def build_parser():
                         "deposited hydrogens (default: all atoms)")
     p.epilog = ("Anything else -- after a bare '--' to be safe -- is passed "
                 "through to fit_solvent_rfactor.py: --mask gemmi, --device, "
-                "--mask-blur, --protein-blur, --target-spacing, --reference, ...")
+                "--mask-blur, --mask-source, --protein-blur, --target-spacing, "
+                "--reference, ...")
     return p
 
 
@@ -241,6 +242,11 @@ def main():
         occ.append("mmtbx mask %.4f" % r_mmtbx["mask_occupancy"])
     if occ:
         print("  mask occupancy: %s" % "; ".join(occ))
+    if r_torch.get("mask_source") == "atoms":
+        print("  mask source: atom-presence field, unit weight at B = %.0f A^2 "
+              "(--mask-source atoms)" % r_torch["mask_source_b"])
+    elif r_torch.get("mask_source") == "density":
+        print("  mask source: the electron density (--mask-source density)")
     if r_torch.get("protein_blur"):
         print("  protein blur: %.1f A^2 placed and removed again (sharpest "
               "atom B %.1f)" % (r_torch["protein_blur"], r_torch["b_sharpest"]))
