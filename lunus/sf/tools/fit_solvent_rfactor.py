@@ -65,19 +65,30 @@ did before this existed, which is where the unphysical scales come from (with
 --protein-blur 0 as well: the placement blur below is the same smoothing, and
 stays in the density the threshold sees).
 
---rate sets the grid: voxels of d_min/(2 rate). The default is 2, d_min/4,
-since 2026-11-10; the 1.5 (d_min/3) that gemmi and xtraj default to, and that
-every number recorded before then was measured with, is one flag away. (mmtbx
-builds its mask on a FIXED step of ~0.6 A whatever the resolution; d_min/4 is
-coarser than that beyond 2.4 A and finer below.) The finer grid is for the
-SOLVENT MASK: F_protein does not move with it once the protein blur is on,
-while two things about the mask do. Its boundary is drawn on the voxels, 1 A
-at 3 A resolution; and its calibration target, gemmi's mask occupancy on the
-same grid, moves with the grid too -- on 7FPV cut to 3 A from 0.19 at rate
-1.5 to 0.27 at rate 2 (0.28 at rate 3). That was the larger part of the gap
-to mmtbx in the torchref1000 run: on 20 entries at 2.6-3.0 A the median
-binned R-free gap fell from +0.0258 to +0.0104 for 2.4x the voxels, while
-below 2.4 A nothing moved and above 1.8 A the finer grid costs ~0.0003.
+THE GRID RULE is a cap on the voxel edge: spacing = min(d_min/3, --max-voxel),
+default cap 0.7 A (2026-11-10). Below 2.1 A that is gemmi's and xtraj's rate
+1.5, the grid every number recorded before 2026-11-10 was measured on; beyond
+it the voxels stay at 0.7 A. --rate overrides the rule with a plain
+oversampling (spacing d_min/(2 rate)); between the two changes of 2026-11-10
+the default was a plain rate 2. (mmtbx builds its mask on a FIXED step of
+~0.6 A whatever the resolution.) The finer grid is for the SOLVENT MASK:
+F_protein does not move with it once the protein blur is on, while two things
+about the mask do. Its boundary is drawn on the voxels, 1 A at 3 A
+resolution; and its calibration target, gemmi's mask occupancy on the same
+grid, moves with the grid too -- on 7FPV cut to 3 A from 0.19 on d_min/3
+voxels to 0.27 at d_min/4 (0.28 at d_min/6). That was the larger part of the
+gap to mmtbx in the torchref1000 run. Measured on a sweep of caps over 40
+benchmark entries (binned R-free gap to mmtbx, median per band; CPU time):
+at 2.6-3.0 A rate 1.5 +0.0258 (2.6 s), cap 0.6 +0.0109 (3.8 s), cap 0.7
++0.0105 (3.3 s), cap 0.8 +0.0114 (2.8 s), every entry better than at rate
+1.5 whichever the cap; the three caps are indistinguishable there (per-entry
+grid noise is ~0.003, larger than their differences), and 0.7 was chosen as
+the middle one, nearest mmtbx's step. The gain starts at about 2.5 A (7DFC
++0.0183 -> +0.0142, 3NHV +0.0258 -> +0.0124); at 2.2-2.4 A the entries move
+within noise; at 1.8-2.2 A caps of 0.7 and 0.8 do not bind and 0.6 moves
+single entries by up to 0.003 either way for no net gain. A plain rate 2
+costs ~0.0003 and 20-30% time below 2.4 A for nothing, which is why the
+rule is a cap and not a rate.
 
 --protein-blur B places the PROTEIN density with B added to every atom and
 removes it again from F_protein, exactly (exp(+B s^2/4) in reciprocal space).
@@ -88,9 +99,10 @@ B = 1-2 A^2 is a Gaussian narrower than the voxel and aliases on the grid
 above mmtbx). The default, auto,
 is cell_utils.recommended_blur, the rule xtraj's torch engine uses: zero
 whenever the model's sharpest atom already clears the grid's own target of
-57 h^2 with h the voxel edge -- on the default d_min/4 grid 3.6 A^2 at d_min
-1 A, 14 at 2 A, 32 at 3 A (6, 25 and 57 on the d_min/3 grid of --rate 1.5)
--- so a model is touched whenever its sharpest atom is below that. The threshold
+57 h^2 with h the voxel edge -- on the default grid 6 A^2 at d_min 1 A, 25
+at 2 A and 28 at 3 A, where the 0.7 A cap binds (57 on the d_min/3 grid of
+--rate 1.5; 32 on the d_min/4 grid of --rate 2) -- so a model is touched
+whenever its sharpest atom is below that. The threshold
 mask's own smoothing (--mask-blur) is a total and is reduced by the same
 amount, so the mask the fit sees is the shipped one up to the aliasing this
 removes; when the placement blur exceeds --mask-blur the mask is smoother
@@ -629,6 +641,32 @@ def build_density(xrs, elements, b_per_atom, occ, frac, grid, device, dtype,
         print("symmetry-expanded on the grid: %d operations beyond the identity"
               % len(grid_ops), file=log)
     return density, orth, float(np.linalg.det(M_np))
+
+
+MAX_VOXEL_DEFAULT = 0.7   # A; see grid_rate() and the module docstring
+
+
+def grid_rate(d_min, rate=None, max_voxel=MAX_VOXEL_DEFAULT):
+    """The oversampling rate the grid is built with, and a line saying why.
+
+    The rule is a cap on the voxel edge: spacing = min(d_min/3, max_voxel),
+    i.e. gemmi's and xtraj's rate 1.5 wherever that is already finer than
+    max_voxel, and max_voxel beyond. Expressed as a rate so that
+    grid_shape_for_resolution, and every caller that reads --rate, see one
+    quantity. An explicit rate overrides the rule."""
+    if rate is not None:
+        if rate <= 0.0:
+            raise ValueError("--rate must be > 0, got %g" % rate)
+        return float(rate), "--rate %g: voxels of d_min/(2 rate) = %.3f A" % (rate, d_min / (2 * rate))
+    if max_voxel <= 0.0:
+        raise ValueError("--max-voxel must be > 0 A, got %g" % max_voxel)
+    natural = d_min / 3.0
+    if natural <= max_voxel * (1.0 + 1e-9):      # at the cap counts as under it
+        return 1.5, ("voxels of d_min/3 = %.3f A (rate 1.5; finer than the "
+                     "--max-voxel cap of %g A)" % (natural, max_voxel))
+    rate = d_min / (2.0 * max_voxel)
+    return rate, ("voxels capped at --max-voxel %g A (d_min/3 would be %.3f A; "
+                  "rate %.2f)" % (max_voxel, natural, rate))
 
 
 def sharpest_b(b_per_atom, u_cart=None, is_aniso=None, occ=None):
@@ -1556,12 +1594,18 @@ def build_parser():
     p.add_argument("cif", help="deposited structure factors (mmCIF or MTZ)")
     p.add_argument("--d-min", type=float, default=None,
                    help="truncate the observations (default: use them all)")
-    p.add_argument("--rate", type=float, default=2.0,
-                   help="grid oversampling; spacing is d_min/(2*rate). Default "
-                        "2 (d_min/4) since 2026-11-10; 1.5 (d_min/3, gemmi's "
-                        "and xtraj's default) is what every number recorded "
-                        "before then was measured with. mmtbx's mask is on a "
-                        "fixed ~0.6 A step")
+    p.add_argument("--max-voxel", type=float, default=MAX_VOXEL_DEFAULT, metavar="A",
+                   help="the grid rule: voxels of d_min/3 (gemmi's and xtraj's "
+                        "rate 1.5) but no coarser than this, in A (default "
+                        "%g, which binds beyond %.1f A). Finer than d_min/3 "
+                        "only matters to the solvent mask, and measurably only "
+                        "beyond ~2.5 A; see the module docstring"
+                        % (MAX_VOXEL_DEFAULT, 3 * MAX_VOXEL_DEFAULT))
+    p.add_argument("--rate", type=float, default=None,
+                   help="override the grid rule with a plain oversampling: "
+                        "spacing d_min/(2*rate). 1.5 (d_min/3) is what every "
+                        "number recorded before 2026-11-10 was measured with, "
+                        "2 (d_min/4) the default between then and the cap")
     p.add_argument("--device", default="cpu")
     p.add_argument("--dtype", default="float64", choices=["float32", "float64"])
     p.add_argument("--mask", default="threshold", choices=["threshold", "gemmi"],
@@ -1696,9 +1740,11 @@ def run(args):
 
     cell = xrs.unit_cell().parameters()
     d_min_grid = args.d_min if args.d_min is not None else float(d_np.min())
+    rate, grid_rule = grid_rate(d_min_grid, args.rate, args.max_voxel)
+    print("grid: " + grid_rule)
     grid = adjust_grid_for_symmetry(
         grid_shape_for_resolution(cell[0], cell[1], cell[2], d_min_grid,
-                                  rate=args.rate),
+                                  rate=rate),
         [np.array(o.r().as_double()).reshape(3, 3) for o in xrs.space_group()],
         [np.array(o.t().as_double()) for o in xrs.space_group()])
     print("cell %.3f %.3f %.3f %.1f %.1f %.1f, %s, grid %s (%.1f M voxels), %s"
@@ -1862,7 +1908,9 @@ def run(args):
 
     print("\noverall")
     result = {"n_atoms": len(elements), "protein_blur": float(blur),
-              "rate": float(args.rate), "grid": tuple(int(n) for n in grid),
+              "rate": float(rate), "max_voxel": float(args.max_voxel),
+              "grid_rule": grid_rule,     # says whether the cap or --rate set the grid
+              "grid": tuple(int(n) for n in grid),
               "b_sharpest": b_sharpest, "mask_cutoff": cutoff,
               "mask_occupancy": occupancy,
               "k_sol": float(fit1["k_sol"]), "b_sol": float(fit1["b_sol"]),
