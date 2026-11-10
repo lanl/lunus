@@ -65,16 +65,32 @@ did before this existed, which is where the unphysical scales come from (with
 --protein-blur 0 as well: the placement blur below is the same smoothing, and
 stays in the density the threshold sees).
 
+--rate sets the grid: voxels of d_min/(2 rate). The default is 2, d_min/4,
+since 2026-11-10; the 1.5 (d_min/3) that gemmi and xtraj default to, and that
+every number recorded before then was measured with, is one flag away. (mmtbx
+builds its mask on a FIXED step of ~0.6 A whatever the resolution; d_min/4 is
+coarser than that beyond 2.4 A and finer below.) The finer grid is for the
+SOLVENT MASK: F_protein does not move with it once the protein blur is on,
+while two things about the mask do. Its boundary is drawn on the voxels, 1 A
+at 3 A resolution; and its calibration target, gemmi's mask occupancy on the
+same grid, moves with the grid too -- on 7FPV cut to 3 A from 0.19 at rate
+1.5 to 0.27 at rate 2 (0.28 at rate 3). That was the larger part of the gap
+to mmtbx in the torchref1000 run: on 20 entries at 2.6-3.0 A the median
+binned R-free gap fell from +0.0258 to +0.0104 for 2.4x the voxels, while
+below 2.4 A nothing moved and above 1.8 A the finer grid costs ~0.0003.
+
 --protein-blur B places the PROTEIN density with B added to every atom and
 removes it again from F_protein, exactly (exp(+B s^2/4) in reciprocal space).
 The answer is unchanged in exact arithmetic; what changes is that an atom at
-B = 1-2 A^2 is a Gaussian narrower than the d_min/3 voxel and aliases on the
-grid (2YSK, 2P1N in the torchref1000 run: |F_protein| wrong by R 0.11-0.19
-against direct summation, R-free 0.04-0.05 above mmtbx). The default, auto,
+B = 1-2 A^2 is a Gaussian narrower than the voxel and aliases on the grid
+(2YSK, 2P1N in the torchref1000 run, on the d_min/3 grid of the time:
+|F_protein| wrong by R 0.11-0.19 against direct summation, R-free 0.04-0.05
+above mmtbx). The default, auto,
 is cell_utils.recommended_blur, the rule xtraj's torch engine uses: zero
 whenever the model's sharpest atom already clears the grid's own target of
-57 h^2 with h the voxel edge -- 6 A^2 at d_min 1 A, 25 at 2 A, 57 at 3 A --
-so a model is touched whenever its sharpest atom is below that. The threshold
+57 h^2 with h the voxel edge -- on the default d_min/4 grid 3.6 A^2 at d_min
+1 A, 14 at 2 A, 32 at 3 A (6, 25 and 57 on the d_min/3 grid of --rate 1.5)
+-- so a model is touched whenever its sharpest atom is below that. The threshold
 mask's own smoothing (--mask-blur) is a total and is reduced by the same
 amount, so the mask the fit sees is the shipped one up to the aliasing this
 removes; when the placement blur exceeds --mask-blur the mask is smoother
@@ -621,19 +637,19 @@ def sharpest_b(b_per_atom, u_cart=None, is_aniso=None, occ=None):
     one, which is what sets how finely the grid must sample it. Atoms with
     zero occupancy place no density and do not count (unless every atom is
     such, when all are kept rather than returning nothing)."""
-    b = np.asarray(b_per_atom, dtype=float)
+    # b becomes the B each atom is PLACED with: its isotropic B, or for an
+    # atom on the tensor kernel its smallest principal B.
+    b = np.array(b_per_atom, dtype=float)
+    if u_cart is not None and is_aniso is not None and np.any(is_aniso):
+        is_aniso = np.asarray(is_aniso, dtype=bool)
+        b[is_aniso] = (np.linalg.eigvalsh(np.asarray(u_cart)[is_aniso]).min(axis=1)
+                       * (8.0 * np.pi ** 2))
     keep = np.ones(b.shape, dtype=bool)
     if occ is not None:
         scatters = np.asarray(occ, dtype=float) > 0.0
         if scatters.any():
             keep = scatters
-    if u_cart is None or is_aniso is None or not np.any(is_aniso):
-        return float(b[keep].min())
-    is_aniso = np.asarray(is_aniso, dtype=bool)
-    b_aniso = np.linalg.eigvalsh(np.asarray(u_cart)[is_aniso & keep]).min(axis=1) * (8.0 * np.pi ** 2) \
-        if (is_aniso & keep).any() else np.array([np.inf])
-    b_iso = b[~is_aniso & keep]
-    return float(min(b_aniso.min(), b_iso.min() if b_iso.size else np.inf))
+    return float(b[keep].min())
 
 
 def protein_blur_arg(text):
@@ -1540,8 +1556,12 @@ def build_parser():
     p.add_argument("cif", help="deposited structure factors (mmCIF or MTZ)")
     p.add_argument("--d-min", type=float, default=None,
                    help="truncate the observations (default: use them all)")
-    p.add_argument("--rate", type=float, default=1.5,
-                   help="grid oversampling; spacing is d_min/(2*rate)")
+    p.add_argument("--rate", type=float, default=2.0,
+                   help="grid oversampling; spacing is d_min/(2*rate). Default "
+                        "2 (d_min/4) since 2026-11-10; 1.5 (d_min/3, gemmi's "
+                        "and xtraj's default) is what every number recorded "
+                        "before then was measured with. mmtbx's mask is on a "
+                        "fixed ~0.6 A step")
     p.add_argument("--device", default="cpu")
     p.add_argument("--dtype", default="float64", choices=["float32", "float64"])
     p.add_argument("--mask", default="threshold", choices=["threshold", "gemmi"],
@@ -1658,10 +1678,15 @@ def run(args):
         xrs, elements, b_per_atom, occ, frac, n_aniso, u_cart, is_aniso = \
             read_model(args.pdb, special_position_weights=use_special_position_weights(
                 args.no_special_position_weights, args.no_expand_symmetry),
-                select=args.select)
+                select=args.select, log=sys.stdout)
+    # log=sys.stdout on both readers: the stdout of the call, not the one
+    # bound at import, so the model summary and the dropped-reflection notes
+    # land where everything else run() prints does (print_timing below, and
+    # fit_scales's sink, for the same reason).
     with timed(timing, "read observations"):
         F_obs_array, free_np = read_observations(
-            args.cif, d_min=args.d_min, crystal_symmetry=xrs.crystal_symmetry())
+            args.cif, d_min=args.d_min, crystal_symmetry=xrs.crystal_symmetry(),
+            log=sys.stdout)
     d_np = np.array(F_obs_array.d_spacings().data())
     hkl_np = np.array(F_obs_array.indices())
     fobs_np = np.array(F_obs_array.data())
@@ -1837,6 +1862,7 @@ def run(args):
 
     print("\noverall")
     result = {"n_atoms": len(elements), "protein_blur": float(blur),
+              "rate": float(args.rate), "grid": tuple(int(n) for n in grid),
               "b_sharpest": b_sharpest, "mask_cutoff": cutoff,
               "mask_occupancy": occupancy,
               "k_sol": float(fit1["k_sol"]), "b_sol": float(fit1["b_sol"]),

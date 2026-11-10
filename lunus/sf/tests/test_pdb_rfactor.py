@@ -191,12 +191,13 @@ def test_log_binned_row_through_run_on_7fpv_at_3a():
     assert (r["scale_bins"], r["bin_scheme"]) == (6, "6 log bins")
     assert r["solvent_scheme binned"] == "exponential"
     assert "binned row: 6 log bins, solvent exponential" in out.getvalue()
-    # Pinned, so that some other 6-bin partition cannot pass: 6 equal-count
-    # bins give R-free 0.1986 here, mmtbx's bins 0.1975. (With
-    # --protein-blur 0, the placement before 2026-11-10, the pins were
-    # 0.1880 / 0.1929; at 3 A the 1 A voxels alias 7FPV's B = 10 atoms.)
-    assert abs(r["R-work binned"] - 0.1847) < 5e-4
-    assert abs(r["R-free binned"] - 0.1975) < 1e-3
+    # Pinned, so that some other 6-bin partition cannot pass. History of the
+    # pins on this run: 0.1880 / 0.1929 with no protein blur on the d_min/3
+    # grid; 0.1847 / 0.1975 with the blur (2026-11-10); 0.1676 / 0.1924 on
+    # the d_min/4 grid that became the default the same day (--rate 1.5
+    # reproduces the earlier pair).
+    assert abs(r["R-work binned"] - 0.1676) < 5e-4
+    assert abs(r["R-free binned"] - 0.1924) < 1e-3
 
 
 def test_main_fit_with_log_bins_through_run_on_7fpv_at_3a():
@@ -215,17 +216,17 @@ def test_main_fit_with_log_bins_through_run_on_7fpv_at_3a():
     assert "overall scale per resolution bin: 6 log bins" in out.getvalue()
     assert "fitted per resolution bin (6 bins)" in out.getvalue()
     # The main fit with bins also scales the solvent per bin by default
-    # (measured 2026-11-10: 0.1852 / 0.1985), and the exponential is one
-    # flag away (0.1847 / 0.1975). Before the protein blur (--protein-blur 0)
-    # these were 0.1886 / 0.1935 and 0.1880 / 0.1929.
+    # (measured 2026-11-10 on the d_min/4 grid: 0.1685 / 0.1944), and the
+    # exponential is one flag away (0.1676 / 0.1924). On the d_min/3 grid
+    # (--rate 1.5) these were 0.1852 / 0.1985 and 0.1847 / 0.1975.
     assert r["solvent_scheme"] == "per bin"
     assert "solvent scale is one value per bin" in out.getvalue()
-    assert abs(r["R-work"] - 0.1852) < 5e-4 and abs(r["R-free"] - 0.1985) < 1e-3
+    assert abs(r["R-work"] - 0.1685) < 5e-4 and abs(r["R-free"] - 0.1944) < 1e-3
     args.solvent_bins = "off"
     with contextlib.redirect_stdout(io.StringIO()):
         r2 = fit_solvent_rfactor.run(args)
     assert r2["solvent_scheme"] == "exponential"
-    assert abs(r2["R-work"] - 0.1847) < 5e-4 and abs(r2["R-free"] - 0.1975) < 1e-3
+    assert abs(r2["R-work"] - 0.1676) < 5e-4 and abs(r2["R-free"] - 0.1924) < 1e-3
 
 
 def test_main_forwards_the_default_binned_row(monkeypatch, capsys):
@@ -284,11 +285,12 @@ def test_binned_row_defaults_to_per_bin_solvent_on_7fpv_at_3a():
     assert r["solvent_scheme"] == "exponential"
     assert "binned row: 6 log bins, solvent per bin" in text
     assert "solvent scale per bin (low to high resolution):" in text
-    # Measured 2026-11-10 with the protein blur; the exponential gives
-    # 0.1847 / 0.1975 (before the blur: 0.1886 / 0.1935, single 0.1901).
-    assert abs(r["R-work binned"] - 0.1852) < 5e-4
-    assert abs(r["R-free binned"] - 0.1985) < 1e-3
-    assert abs(r["R-work"] - 0.1868) < 5e-4    # single-scale row: not moved by the binned row
+    # Measured 2026-11-10 on the d_min/4 grid with the protein blur; the
+    # exponential gives 0.1676 / 0.1924 (d_min/3 grid: 0.1852 / 0.1985,
+    # single 0.1868).
+    assert abs(r["R-work binned"] - 0.1685) < 5e-4
+    assert abs(r["R-free binned"] - 0.1944) < 1e-3
+    assert abs(r["R-work"] - 0.1679) < 5e-4    # single-scale row: not moved by the binned row
     assert 0.0 <= r["b_sol binned"] <= 150.0 and 0.0 <= r["k_sol binned"] <= 0.6
     # per-phase timing: every phase this run goes through is present, none
     # negative, the phases do not exceed the total, and the table is printed
@@ -610,7 +612,7 @@ def test_status_column_with_wavelength_id_is_still_the_free_set(tmp_path):
 
 def sharp_toy(tmp_path, d_min=2.5, sharp=True, aniso=False):
     """A P1 cell with atoms at B = 20 and, with sharp, at B = 2 (narrower
-    than the d_min/3 voxel), and an MTZ whose 'observations' are the exact
+    than the default d_min/4 voxel), and an MTZ whose 'observations' are the exact
     |F_calc| of that model from cctbx direct summation, so that any R above a
     few 1e-3 in the no-solvent fit is the grid's error and nothing else. With
     aniso, one more atom carries an ANISOU with principal B 1.6, 2.4, 3.2
@@ -648,7 +650,7 @@ def sharp_toy(tmp_path, d_min=2.5, sharp=True, aniso=False):
 
 @requires_cctbx
 def test_protein_blur_fixes_sharp_atoms_on_the_default_grid(tmp_path):
-    """An atom at B = 2 A^2 is a Gaussian narrower than the default d_min/3
+    """An atom at B = 2 A^2 is a Gaussian narrower than the default d_min/4
     voxel and aliases when placed on the grid: against exact |F_calc| the
     no-solvent fit cannot get below R ~ 0.1. Placing the density with
     recommended_blur's extra B and removing it from F_protein (the default,
@@ -740,8 +742,11 @@ def test_protein_blur_leaves_the_threshold_mask_as_shipped(tmp_path):
     pdb, mtz = sharp_toy(tmp_path, sharp=False)
 
     def fit(*extra):
+        # on the d_min/3 grid, where B = 20 atoms still earn a blur of ~20
+        # A^2; the default d_min/4 grid gives them 2 A^2, too little for
+        # smoothing twice to show against the 0.5% margin below
         args = fit_solvent_rfactor.build_parser().parse_args(
-            [pdb, mtz, "--shells", "2"] + list(extra))
+            [pdb, mtz, "--shells", "2", "--rate", "1.5"] + list(extra))
         with contextlib.redirect_stdout(io.StringIO()):
             return fit_solvent_rfactor.run(args)
 
@@ -798,3 +803,34 @@ def test_sharpest_b_and_protein_blur_setting():
     for bad in ("-1", "yes"):
         with pytest.raises(SystemExit):
             parse(["m.pdb", "d.mtz", "--protein-blur", bad])
+
+
+@requires_cctbx
+def test_default_grid_is_d_min_over_4(tmp_path):
+    """The tool's default --rate is 2, so the grid it builds the density and
+    the solvent mask on has voxels no coarser than d_min/4 along every axis,
+    not the d_min/3 that gemmi and xtraj default to and that every number
+    recorded before 2026-11-10 was measured with. The 1.5 of before is one
+    flag away. (mmtbx's mask is on a fixed ~0.6 A step, which this does not
+    copy.)"""
+    import contextlib
+    import io
+
+    import fit_solvent_rfactor
+
+    pdb, mtz = sharp_toy(tmp_path, sharp=False)
+    args = fit_solvent_rfactor.build_parser().parse_args([pdb, mtz, "--shells", "2"])
+    assert args.rate == 2.0, "default --rate is %r, not 2" % args.rate
+    with contextlib.redirect_stdout(io.StringIO()):
+        r = fit_solvent_rfactor.run(args)
+    assert r["rate"] == 2.0
+    d_min = 2.5
+    for edge, n in zip((20.0, 22.0, 24.0), r["grid"]):
+        assert edge / n <= d_min / 4.0 + 1e-9, (edge, n)
+    assert any(edge / n > d_min / 6.0 for edge, n in zip((20.0, 22.0, 24.0), r["grid"]))
+    args15 = fit_solvent_rfactor.build_parser().parse_args(
+        [pdb, mtz, "--shells", "2", "--rate", "1.5"])
+    with contextlib.redirect_stdout(io.StringIO()):
+        r15 = fit_solvent_rfactor.run(args15)
+    assert r15["rate"] == 1.5 and all(a <= b for a, b in zip(r15["grid"], r["grid"]))
+    assert r15["grid"] != r["grid"]
