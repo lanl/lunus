@@ -192,13 +192,15 @@ def test_log_binned_row_through_run_on_7fpv_at_3a():
     assert r["solvent_scheme binned"] == "exponential"
     assert "binned row: 6 log bins, solvent exponential" in out.getvalue()
     # Pinned, so that some other 6-bin partition cannot pass. History of the
-    # pins on this run: 0.1880 / 0.1929 with no protein blur on the d_min/3
-    # grid; 0.1847 / 0.1975 with the blur (2026-11-10); 0.1676 / 0.1924 on
-    # the d_min/4 grid that was the default for a few hours the same day;
-    # 0.1678 / 0.1928 on the 0.7 A voxels of the cap rule (--rate 1.5
-    # reproduces the second pair).
-    assert abs(r["R-work binned"] - 0.1678) < 5e-4
-    assert abs(r["R-free binned"] - 0.1928) < 1e-3
+    # pins on this run, all on 2026-11-10: 0.1880 / 0.1929 with no protein
+    # blur; 0.1847 / 0.1975 with the blur, both on the d_min/3 grid with the
+    # calibration target measured on it; 0.1676 / 0.1924 and 0.1678 / 0.1928
+    # on the d_min/4 and 0.7 A-capped grids that were the default for a few
+    # hours each; 0.1680 / 0.1921 back on the d_min/3 grid with the target on
+    # the 0.7 A reference grid (--target-spacing same --rate 1.5 reproduces
+    # the second pair).
+    assert abs(r["R-work binned"] - 0.1680) < 5e-4
+    assert abs(r["R-free binned"] - 0.1921) < 1e-3
 
 
 def test_main_fit_with_log_bins_through_run_on_7fpv_at_3a():
@@ -217,18 +219,18 @@ def test_main_fit_with_log_bins_through_run_on_7fpv_at_3a():
     assert "overall scale per resolution bin: 6 log bins" in out.getvalue()
     assert "fitted per resolution bin (6 bins)" in out.getvalue()
     # The main fit with bins also scales the solvent per bin by default
-    # (measured 2026-11-10 on the 0.7 A voxels of the cap rule: 0.1686 /
-    # 0.1946), and the exponential is one flag away (0.1678 / 0.1928). On
-    # the d_min/3 grid (--rate 1.5) these were 0.1852 / 0.1985 and 0.1847 /
-    # 0.1975.
+    # (measured 2026-11-10 on the d_min/3 grid with the reference-grid
+    # target: 0.1689 / 0.1935), and the exponential is one flag away
+    # (0.1680 / 0.1921). With the target on the working grid these were
+    # 0.1852 / 0.1985 and 0.1847 / 0.1975.
     assert r["solvent_scheme"] == "per bin"
     assert "solvent scale is one value per bin" in out.getvalue()
-    assert abs(r["R-work"] - 0.1686) < 5e-4 and abs(r["R-free"] - 0.1946) < 1e-3
+    assert abs(r["R-work"] - 0.1689) < 5e-4 and abs(r["R-free"] - 0.1935) < 1e-3
     args.solvent_bins = "off"
     with contextlib.redirect_stdout(io.StringIO()):
         r2 = fit_solvent_rfactor.run(args)
     assert r2["solvent_scheme"] == "exponential"
-    assert abs(r2["R-work"] - 0.1678) < 5e-4 and abs(r2["R-free"] - 0.1928) < 1e-3
+    assert abs(r2["R-work"] - 0.1680) < 5e-4 and abs(r2["R-free"] - 0.1921) < 1e-3
 
 
 def test_main_forwards_the_default_binned_row(monkeypatch, capsys):
@@ -287,12 +289,12 @@ def test_binned_row_defaults_to_per_bin_solvent_on_7fpv_at_3a():
     assert r["solvent_scheme"] == "exponential"
     assert "binned row: 6 log bins, solvent per bin" in text
     assert "solvent scale per bin (low to high resolution):" in text
-    # Measured 2026-11-10 on the 0.7 A voxels of the cap rule, protein blur
-    # on; the exponential gives 0.1678 / 0.1928 (d_min/3 grid: 0.1852 /
-    # 0.1985, single 0.1868).
-    assert abs(r["R-work binned"] - 0.1686) < 5e-4
-    assert abs(r["R-free binned"] - 0.1946) < 1e-3
-    assert abs(r["R-work"] - 0.1680) < 5e-4    # single-scale row: not moved by the binned row
+    # Measured 2026-11-10 on the d_min/3 grid with the reference-grid target
+    # and the protein blur; the exponential gives 0.1680 / 0.1921 (with the
+    # target on the working grid: 0.1852 / 0.1985, single 0.1868).
+    assert abs(r["R-work binned"] - 0.1689) < 5e-4
+    assert abs(r["R-free binned"] - 0.1935) < 1e-3
+    assert abs(r["R-work"] - 0.1682) < 5e-4    # single-scale row: not moved by the binned row
     assert 0.0 <= r["b_sol binned"] <= 150.0 and 0.0 <= r["k_sol binned"] <= 0.6
     # per-phase timing: every phase this run goes through is present, none
     # negative, the phases do not exceed the total, and the table is printed
@@ -807,12 +809,13 @@ def test_sharpest_b_and_protein_blur_setting():
 
 
 @requires_cctbx
-def test_default_grid_caps_the_voxel_edge(tmp_path):
-    """The tool's grid rule is spacing = min(d_min/3, --max-voxel), default
-    cap 0.7 A: at 2.5 A, where d_min/3 is 0.83 A, the voxels are capped at
-    0.7 A; at 1.8 A, where d_min/3 is 0.6 A, the grid is the plain rate-1.5
-    grid every number before 2026-11-10 was measured on. --rate overrides the
-    rule. (mmtbx's mask is on a fixed ~0.6 A step, which this does not copy.)"""
+def test_default_grid_is_d_min_over_3_with_the_cap_opt_in(tmp_path):
+    """The tool's default grid is gemmi's and xtraj's rate 1.5, voxels of
+    d_min/3, the grid every number before 2026-11-10 was measured on: at
+    2.5 A the voxels are 0.83 A and nothing caps them. --max-voxel caps the
+    edge on request (0.7 A binds at 2.5 A and not at 1.8 A) and --rate
+    overrides both. The cap was the default for part of 2026-11-10; with the
+    calibration target on its own reference grid it changes nothing."""
     import contextlib
     import io
 
@@ -829,47 +832,51 @@ def test_default_grid_caps_the_voxel_edge(tmp_path):
         return args, r, out.getvalue()
 
     args, r, text = fit(2.5)
-    assert args.rate is None and args.max_voxel == 0.7, (
-        "default grid rule is --rate %r --max-voxel %r, not the 0.7 A cap"
+    assert args.rate is None and args.max_voxel is None, (
+        "default grid rule is --rate %r --max-voxel %r, not plain d_min/3"
         % (args.rate, args.max_voxel))
-    # the rate is d_min/(2 cap) with d_min the data's own, just above 2.5
-    assert r["max_voxel"] == 0.7 and 1.75 < r["rate"] < 1.85
-    assert "grid: voxels capped at --max-voxel 0.7 A" in text
-    for edge, n in zip(cell, r["grid"]):
-        assert edge / n <= 0.7 + 1e-9, (edge, n)
-    assert any(edge / n > 0.5 for edge, n in zip(cell, r["grid"]))
-
-    # below 2.1 A the cap is not reached and the grid is the rate-1.5 one
-    _, r18, text18 = fit(1.8)
-    assert r18["rate"] == 1.5 and "rate 1.5; finer than the --max-voxel cap" in text18
-    _, r18_15, _ = fit(1.8, "--rate", "1.5")
-    assert r18_15["grid"] == r18["grid"]
-
-    # an explicit --rate wins over the cap, both ways
-    _, r2, text2 = fit(2.5, "--rate", "2")
-    assert r2["rate"] == 2.0 and "--rate 2:" in text2
-    assert r2["grid_rule"].startswith("--rate 2") and r["grid_rule"].startswith("voxels capped")
-    assert all(a >= b for a, b in zip(r2["grid"], r["grid"])) and r2["grid"] != r["grid"]
+    assert r["rate"] == 1.5 and r["max_voxel"] is None
+    assert "grid: voxels of d_min/3" in text and "the default" in text
+    assert r["grid_rule"].startswith("voxels of d_min/3")
+    assert any(edge / n > 0.7 for edge, n in zip(cell, r["grid"]))        # not capped
     _, r15, _ = fit(2.5, "--rate", "1.5")
-    assert r15["rate"] == 1.5 and all(a <= b for a, b in zip(r15["grid"], r["grid"]))
+    assert r15["grid"] == r["grid"]
+
+    # the cap, opted in: binds at 2.5 A (d_min/3 = 0.83 A), not at 1.8 A (0.6 A)
+    _, rc, textc = fit(2.5, "--max-voxel", "0.7")
+    assert rc["max_voxel"] == 0.7 and 1.75 < rc["rate"] < 1.85
+    assert "grid: voxels capped at --max-voxel 0.7 A" in textc
+    for edge, n in zip(cell, rc["grid"]):
+        assert edge / n <= 0.7 + 1e-9, (edge, n)
+    assert all(a <= b for a, b in zip(r["grid"], rc["grid"])) and rc["grid"] != r["grid"]
+    _, r18c, text18 = fit(1.8, "--max-voxel", "0.7")
+    assert r18c["rate"] == 1.5 and "finer than the --max-voxel cap" in text18
+    _, r18, _ = fit(1.8)
+    assert r18["grid"] == r18c["grid"]
+
+    # an explicit --rate wins over both
+    _, r2, text2 = fit(2.5, "--rate", "2", "--max-voxel", "0.7")
+    assert r2["rate"] == 2.0 and r2["grid_rule"].startswith("--rate 2")
+    assert all(a >= b for a, b in zip(r2["grid"], rc["grid"]))
 
 
 def test_grid_rate_rule():
-    """grid_rate: the cap binds only where d_min/3 is coarser than it, an
-    explicit rate wins, and non-positive settings are errors."""
+    """grid_rate: d_min/3 by default; a cap binds only where d_min/3 is
+    coarser than it; an explicit rate wins; non-positive settings are errors."""
     import pytest
 
     import fit_solvent_rfactor as f
 
+    assert f.MAX_VOXEL_DEFAULT is None
+    assert f.grid_rate(3.0)[0] == 1.5 and "the default" in f.grid_rate(3.0)[1]
     assert f.grid_rate(1.8, None, 0.7)[0] == 1.5             # d_min/3 = 0.60 < 0.7
     assert f.grid_rate(2.1, None, 0.7)[0] == 1.5             # exactly at the cap
     assert abs(f.grid_rate(3.0, None, 0.7)[0] - 3.0 / 1.4) < 1e-12
     assert abs(f.grid_rate(3.0, None, 0.6)[0] - 2.5) < 1e-12
     assert f.grid_rate(3.0, 2.0, 0.7)[0] == 2.0 and "--rate 2" in f.grid_rate(3.0, 2.0, 0.7)[1]
     assert f.grid_rate(3.0, 1.5, 0.1)[0] == 1.5             # the override ignores the cap
-    assert f.MAX_VOXEL_DEFAULT == 0.7
     with pytest.raises(ValueError):
-        f.grid_rate(3.0, 0.0, 0.7)
+        f.grid_rate(3.0, 0.0)
     with pytest.raises(ValueError):
         f.grid_rate(3.0, None, 0.0)
 
@@ -900,23 +907,23 @@ def test_calibration_target_does_not_move_with_the_working_grid(tmp_path):
             r = fit_solvent_rfactor.run(args)
         return args, r, out.getvalue()
 
-    args, r_cap, text = fit()
+    args, r_def, text = fit()
     assert args.target_spacing == fit_solvent_rfactor.TARGET_SPACING_DEFAULT
     _, r_15, _ = fit("--rate", "1.5")
     _, r_3, _ = fit("--rate", "3")
     assert r_15["grid"] != r_3["grid"]
-    assert r_15["target_occupancy"] == r_3["target_occupancy"] == r_cap["target_occupancy"], (
+    assert r_15["target_occupancy"] == r_3["target_occupancy"] == r_def["target_occupancy"], (
         "the calibration target moved with the working grid: %r"
-        % [r_15["target_occupancy"], r_cap["target_occupancy"], r_3["target_occupancy"]])
+        % [r_15["target_occupancy"], r_def["target_occupancy"], r_3["target_occupancy"]])
     assert r_15["gemmi_occupancy_working_grid"] != r_3["gemmi_occupancy_working_grid"]
     assert "reference grid" in text and "independent of the working grid" in text
     assert "actual spacing up to" in text
-    assert 0.0 < r_cap["target_occupancy"] < 1.0
+    assert 0.0 < r_def["target_occupancy"] < 1.0
     # the value itself is the reference-grid measurement, so a quiet fallback
     # to the working grid fails on a number, not only on the keys
     ref, ref_grid = fit_solvent_rfactor.gemmi_mask_occupancy_at_spacing(
         pdb, fit_solvent_rfactor.TARGET_SPACING_DEFAULT, "Refmac")
-    assert r_cap["target_occupancy"] == ref
+    assert r_def["target_occupancy"] == ref
     assert max(e / n for e, n in zip(cell_edges(), ref_grid)) <= 0.7 + 1e-9
 
     _, s_15, text_s = fit("--rate", "1.5", "--target-spacing", "same")
@@ -931,7 +938,7 @@ def test_calibration_target_does_not_move_with_the_working_grid(tmp_path):
     _, o, text_o = fit("--target-occupancy", "0.95")     # the toy is mostly empty cell
     assert o["target_occupancy"] == 0.95 and o["target_source"] == "--target-occupancy"
     assert "reference grid" not in text_o
-    assert r_cap["target_source"] == "gemmi, 0.7 A reference grid"
+    assert r_def["target_source"] == "gemmi, 0.7 A reference grid"
     assert s_15["target_source"] == "gemmi, working grid"
 
     # --mask gemmi uses gemmi's mask on the WORKING grid, and the occupancy
@@ -982,3 +989,58 @@ def test_shrink_step_distance():
     assert near is not None and abs(near - d_short) < 1e-9
     Mr = orth_matrix(30.0, 30.0, 30.0, 90.0, 90.0, 90.0)
     assert f.shrink_step_distance(Mr, (n, n, n), 0.8) is None
+
+
+@requires_cctbx
+def test_mask_gemmi_calibrates_nothing(tmp_path, monkeypatch):
+    """--mask gemmi uses gemmi's mask on the working grid as it is: no
+    reference-grid target is built, the run says so, and the result names the
+    occupancy as that mask's and not a target. On voxels no finer than gemmi's
+    shrink radius it warns, with or without a --target-occupancy."""
+    import contextlib
+    import io
+    import warnings
+
+    import fit_solvent_rfactor
+    from lunus.sf.solvent_torch import SolventMaskWarning
+
+    pdb, mtz = sharp_toy(tmp_path, sharp=False)
+    calls = []
+    real = fit_solvent_rfactor.gemmi_mask_occupancy_at_spacing
+
+    def spy(*a, **k):
+        calls.append(a)
+        return real(*a, **k)
+
+    monkeypatch.setattr(fit_solvent_rfactor, "gemmi_mask_occupancy_at_spacing", spy)
+    args = fit_solvent_rfactor.build_parser().parse_args(
+        [pdb, mtz, "--shells", "2", "--mask", "gemmi"])
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            r = fit_solvent_rfactor.run(args)
+    assert calls == []
+    assert "calibration target: none (--mask gemmi" in out.getvalue()
+    assert r["target_source"] == "none (--mask gemmi)"
+    assert r["target_occupancy"] == r["gemmi_occupancy_working_grid"] == r["mask_occupancy"]
+    # the toy at 2.5 A sits on 0.83 A voxels, no finer than the 0.8 A Refmac
+    # shrink radius: gemmi's mask has no shrink step there, and the run says so
+    assert any(issubclass(w.category, SolventMaskWarning)
+               and "no finer than gemmi's Refmac shrink" in str(w.message)
+               for w in caught)
+    args2 = fit_solvent_rfactor.build_parser().parse_args(
+        [pdb, mtz, "--shells", "2", "--mask", "gemmi", "--max-voxel", "0.7"])
+    with warnings.catch_warnings(record=True) as caught2:
+        warnings.simplefilter("always")
+        with contextlib.redirect_stdout(io.StringIO()):
+            fit_solvent_rfactor.run(args2)
+    assert not any(issubclass(w.category, SolventMaskWarning) for w in caught2)
+    assert calls == []
+    # the warning is about the mask in use, so an explicit target does not silence it
+    args3 = fit_solvent_rfactor.build_parser().parse_args(
+        [pdb, mtz, "--shells", "2", "--mask", "gemmi", "--target-occupancy", "0.95"])
+    with warnings.catch_warnings(record=True) as caught3:
+        warnings.simplefilter("always")
+        with contextlib.redirect_stdout(io.StringIO()):
+            fit_solvent_rfactor.run(args3)
+    assert any(issubclass(w.category, SolventMaskWarning) for w in caught3)

@@ -24,21 +24,28 @@ xtraj defaults to is now measured against the same R factors, and exposed as
 protein density with the extra B xtraj's `recommended_blur` prescribes and
 removes it from F_protein (`--protein-blur`, default auto, 2026-11-10): on the
 d_min/3 grid an atom at B ~ 1-2 A^2 aliased, and so did 7FPV's B = 10 atoms
-once the data were cut to 3 A. The tool's grid is now capped at
-`--max-voxel` 0.7 A, i.e. d_min/3 voxels below 2.1 A and 0.7 A beyond
-(2026-11-10; mmtbx's own mask sits on a fixed ~0.6 A step): the mask on
-d_min/3 voxels, boundary and calibration target alike, was the larger part of
-the low-resolution gap to mmtbx in the 1,000-entry run, and the finer grid
-closes about 60% of it there, while a finer grid at higher resolution changes
-nothing and costs ~0.0003 and 20-30% time. A sweep of 0.6, 0.7 and 0.8 A over
+once the data were cut to 3 A. The tool's grid is d_min/3 voxels
+(rate 1.5), the grid every earlier number was measured on; `--max-voxel` caps
+the voxel edge and `--rate` overrides. On 2026-11-10 the default was briefly a
+plain rate 2 and then a 0.7 A cap, because a finer grid closed about 60% of
+the low-resolution gap to mmtbx; the gain turned out to come entirely through
+the calibration target (next paragraph), and with the target on its own
+reference grid the d_min/3 grid gives the same R as the capped one in every
+band (40 benchmark entries, no entry moving by more than 0.0011; this holds
+for the threshold mask, while `--mask gemmi` builds gemmi's mask on the working
+grid and still needs `--max-voxel 0.7` beyond ~2.1 A) with 16% less torch time
+at 2.6-3.0 A (median per-entry ratio, 0.43x the voxels) and 7% less at
+2.2-2.6 A, so the default went back the same day. A finer grid at higher resolution had changed nothing and cost
+~0.0003 and 20-30% time; mmtbx's own mask sits on a fixed ~0.6 A step. A sweep of 0.6, 0.7 and 0.8 A over
 40 benchmark entries does not tell the three apart: at 2.6-3.0 A the median
 gap is +0.0109, +0.0105 and +0.0114 against +0.0258 uncapped, with per-entry
 differences smaller than the ~0.003 grid noise; 0.7 A was chosen as the middle
-value, nearest mmtbx's step. The gain begins at about 2.5 A (two entries at
-2.49-2.50 A improve by 0.004 and 0.013); at 1.8-2.4 A the entries move within
-noise, and at 1.8-2.2 A only 0.6 A binds. On SW40 the cap binds on 3IAC and
-4OLE only; every R is unchanged from the d_min/3 grid except 4OLE's R-free,
-by 0.0001. Since the same day the calibration target, gemmi's occupancy, is
+value, nearest mmtbx's step, while the cap was the default. That gain, measured
+with the target on the working grid, began at about 2.5 A (two entries at
+2.49-2.50 A improved by 0.004 and 0.013); at 1.8-2.4 A the entries moved within
+noise, and at 1.8-2.2 A only 0.6 A binds. On SW40 a 0.7 A cap binds on 3IAC
+and 4OLE only; every R is unchanged from the d_min/3 grid except 4OLE's
+R-free, by 0.0001. Since the same day the calibration target, gemmi's occupancy, is
 measured on a fixed 0.7 A reference grid (`--target-spacing`) rather than on
 the working grid: gemmi's occupancy steps with the voxel size where its shrink
 stencil gains neighbours, at r_shrink/sqrt(k) (0.8 and 0.57 A for the Refmac
