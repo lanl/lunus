@@ -253,7 +253,10 @@ def test_main_forwards_the_default_binned_row(monkeypatch, capsys):
         assert seen[-1] == expected
     out = capsys.readouterr().out
     assert "torch, 6 scale bins" in out and "scale bins: 6 log bins, solvent per bin" in out
-    assert "  timing: torch 2.5 s" in out          # torch only: no mmtbx part
+    # 2.5 is the stub's timing["total"], not a measurement: this checks that
+    # main() prints the total it is handed, in the format the torchref1000
+    # kit's parser matches, and with no mmtbx part when only torch ran.
+    assert "  timing: torch 2.5 s" in out
 
 
 def test_binned_row_defaults_to_per_bin_solvent_on_7fpv_at_3a():
