@@ -390,3 +390,52 @@ def test_exponential_from_curve_reports_where_it_fitted():
                                          torch.tensor([0, 1]),
                                          torch.tensor([1 / 9.0, 1 / 4.0], dtype=torch.float64))
     assert (k, b, n) == (0.6, 0.0, 0)        # fallback stays inside the bounds
+
+
+@pytest.mark.parametrize("dt", [torch.float64, torch.float32])
+@pytest.mark.parametrize("fit_solvent", [True, False])
+@pytest.mark.parametrize("seed", [0, 1])
+def test_coarse_scan_matches_the_loop(fit_solvent, seed, dt):
+    """The batched scan picks the node the node-by-node loop picks, and the
+    same scale at it, on synthetic data with the fit's own grids, in both
+    precisions run() offers. In float32 the expanded residual loses a few
+    digits to cancellation, hence the looser scale tolerance there."""
+    F_obs, Fp, Fm, s2, s, work, bins = _synthetic(seed=seed)
+    cdt = torch.complex128 if dt == torch.float64 else torch.complex64
+    Fo, Fp, s2 = F_obs[work].to(dt), Fp[work].to(cdt), s2[work].to(dt)
+    Fm = Fm[work].to(cdt) if fit_solvent else None
+    grids = fsr.scan_grids(fit_solvent, s2)
+    fast = fsr.coarse_scan(Fo, Fp, Fm, s2, *grids)
+    slow = fsr.coarse_scan_reference(Fo, Fp, Fm, s2, *grids)
+    assert fast[:3] == slow[:3], (fast, slow)
+    tol = 1e-9 if dt == torch.float64 else 1e-4
+    assert abs(fast[3] - slow[3]) < tol * max(1.0, abs(slow[3]))
+
+
+@pytest.mark.skipif(not HAVE_CCTBX, reason="cctbx not installed")
+@pytest.mark.skipif(not os.path.exists(os.path.join(COMPARE, "7FPV-sf.cif")),
+                    reason="examples/compare_gemmi/7FPV-sf.cif not present")
+def test_coarse_scan_matches_the_loop_on_7fpv(monkeypatch):
+    """The same, on the real inputs run() hands fit_scales for 7FPV cut to
+    3 A (captured by wrapping fit_scales), for the with-solvent fit."""
+    import contextlib
+    import io
+
+    seen = {}
+    real = fsr.fit_scales
+
+    def spy(F_obs, F_protein, F_mask, inv_d2, s_cart, work, aniso, **kw):
+        if F_mask is not None and not seen:
+            seen.update(Fo=F_obs[work], Fp=F_protein[work], Fm=F_mask[work], s2=inv_d2[work])
+        return real(F_obs, F_protein, F_mask, inv_d2, s_cart, work, aniso, **kw)
+    monkeypatch.setattr(fsr, "fit_scales", spy)
+    args = fsr.build_parser().parse_args(
+        [os.path.join(COMPARE, "7FPV.pdb"), os.path.join(COMPARE, "7FPV-sf.cif"),
+         "--d-min", "3.0", "--aniso", "--shells", "3"])
+    with contextlib.redirect_stdout(io.StringIO()):
+        fsr.run(args)
+    grids = fsr.scan_grids(True, seen["s2"])
+    fast = fsr.coarse_scan(seen["Fo"], seen["Fp"], seen["Fm"], seen["s2"], *grids)
+    slow = fsr.coarse_scan_reference(seen["Fo"], seen["Fp"], seen["Fm"], seen["s2"], *grids)
+    assert fast[:3] == slow[:3], (fast, slow)
+    assert abs(fast[3] - slow[3]) < 1e-9 * max(1.0, abs(slow[3]))
