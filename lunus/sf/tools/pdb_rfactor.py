@@ -56,6 +56,7 @@ cctbx and gemmi read it.
 import argparse
 import os
 import sys
+import time
 
 # tools/ is not a package; the torch path is fit_solvent_rfactor.py next door.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -156,6 +157,7 @@ def main():
 
     rows = []
     r_torch = {}
+    t_mmtbx = None
     if args.method in ("torch", "both"):
         argv = [model, sf]
         if args.d_min is not None:
@@ -192,9 +194,11 @@ def main():
         if passthrough:
             print("\nnote: %s apply to the torch method only"
                   % " ".join(passthrough))
+        t0 = time.perf_counter()
         r = fit_solvent_rfactor.mmtbx_fit(model, sf, args.d_min,
                                           isotropic=not args.aniso_adp,
                                           select=args.select)
+        t_mmtbx = time.perf_counter() - t0
         rows.append(("mmtbx.f_model", r["R-work"], r["R-free"], r["k_sol"],
                      r["b_sol"]))
         n_work, n_free, n_atoms = r["n_work"], r["n_free"], r["n_atoms"]
@@ -219,6 +223,14 @@ def main():
                if r_torch.get(k)]
     if schemes:
         print("  scale bins: %s" % "; ".join(schemes))
+    # Wall time of each method; the torch run's own per-phase table is above.
+    parts = []
+    if r_torch.get("timing"):
+        parts.append("torch %.1f s" % r_torch["timing"]["total"])
+    if t_mmtbx is not None:
+        parts.append("mmtbx %.1f s" % t_mmtbx)
+    if parts:
+        print("  timing: %s" % ", ".join(parts))
     if n_free == 0:
         print("  no R-free flags deposited: every reflection is in the work set")
     if args.method == "both":

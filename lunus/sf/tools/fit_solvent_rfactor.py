@@ -75,6 +75,7 @@ import contextlib
 import io
 import math
 import sys
+import time
 
 import numpy as np
 import torch
@@ -398,9 +399,51 @@ def scattering_table(present, log=sys.stdout):
     return table
 
 
+# ------------------------------------------------------------------- timing
+
+def device_sync(device):
+    """Wait for the device's queued work, so that a wall-clock reading after
+    it measures the work and not the time to enqueue it. No-op on CPU."""
+    d = str(device)
+    if d.startswith("cuda") and torch.cuda.is_available():
+        torch.cuda.synchronize(d)
+    elif d.startswith("mps") and hasattr(torch, "mps"):
+        torch.mps.synchronize()
+
+
+@contextlib.contextmanager
+def timed(timing, phase, device="cpu"):
+    """Add the wall time of the block to timing[phase] (seconds), with a
+    device synchronisation at both ends. timing is a plain dict; None
+    disables the timer, so library functions can take an optional one."""
+    if timing is None:
+        yield
+        return
+    device_sync(device)
+    t0 = time.perf_counter()
+    try:
+        yield
+    finally:
+        device_sync(device)
+        timing[phase] = timing.get(phase, 0.0) + time.perf_counter() - t0
+
+
+def print_timing(timing, log=sys.stdout):
+    """The per-phase table run() prints: every phase that was timed, in the
+    order it was first entered, then the remainder and the total."""
+    total = timing.get("total", 0.0)
+    accounted = sum(v for k, v in timing.items() if k != "total")
+    print("\ntiming (s, wall; device work waited for at each boundary)", file=log)
+    for phase, seconds in timing.items():
+        if phase != "total":
+            print("  %-26s %8.2f" % (phase, seconds), file=log)
+    print("  %-26s %8.2f" % ("other", max(0.0, total - accounted)), file=log)
+    print("  %-26s %8.2f" % ("total", total), file=log)
+
+
 def build_density(xrs, elements, b_per_atom, occ, frac, grid, device, dtype,
                   expand_symmetry, log=sys.stdout, u_cart=None,
-                  is_aniso=None, cutoff=0.01):
+                  is_aniso=None, cutoff=0.01, timing=None):
     """Place the density, then symmetry-expand on the GRID.
 
     expand_symmetry is True here and False for a trajectory, and the difference
@@ -448,13 +491,15 @@ def build_density(xrs, elements, b_per_atom, occ, frac, grid, device, dtype,
     occ_t = torch.tensor(occ, dtype=dtype, device=device)
     orth = torch.tensor(M_np, dtype=dtype, device=device)
 
-    density = compute_density(frac_t, element_idx, occ_t, atom_A, atom_lam,
-                            offsets, atom_r, grid, orth, taper_w,
-                            compile_core=False, atom_L6=atom_L6,
-                            aniso_mask=aniso_mask)
+    with timed(timing, "density", device):
+        density = compute_density(frac_t, element_idx, occ_t, atom_A, atom_lam,
+                                  offsets, atom_r, grid, orth, taper_w,
+                                  compile_core=False, atom_L6=atom_L6,
+                                  aniso_mask=aniso_mask)
     if expand_symmetry:
-        grid_ops = build_grid_ops_from_cctbx(xrs.space_group(), grid)
-        density = symmetrize_sum(density, grid_ops)
+        with timed(timing, "symmetry expansion", device):
+            grid_ops = build_grid_ops_from_cctbx(xrs.space_group(), grid)
+            density = symmetrize_sum(density, grid_ops)
         print("symmetry-expanded on the grid: %d operations beyond the identity"
               % len(grid_ops), file=log)
     return density, orth, float(np.linalg.det(M_np))
@@ -1418,6 +1463,8 @@ def run(args):
     (R-work/R-free with and without solvent, k_sol, b_sol, k_overall) as a
     dict so that tools/pdb_rfactor.py can tabulate them; everything else is
     printed as it goes."""
+    timing = {}
+    t_start = time.perf_counter()
     from lunus.sf.cell_utils import grid_shape_for_resolution
     from lunus.sf.solvent_torch import (
         MASK_BLUR_DEFAULT, calibrate_cutoff, f_solvent, mask_occupancy,
@@ -1435,12 +1482,14 @@ def run(args):
     print("bulk solvent against deposited amplitudes")
     print("=" * 78)
 
-    xrs, elements, b_per_atom, occ, frac, n_aniso, u_cart, is_aniso = \
-        read_model(args.pdb, special_position_weights=use_special_position_weights(
-            args.no_special_position_weights, args.no_expand_symmetry),
-            select=args.select)
-    F_obs_array, free_np = read_observations(
-        args.cif, d_min=args.d_min, crystal_symmetry=xrs.crystal_symmetry())
+    with timed(timing, "read model"):
+        xrs, elements, b_per_atom, occ, frac, n_aniso, u_cart, is_aniso = \
+            read_model(args.pdb, special_position_weights=use_special_position_weights(
+                args.no_special_position_weights, args.no_expand_symmetry),
+                select=args.select)
+    with timed(timing, "read observations"):
+        F_obs_array, free_np = read_observations(
+            args.cif, d_min=args.d_min, crystal_symmetry=xrs.crystal_symmetry())
     d_np = np.array(F_obs_array.d_spacings().data())
     hkl_np = np.array(F_obs_array.indices())
     fobs_np = np.array(F_obs_array.data())
@@ -1463,7 +1512,7 @@ def run(args):
         xrs, elements, b_per_atom, occ, frac, grid, device, dtype,
         expand_symmetry=not args.no_expand_symmetry,
         u_cart=u_cart if args.aniso_adp else None, is_aniso=is_aniso,
-        cutoff=args.density_cutoff)
+        cutoff=args.density_cutoff, timing=timing)
 
     hkl = torch.tensor(hkl_np, dtype=torch.long, device=device)
     F_obs = torch.tensor(fobs_np, dtype=dtype, device=device)
@@ -1474,12 +1523,13 @@ def run(args):
     # here because the anisotropic scale needs its direction, not just |s|.
     s_cart = hkl.to(dtype) @ torch.linalg.inv(orth)
 
-    with torch.no_grad():
+    with torch.no_grad(), timed(timing, "F_protein (fft)", device):
         F_protein = compute_fcalc(density, volume, hkl, orth)
 
     # ---- the mask
     print("\nsolvent mask")
-    target, gemmi_grid = gemmi_mask_occupancy(args.pdb, grid, args.radii_set)
+    with timed(timing, "gemmi mask (cpu)"):
+        target, gemmi_grid = gemmi_mask_occupancy(args.pdb, grid, args.radii_set)
     print("  gemmi %s geometric mask on the same model and grid: occupancy %.4f"
           % (args.radii_set, target))
     if args.select != "all":
@@ -1494,7 +1544,7 @@ def run(args):
         print("  using gemmi's mask directly (--mask gemmi)")
         occupancy, shell, cutoff = target, 0, float("nan")
     else:
-        with torch.no_grad():
+        with torch.no_grad(), timed(timing, "threshold mask", device):
             source = blur_density(density, orth, args.mask_blur)
             if args.mask_blur:
                 sigma = np.sqrt(args.mask_blur / (8.0 * np.pi ** 2))
@@ -1510,17 +1560,19 @@ def run(args):
         print("  occupancy %.4f, taper shell %d voxels (%.2f%% of the grid)"
               % (occupancy, shell, 100.0 * shell / np.prod(grid)))
 
-    with torch.no_grad():
+    with torch.no_grad(), timed(timing, "F_mask (fft)", device):
         F_mask = f_solvent(mask, volume, hkl, orth)
+    with torch.no_grad():
         low = d_np > 5.0
         print("  |F_mask|/|F_protein|: %.4f overall, %.4f beyond 5 A"
               % (float(F_mask.abs().mean() / F_protein.abs().mean()),
                  float(F_mask[low].abs().mean() / F_protein[low].abs().mean())))
         if args.mask != "gemmi":
-            F_gemmi = f_solvent(
-                torch.tensor(np.array(gemmi_grid), dtype=dtype, device=device),
-                volume, hkl, orth)
-            compare_masks(mask, gemmi_grid, F_mask, F_gemmi, d_np)
+            with timed(timing, "gemmi F_mask + compare", device):
+                F_gemmi = f_solvent(
+                    torch.tensor(np.array(gemmi_grid), dtype=dtype, device=device),
+                    volume, hkl, orth)
+                compare_masks(mask, gemmi_grid, F_mask, F_gemmi, d_np)
 
     # ---- the fits
     print("\nfitting %d work reflections (%d free held out)"
@@ -1534,12 +1586,14 @@ def run(args):
         """The --solvent-bins rule: on for log bins unless told otherwise."""
         return {"on": True, "off": False}.get(args.solvent_bins, spec == "log")
     print("no solvent:")
-    fit0 = fit_scales(F_obs, F_protein, None, inv_d2, s_cart, work, args.aniso,
-                      fit_solvent=False, bins=bins)
+    with timed(timing, "fit, no solvent", device):
+        fit0 = fit_scales(F_obs, F_protein, None, inv_d2, s_cart, work, args.aniso,
+                          fit_solvent=False, bins=bins)
     print("with solvent:")
-    fit1 = fit_scales(F_obs, F_protein, F_mask, inv_d2, s_cart, work, args.aniso,
-                      fit_solvent=True, bins=bins,
-                      solvent_bins=per_bin_solvent(args.scale_bins))
+    with timed(timing, "fit, with solvent", device):
+        fit1 = fit_scales(F_obs, F_protein, F_mask, inv_d2, s_cart, work, args.aniso,
+                          fit_solvent=True, bins=bins,
+                          solvent_bins=per_bin_solvent(args.scale_bins))
 
     m0 = model_amplitudes(fit0, F_protein, None, inv_d2, s_cart)
     m1 = model_amplitudes(fit1, F_protein, F_mask, inv_d2, s_cart)
@@ -1593,7 +1647,8 @@ def run(args):
         # fit_scales's own log defaults to the stdout bound at import, which
         # redirect_stdout does not reach; hand it a sink explicitly so the
         # curve is printed once, below, and not twice.
-        with contextlib.redirect_stdout(io.StringIO()):
+        with contextlib.redirect_stdout(io.StringIO()), \
+                timed(timing, "fit, binned row", device):
             fitb = fit_scales(F_obs, F_protein, F_mask, inv_d2, s_cart, work,
                               args.aniso, fit_solvent=True, bins=bins_b,
                               solvent_bins=per_bin_solvent(args.also_scale_bins),
@@ -1638,7 +1693,8 @@ def run(args):
         # solvent the model applied.
         contribution = solvent_weight(fit1, inv_d2) * F_mask.abs()
         solvent_share = (contribution / F_protein.abs()).cpu().numpy()
-    shell_table(d_np, F_obs, m0, m1, work, free_np, args.shells, solvent_share)
+    with timed(timing, "tables", device):
+        shell_table(d_np, F_obs, m0, m1, work, free_np, args.shells, solvent_share)
 
     # Equal-count shells put four fifths of a 1.04 A dataset above 2 A, which
     # is precisely where bulk solvent does nothing. The acceptance criterion is
@@ -1657,7 +1713,8 @@ def run(args):
                  100.0 * float(solvent_share[sel].mean())))
 
     if args.reference:
-        external_reference(args.pdb, args.cif, args.d_min, select=args.select)
+        with timed(timing, "mmtbx reference"):
+            external_reference(args.pdb, args.cif, args.d_min, select=args.select)
 
     print("\ncaveats, in descending order of how much they cost")
     if args.aniso_adp:
@@ -1694,6 +1751,10 @@ def run(args):
         print("    u_aniso code path rather than a modelling result.")
     print("\n  The diagnostic quantity is the CHANGE from solvent and where it")
     print("  falls, not the absolute R. See docs/solvent-design.md, Validation.")
+    device_sync(device)
+    timing["total"] = time.perf_counter() - t_start
+    print_timing(timing, log=sys.stdout)     # the stdout of the call, not of the import
+    result["timing"] = dict(timing)
     return result
 
 

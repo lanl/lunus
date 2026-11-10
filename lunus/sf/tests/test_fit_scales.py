@@ -439,3 +439,33 @@ def test_coarse_scan_matches_the_loop_on_7fpv(monkeypatch):
     slow = fsr.coarse_scan_reference(seen["Fo"], seen["Fp"], seen["Fm"], seen["s2"], *grids)
     assert fast[:3] == slow[:3], (fast, slow)
     assert abs(fast[3] - slow[3]) < 1e-9 * max(1.0, abs(slow[3]))
+
+
+def test_timed_accumulates_and_can_be_switched_off():
+    """The phase timer adds up repeated blocks, leaves other phases alone,
+    records a phase even when the block raises, and does nothing with None;
+    print_timing lists the phases in the order they were entered, then the
+    remainder and the total."""
+    import io
+    import time
+
+    t = {}
+    for _ in range(3):
+        with fsr.timed(t, "a"):
+            time.sleep(0.01)
+    with fsr.timed(t, "b"):
+        pass
+    assert set(t) == {"a", "b"} and t["a"] >= 0.03 and t["b"] >= 0.0
+    with pytest.raises(RuntimeError):
+        with fsr.timed(t, "c"):
+            raise RuntimeError("inside")
+    assert "c" in t
+    with fsr.timed(None, "ignored"):
+        pass
+    log = io.StringIO()
+    fsr.print_timing({"density": 1.0, "total": 3.0, "fit": 0.5}, log=log)
+    lines = [l for l in log.getvalue().splitlines() if l.strip()]
+    assert lines[0].startswith("timing (s")
+    assert lines[1].split() == ["density", "1.00"]
+    assert lines[2].split() == ["fit", "0.50"]
+    assert lines[-2].split() == ["other", "1.50"] and lines[-1].split() == ["total", "3.00"]

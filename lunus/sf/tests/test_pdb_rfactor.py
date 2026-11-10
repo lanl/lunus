@@ -241,7 +241,8 @@ def test_main_forwards_the_default_binned_row(monkeypatch, capsys):
                 "scale_bins": 6, "bin_scheme": "6 log bins",
                 "solvent_scheme binned": "per bin",
                 "R-work binned": 0.19, "R-free binned": 0.19,
-                "k_sol binned": 0.35, "b_sol binned": 46.0}
+                "k_sol binned": 0.35, "b_sol binned": 46.0,
+                "timing": {"total": 2.5, "density": 0.3}}
     monkeypatch.setattr(pdb_rfactor, "fetch_entry",
                         lambda *a, **k: ("m.pdb", "m-sf.cif"))
     monkeypatch.setattr(pdb_rfactor.fit_solvent_rfactor, "run", fake_run)
@@ -252,6 +253,10 @@ def test_main_forwards_the_default_binned_row(monkeypatch, capsys):
         assert seen[-1] == expected
     out = capsys.readouterr().out
     assert "torch, 6 scale bins" in out and "scale bins: 6 log bins, solvent per bin" in out
+    # 2.5 is the stub's timing["total"], not a measurement: this checks that
+    # main() prints the total it is handed, in the format the torchref1000
+    # kit's parser matches, and with no mmtbx part when only torch ran.
+    assert "  timing: torch 2.5 s" in out
 
 
 def test_binned_row_defaults_to_per_bin_solvent_on_7fpv_at_3a():
@@ -280,6 +285,19 @@ def test_binned_row_defaults_to_per_bin_solvent_on_7fpv_at_3a():
     assert abs(r["R-free binned"] - 0.1935) < 1e-3
     assert abs(r["R-work"] - 0.1901) < 5e-4          # single-scale row unchanged
     assert 0.0 <= r["b_sol binned"] <= 150.0 and 0.0 <= r["k_sol binned"] <= 0.6
+    # per-phase timing: every phase this run goes through is present, none
+    # negative, the phases do not exceed the total, and the table is printed
+    t = r["timing"]
+    for phase in ("read model", "read observations", "density", "symmetry expansion",
+                  "F_protein (fft)", "gemmi mask (cpu)", "threshold mask", "F_mask (fft)",
+                  "gemmi F_mask + compare", "fit, no solvent", "fit, with solvent",
+                  "fit, binned row", "tables", "total"):
+        assert phase in t and t[phase] >= 0.0, phase
+    assert "mmtbx reference" not in t                 # --reference was not asked for
+    assert sum(v for k, v in t.items() if k != "total") <= t["total"] + 1e-6
+    assert t["fit, with solvent"] > 0.0 and t["total"] > 0.0
+    assert "timing (s, wall; device work waited for at each boundary)" in text
+    assert "\n  total " in text
 
 
 def test_equal_count_bins_keep_the_exponential_solvent_by_default():
