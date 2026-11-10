@@ -20,7 +20,11 @@ smoothed mask and its recommendation changed ("What the diffuse study found"),
 and `mask_blur`'s cost is now measured on CUDA ("At production scale") — it is
 cheap in time and costs ~1.5x peak device memory. The atomic density cutoff
 xtraj defaults to is now measured against the same R factors, and exposed as
-`--density-cutoff` ("What the density cutoff costs").
+`--density-cutoff` ("What the density cutoff costs"). The tool also places the
+protein density with the extra B xtraj's `recommended_blur` prescribes and
+removes it from F_protein (`--protein-blur`, default auto, 2026-11-10): on the
+d_min/3 grid an atom at B ~ 1-2 A^2 aliased, and so did 7FPV's B = 10 atoms
+once the data were cut to 3 A.
 
 Written 2026-08-15, revised the same day against the current code — the API
 assumptions below were checked, the cost estimate was replaced with a

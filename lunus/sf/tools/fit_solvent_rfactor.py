@@ -61,7 +61,24 @@ Comparing the two R-factors separates "the mask model is wrong" from
 is the threshold mask's analogue of the probe radius a geometric mask is built
 with. It defaults to SolventModel's own value, so a plain run reports the
 SHIPPED configuration; --mask-blur 0 disables it and reproduces what the model
-did before this existed, which is where the unphysical scales come from.
+did before this existed, which is where the unphysical scales come from (with
+--protein-blur 0 as well: the placement blur below is the same smoothing, and
+stays in the density the threshold sees).
+
+--protein-blur B places the PROTEIN density with B added to every atom and
+removes it again from F_protein, exactly (exp(+B s^2/4) in reciprocal space).
+The answer is unchanged in exact arithmetic; what changes is that an atom at
+B = 1-2 A^2 is a Gaussian narrower than the d_min/3 voxel and aliases on the
+grid (2YSK, 2P1N in the torchref1000 run: |F_protein| wrong by R 0.11-0.19
+against direct summation, R-free 0.04-0.05 above mmtbx). The default, auto,
+is cell_utils.recommended_blur, the rule xtraj's torch engine uses: zero
+whenever the model's sharpest atom already clears the grid's own target of
+57 h^2 with h the voxel edge -- 6 A^2 at d_min 1 A, 25 at 2 A, 57 at 3 A --
+so a model is touched whenever its sharpest atom is below that. The threshold
+mask's own smoothing (--mask-blur) is a total and is reduced by the same
+amount, so the mask the fit sees is the shipped one up to the aliasing this
+removes; when the placement blur exceeds --mask-blur the mask is smoother
+than asked for and the run says so.
 
 --reference prints what this dataset can actually support, computed with cctbx
 and mmtbx and no lunus code at all: the R that mmtbx's own bulk solvent reaches
@@ -76,6 +93,7 @@ import io
 import math
 import sys
 import time
+import warnings
 
 import numpy as np
 import torch
@@ -532,8 +550,11 @@ def print_timing(timing, log=sys.stdout):
 
 def build_density(xrs, elements, b_per_atom, occ, frac, grid, device, dtype,
                   expand_symmetry, log=sys.stdout, u_cart=None,
-                  is_aniso=None, cutoff=0.01, timing=None):
+                  is_aniso=None, cutoff=0.01, timing=None, blur=0.0):
     """Place the density, then symmetry-expand on the GRID.
+
+    blur (A^2) is added to every atom's B when it is placed; the caller takes
+    it out of F again with compute_fcalc(..., blur=blur). See protein_blur().
 
     expand_symmetry is True here and False for a trajectory, and the difference
     is a property of the input model rather than a preference: a deposited PDB
@@ -557,7 +578,7 @@ def build_density(xrs, elements, b_per_atom, occ, frac, grid, device, dtype,
     present = sorted(set(elements))
     coeffs = scattering_table(present, log)
     atom_A, atom_lam, offsets, atom_r, taper_w, e2i = build_atom_kernels_torch(
-        elements, present, coeffs, b_per_atom, 0.0, grid, M_np,
+        elements, present, coeffs, b_per_atom, blur, grid, M_np,
         cutoff=cutoff, device=device, dtype=dtype)
 
     atom_L6 = aniso_mask = None
@@ -568,7 +589,7 @@ def build_density(xrs, elements, b_per_atom, occ, frac, grid, device, dtype,
         # atom_lam and the dispatch mask distinguish them.
         atom_A, atom_L6, offsets, atom_r, taper_w, _ = \
             build_atom_kernels_aniso_torch(
-                elements, present, coeffs, u_cart, 0.0, grid, M_np,
+                elements, present, coeffs, u_cart, blur, grid, M_np,
                 cutoff=cutoff, device=device, dtype=dtype)
         aniso_mask = torch.tensor(is_aniso, device=device)
         print("anisotropic ADPs: %d of %d atoms on the tensor kernel"
@@ -592,6 +613,57 @@ def build_density(xrs, elements, b_per_atom, occ, frac, grid, device, dtype,
         print("symmetry-expanded on the grid: %d operations beyond the identity"
               % len(grid_ops), file=log)
     return density, orth, float(np.linalg.det(M_np))
+
+
+def sharpest_b(b_per_atom, u_cart=None, is_aniso=None, occ=None):
+    """The smallest B the density will be placed with: the isotropic B of the
+    sharpest isotropic atom, or the smallest principal B of an anisotropic
+    one, which is what sets how finely the grid must sample it. Atoms with
+    zero occupancy place no density and do not count (unless every atom is
+    such, when all are kept rather than returning nothing)."""
+    b = np.asarray(b_per_atom, dtype=float)
+    keep = np.ones(b.shape, dtype=bool)
+    if occ is not None:
+        scatters = np.asarray(occ, dtype=float) > 0.0
+        if scatters.any():
+            keep = scatters
+    if u_cart is None or is_aniso is None or not np.any(is_aniso):
+        return float(b[keep].min())
+    is_aniso = np.asarray(is_aniso, dtype=bool)
+    b_aniso = np.linalg.eigvalsh(np.asarray(u_cart)[is_aniso & keep]).min(axis=1) * (8.0 * np.pi ** 2) \
+        if (is_aniso & keep).any() else np.array([np.inf])
+    b_iso = b[~is_aniso & keep]
+    return float(min(b_aniso.min(), b_iso.min() if b_iso.size else np.inf))
+
+
+def protein_blur_arg(text):
+    """argparse type for --protein-blur: "auto", or B >= 0 in A^2."""
+    if text.lower() == "auto":
+        return "auto"
+    try:
+        b = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            "expected 'auto' or B in A^2, got %r" % text)
+    if b < 0.0:
+        raise argparse.ArgumentTypeError(
+            "--protein-blur must be >= 0 A^2 (0 disables it)")
+    return b
+
+
+def protein_blur(setting, b_min, grid, orth_np, d_min):
+    """--protein-blur resolved to a number: 'auto' is recommended_blur's
+    rule (zero when b_min already clears the grid's target), anything else
+    is taken as B in A^2 and must not be negative: a negative blur places
+    the atoms sharper than the model says and sharpens F_protein's error."""
+    from lunus.sf.cell_utils import recommended_blur
+
+    if str(setting).lower() == "auto":
+        return recommended_blur(b_min, grid, orth_np, d_min=d_min)
+    value = float(setting)
+    if value < 0.0:
+        raise ValueError("protein blur must be >= 0 A^2, got %g" % value)
+    return value
 
 
 def blur_density(density, orth, blur_b):
@@ -1488,6 +1560,12 @@ def build_parser():
                         "calls gemmi_cutoff, and shares its default. Pass 0.01 "
                         "for the old one. See docs/solvent-design.md, "
                         "'What the density cutoff costs'")
+    p.add_argument("--protein-blur", default="auto", type=protein_blur_arg,
+                   metavar="B",
+                   help="extra B (A^2) the protein density is placed with and "
+                        "F_protein is corrected for, so sharp atoms do not "
+                        "alias on the grid. auto (default): "
+                        "cell_utils.recommended_blur, as xtraj; 0 disables it")
     p.add_argument("--mask-blur", type=float, default=None, metavar="B",
                    help="smooth the density by exp(-B s^2/4) before "
                         "thresholding; the threshold mask's probe radius "
@@ -1559,10 +1637,10 @@ def run(args):
     printed as it goes."""
     timing = {}
     t_start = time.perf_counter()
-    from lunus.sf.cell_utils import grid_shape_for_resolution
+    from lunus.sf.cell_utils import grid_shape_for_resolution, orth_matrix
     from lunus.sf.solvent_torch import (
-        MASK_BLUR_DEFAULT, calibrate_cutoff, f_solvent, mask_occupancy,
-        shell_voxels, solvent_mask,
+        MASK_BLUR_DEFAULT, SolventMaskWarning, calibrate_cutoff, f_solvent,
+        mask_occupancy, shell_voxels, solvent_mask,
     )
     if args.mask_blur is None:
         args.mask_blur = MASK_BLUR_DEFAULT
@@ -1602,11 +1680,28 @@ def run(args):
           % (cell + (xrs.space_group().type().lookup_symbol(), grid,
                      np.prod(grid) / 1e6, args.dtype)))
 
+    b_sharpest = sharpest_b(b_per_atom, u_cart if args.aniso_adp else None, is_aniso,
+                            occ=occ)
+    blur_is_auto = str(args.protein_blur).lower() == "auto"
+    blur = protein_blur(args.protein_blur, b_sharpest, grid, orth_matrix(*cell),
+                        d_min_grid)
+    if blur > 0.0:
+        print("protein density placed with B + %.1f A^2 (sharpest atom B %.1f, "
+              "%s) and F_protein corrected by exp(+B s^2/4)"
+              % (blur, b_sharpest, "--protein-blur auto: cell_utils.recommended_blur"
+                 if blur_is_auto else "--protein-blur"))
+    elif blur_is_auto:
+        print("protein density placed as is (sharpest atom B %.1f clears the "
+              "grid's blur target)" % b_sharpest)
+    else:
+        print("protein density placed as is (--protein-blur 0; sharpest atom "
+              "B %.1f)" % b_sharpest)
+
     density, orth, volume = build_density(
         xrs, elements, b_per_atom, occ, frac, grid, device, dtype,
         expand_symmetry=not args.no_expand_symmetry,
         u_cart=u_cart if args.aniso_adp else None, is_aniso=is_aniso,
-        cutoff=args.density_cutoff, timing=timing)
+        cutoff=args.density_cutoff, timing=timing, blur=blur)
 
     hkl = torch.tensor(hkl_np, dtype=torch.long, device=device)
     F_obs = torch.tensor(fobs_np, dtype=dtype, device=device)
@@ -1618,7 +1713,7 @@ def run(args):
     s_cart = hkl.to(dtype) @ torch.linalg.inv(orth)
 
     with torch.no_grad(), timed(timing, "F_protein (fft)", device):
-        F_protein = compute_fcalc(density, volume, hkl, orth)
+        F_protein = compute_fcalc(density, volume, hkl, orth, blur=blur)
 
     # ---- the mask
     print("\nsolvent mask")
@@ -1639,15 +1734,41 @@ def run(args):
         occupancy, shell, cutoff = target, 0, float("nan")
     else:
         with torch.no_grad(), timed(timing, "threshold mask", device):
-            source = blur_density(density, orth, args.mask_blur)
+            # the density already carries the protein blur, which is the
+            # same operation as this smoothing (SolventModel.mask_source
+            # says why), so --mask-blur is a total and only the remainder
+            # is applied: the mask the fit sees is the shipped one up to
+            # the aliasing the protein blur removes. Nothing here can
+            # sharpen a density placed with more than --mask-blur.
+            mask_blur = max(args.mask_blur - blur, 0.0)
+            source = blur_density(density, orth, mask_blur)
+            if blur > args.mask_blur:
+                warnings.warn(
+                    "the protein blur (%.1f A^2) exceeds --mask-blur (%.1f), "
+                    "so the mask is smoother than asked for; lower "
+                    "--protein-blur or accept the wider effective probe"
+                    % (blur, args.mask_blur), SolventMaskWarning, stacklevel=2)
             if args.mask_blur:
                 sigma = np.sqrt(args.mask_blur / (8.0 * np.pi ** 2))
+                if blur <= 0.0:
+                    already = ""
+                elif blur < args.mask_blur:
+                    already = " (%.1f of it already in the placed density)" % blur
+                else:
+                    already = (" -- but the placed density already carries "
+                               "%.1f A^2, and that is what the threshold sees"
+                               % blur)
                 print("  density smoothed by B = %.1f A^2 (sigma %.2f A) "
-                      "before thresholding" % (args.mask_blur, sigma))
+                      "before thresholding%s" % (args.mask_blur, sigma, already))
+            elif blur > 0.0:
+                print("  --mask-blur 0, but the placed density carries the "
+                      "protein blur B = %.1f A^2, so the threshold sees that "
+                      "smoothing (--protein-blur 0 removes it)" % blur)
             cutoff = calibrate_cutoff(source, target,
                                       taper_width_frac=args.taper_frac)
             mask = solvent_mask(source, cutoff, args.taper_frac * cutoff)
         occupancy, shell = float(mask_occupancy(mask)), shell_voxels(mask)
+        cutoff = float(cutoff)
         print("  threshold mask calibrated to it: cutoff %.4g e/A^3 "
               "(%.3f of peak %.3f)" % (cutoff, cutoff / float(source.max()),
                                        float(source.max())))
@@ -1715,7 +1836,9 @@ def run(args):
           % ("conventional", "-", "0.35 / 46"))
 
     print("\noverall")
-    result = {"n_atoms": len(elements),
+    result = {"n_atoms": len(elements), "protein_blur": float(blur),
+              "b_sharpest": b_sharpest, "mask_cutoff": cutoff,
+              "mask_occupancy": occupancy,
               "k_sol": float(fit1["k_sol"]), "b_sol": float(fit1["b_sol"]),
               "k_overall": float(torch.exp(fit1["log_k"])),
               "n_work": int(work.sum()), "n_free": int(free_np.sum()),
