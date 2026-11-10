@@ -24,7 +24,12 @@ xtraj defaults to is now measured against the same R factors, and exposed as
 protein density with the extra B xtraj's `recommended_blur` prescribes and
 removes it from F_protein (`--protein-blur`, default auto, 2026-11-10): on the
 d_min/3 grid an atom at B ~ 1-2 A^2 aliased, and so did 7FPV's B = 10 atoms
-once the data were cut to 3 A.
+once the data were cut to 3 A. The tool's default grid is now `--rate 2`
+(d_min/4; 2026-11-10; mmtbx's own mask sits on a fixed ~0.6 A step): the
+mask on d_min/3 voxels, boundary and calibration target alike, was the larger
+part of the low-resolution gap to mmtbx in the 1,000-entry run, and the finer
+grid closes about 60% of it at 2.4x the voxels, while below 2.4 A it changes
+nothing and costs ~0.0003 at high resolution.
 
 Written 2026-08-15, revised the same day against the current code — the API
 assumptions below were checked, the cost estimate was replaced with a
