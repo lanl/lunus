@@ -197,10 +197,11 @@ def test_log_binned_row_through_run_on_7fpv_at_3a():
     # calibration target measured on it; 0.1676 / 0.1924 and 0.1678 / 0.1928
     # on the d_min/4 and 0.7 A-capped grids that were the default for a few
     # hours each; 0.1680 / 0.1921 back on the d_min/3 grid with the target on
-    # the 0.7 A reference grid (--target-spacing same --rate 1.5 reproduces
-    # the second pair).
-    assert abs(r["R-work binned"] - 0.1680) < 5e-4
-    assert abs(r["R-free binned"] - 0.1921) < 1e-3
+    # the 0.7 A reference grid; 0.1628 / 0.1845 with the mask cut from the
+    # atom-presence field (--mask-source density --target-spacing same
+    # --rate 1.5 reproduces the second pair). mmtbx: 0.1561 / 0.1811.
+    assert abs(r["R-work binned"] - 0.1628) < 5e-4
+    assert abs(r["R-free binned"] - 0.1845) < 1e-3
 
 
 def test_main_fit_with_log_bins_through_run_on_7fpv_at_3a():
@@ -219,18 +220,18 @@ def test_main_fit_with_log_bins_through_run_on_7fpv_at_3a():
     assert "overall scale per resolution bin: 6 log bins" in out.getvalue()
     assert "fitted per resolution bin (6 bins)" in out.getvalue()
     # The main fit with bins also scales the solvent per bin by default
-    # (measured 2026-11-10 on the d_min/3 grid with the reference-grid
-    # target: 0.1689 / 0.1935), and the exponential is one flag away
-    # (0.1680 / 0.1921). With the target on the working grid these were
-    # 0.1852 / 0.1985 and 0.1847 / 0.1975.
+    # (measured 2026-11-10 with the mask cut from the atom-presence field:
+    # 0.1635 / 0.1875), and the exponential is one flag away (0.1628 /
+    # 0.1845). With the mask cut from the density these were 0.1689 /
+    # 0.1935 and 0.1680 / 0.1921.
     assert r["solvent_scheme"] == "per bin"
     assert "solvent scale is one value per bin" in out.getvalue()
-    assert abs(r["R-work"] - 0.1689) < 5e-4 and abs(r["R-free"] - 0.1935) < 1e-3
+    assert abs(r["R-work"] - 0.1635) < 5e-4 and abs(r["R-free"] - 0.1875) < 1e-3
     args.solvent_bins = "off"
     with contextlib.redirect_stdout(io.StringIO()):
         r2 = fit_solvent_rfactor.run(args)
     assert r2["solvent_scheme"] == "exponential"
-    assert abs(r2["R-work"] - 0.1680) < 5e-4 and abs(r2["R-free"] - 0.1921) < 1e-3
+    assert abs(r2["R-work"] - 0.1628) < 5e-4 and abs(r2["R-free"] - 0.1845) < 1e-3
 
 
 def test_main_forwards_the_default_binned_row(monkeypatch, capsys):
@@ -289,12 +290,12 @@ def test_binned_row_defaults_to_per_bin_solvent_on_7fpv_at_3a():
     assert r["solvent_scheme"] == "exponential"
     assert "binned row: 6 log bins, solvent per bin" in text
     assert "solvent scale per bin (low to high resolution):" in text
-    # Measured 2026-11-10 on the d_min/3 grid with the reference-grid target
-    # and the protein blur; the exponential gives 0.1680 / 0.1921 (with the
-    # target on the working grid: 0.1852 / 0.1985, single 0.1868).
-    assert abs(r["R-work binned"] - 0.1689) < 5e-4
-    assert abs(r["R-free binned"] - 0.1935) < 1e-3
-    assert abs(r["R-work"] - 0.1682) < 5e-4    # single-scale row: not moved by the binned row
+    # Measured 2026-11-10 with the mask cut from the atom-presence field;
+    # the exponential gives 0.1628 / 0.1845 (mask cut from the density:
+    # 0.1689 / 0.1935, single 0.1682).
+    assert abs(r["R-work binned"] - 0.1635) < 5e-4
+    assert abs(r["R-free binned"] - 0.1875) < 1e-3
+    assert abs(r["R-work"] - 0.1633) < 5e-4    # single-scale row: not moved by the binned row
     assert 0.0 <= r["b_sol binned"] <= 150.0 and 0.0 <= r["k_sol binned"] <= 0.6
     # per-phase timing: every phase this run goes through is present, none
     # negative, the phases do not exceed the total, and the table is printed
@@ -1044,3 +1045,72 @@ def test_mask_gemmi_calibrates_nothing(tmp_path, monkeypatch):
         with contextlib.redirect_stdout(io.StringIO()):
             fit_solvent_rfactor.run(args3)
     assert any(issubclass(w.category, SolventMaskWarning) for w in caught3)
+
+
+@requires_cctbx
+def test_mask_source_is_the_atom_presence_field(tmp_path):
+    """The threshold mask is cut from an atom-presence field (every atom a
+    unit-weight Gaussian at --mask-source-b, default 20 A^2) and not from the
+    electron density: on a model whose atoms differ in B and element the two
+    sources give different masks and different R, the field's occupancy is
+    still calibrated to the target, and --mask-source density reproduces the
+    old mask. F_protein (the no-solvent fit) is the same under both."""
+    import contextlib
+    import io
+
+    import fit_solvent_rfactor
+
+    pdb, mtz = sharp_toy(tmp_path, aniso=True)      # B 2-20, C/N/O/S
+
+    def fit(*extra):
+        args = fit_solvent_rfactor.build_parser().parse_args(
+            [pdb, mtz, "--shells", "2"] + list(extra))
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            r = fit_solvent_rfactor.run(args)
+        return args, r, out.getvalue()
+
+    args, r, text = fit()
+    assert args.mask_source == "atoms" and args.mask_source_b == 20.0, (
+        "default mask source is %r at B %r, not the atom-presence field at 20"
+        % (getattr(args, "mask_source", None), getattr(args, "mask_source_b", None)))
+    assert r["mask_source"] == "atoms" and r["mask_source_b"] == 20.0
+    assert "mask source: atom-presence field" in text
+    assert abs(r["mask_occupancy"] - r["target_occupancy"]) < 2e-3
+    _, rd, textd = fit("--mask-source", "density")
+    assert rd["mask_source"] == "density" and rd["mask_source_b"] is None
+    assert "mask source: the electron density" in textd
+    assert rd["R-work no solvent"] == r["R-work no solvent"]      # F_protein untouched
+    assert rd["mask_cutoff"] != r["mask_cutoff"]
+    assert rd["R-work"] != r["R-work"]
+    _, r60, _ = fit("--mask-source-b", "60")
+    assert r60["mask_source_b"] == 60.0 and r60["mask_cutoff"] != r["mask_cutoff"]
+
+    # the unit weighting: relabel the toy's sulfur as a carbon at the same
+    # place and the atoms-source cutoff barely moves, the density's does
+    text_pdb = open(pdb).read()
+    pdb_c = str(tmp_path / "sharp_c.pdb")
+    def relabel(line):
+        # name in columns 13-16, element symbol the last two characters; the
+        # ANISOU record carries both too and must match its ATOM
+        if line.startswith(("ATOM", "ANISOU")) and line.rstrip()[-2:] == " S":
+            return line[:13] + "C  " + line[16:-2] + " C"
+        return line
+
+    relabelled = "\n".join(relabel(l) for l in text_pdb.splitlines())
+    assert relabelled != text_pdb and not any(
+        l.rstrip()[-2:] == " S" for l in relabelled.splitlines() if l.startswith("ATOM"))
+    open(pdb_c, "w").write(relabelled + "\n")
+
+    def fit_c(*extra):
+        args = fit_solvent_rfactor.build_parser().parse_args(
+            [pdb_c, mtz, "--shells", "2"] + list(extra))
+        with contextlib.redirect_stdout(io.StringIO()):
+            return fit_solvent_rfactor.run(args)
+
+    r_c = fit_c()
+    rd_c = fit_c("--mask-source", "density")
+    rel_atoms = abs(r_c["mask_cutoff"] - r["mask_cutoff"]) / r["mask_cutoff"]
+    rel_dens = abs(rd_c["mask_cutoff"] - rd["mask_cutoff"]) / rd["mask_cutoff"]
+    # what is left is the IT92 shape difference between S and C, a fraction
+    # of the electron-count effect (measured 0.08 against 0.20 here)
+    assert rel_atoms < 0.5 * rel_dens, (rel_atoms, rel_dens)

@@ -795,6 +795,49 @@ from work already done — one FFT instead of two. It needs `compute_fcalc` to
 hand back its grid, which complicates the checkpointing contract, so it is
 recorded rather than done.
 
+## The mask's source: atoms, not electrons
+
+The last part of the low-resolution gap to mmtbx that survived the grid and
+calibration work of 2026-11-10 (a median +0.0105 in binned R-free on 20
+entries at 2.6-3.0 Å, against -0.0015 for gemmi's geometric mask on the same
+grid, so a ceiling of about 0.012) turned out to be *what the threshold is cut
+from*. A geometric mask is built from positions and radii and does not care
+that a sulfur has 16 electrons and a carbon 6, nor what each atom's B is. The
+electron density does both, and at 3 Å with B of 100-200 the boundary a
+threshold draws through it is far from the geometric one.
+
+Four candidates were tested one at a time on those 20 entries (and the
+smoothing width on the same set): the smoothing width itself (50, 150, 200 Å²
+against the shipped 100: no gain, +0.004, +0.009), a differentiable closing
+after the threshold to give the mask a shrink step (`close_mask`; every
+setting of width and level made it worse by 0.003-0.011, for the same reason
+a wider blur does — more smoothing of the boundary is the wrong direction),
+hydrogens left out of the source as gemmi's masker leaves them (+0.001), and
+a source placed with one B for every atom: electron-weighted, half the gain
+(-0.002 to -0.006 for B 10-60); **unit-weighted**, every atom its element's
+IT92 shape divided by its electron count, +0.0105 → +0.0046 at B 20, every
+one of the 20 entries better, and +0.0062 → +0.0017 on 20 entries at
+1.8-2.6 Å. The width that matters is the total, B plus `mask_blur`: totals
+of 70-110 Å² measure alike at low resolution (+0.0041 to +0.0042), 120 gives
++0.0046 and 130 +0.0051, while SW40 prefers 120 (−0.0005) to 70 (−0.0001), so
+B = 20 with the shipped 100 Å² is a compromise rather than an optimum. Scaling each
+atom's width by its van der Waals radius squared changes nothing (+0.0044
+against +0.0046), as the radii of C, N, O and S differ by under 20%. The
+hydrogen question was carried by only two of the 20 entries, since the rest
+deposit none; on those two, leaving hydrogens out of the field hurt. That is
+the R-factor tool's default mask source now (`--mask-source atoms`, against
+`density`, every run before); in the library it is `SolventModel.source_b`
+with `mask_source_weights`, opt-in (default None) so that no caller gains a
+second kernel set unasked. The field is a second density
+placement from the same coordinates with uniform-B kernels, which
+`structure_factors_one_config` takes as `mask_kernels=` and places alongside
+the density; F_protein is untouched. On 7FPV cut to 3 Å the binned R-free
+goes from 0.1921 to 0.1845 against mmtbx's 0.1811. SW40, the gate that
+nothing at high resolution may move: median gap +0.0010 → -0.0005, better on
+35 of 39 entries, one worse by 0.0012 (2YL0 at 0.9 Å), so the source is a
+gain at every resolution and the first change that puts the median SW40
+entry ahead of mmtbx.
+
 ## What the density cutoff costs
 
 The R-factor above was measured at an atomic density cutoff of 0.01 e/A^3 --
