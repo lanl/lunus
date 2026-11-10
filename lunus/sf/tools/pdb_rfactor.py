@@ -144,7 +144,7 @@ def build_parser():
                         "deposited hydrogens (default: all atoms)")
     p.epilog = ("Anything else -- after a bare '--' to be safe -- is passed "
                 "through to fit_solvent_rfactor.py: --mask gemmi, --device, "
-                "--mask-blur, --protein-blur, --reference, ...")
+                "--mask-blur, --protein-blur, --target-spacing, --reference, ...")
     return p
 
 
@@ -157,6 +157,7 @@ def main():
 
     rows = []
     r_torch = {}
+    r_mmtbx = None
     t_mmtbx = None
     if args.method in ("torch", "both"):
         argv = [model, sf]
@@ -195,7 +196,7 @@ def main():
             print("\nnote: %s apply to the torch method only"
                   % " ".join(passthrough))
         t0 = time.perf_counter()
-        r = fit_solvent_rfactor.mmtbx_fit(model, sf, args.d_min,
+        r = r_mmtbx = fit_solvent_rfactor.mmtbx_fit(model, sf, args.d_min,
                                           isotropic=not args.aniso_adp,
                                           select=args.select)
         t_mmtbx = time.perf_counter() - t0
@@ -228,6 +229,14 @@ def main():
                if r_torch.get(k)]
     if schemes:
         print("  scale bins: %s" % "; ".join(schemes))
+    occ = []
+    if r_torch.get("target_occupancy") is not None:
+        occ.append("torch target %.4f (%s)"
+                   % (r_torch["target_occupancy"], r_torch.get("target_source", "gemmi")))
+    if r_mmtbx is not None and r_mmtbx.get("mask_occupancy") is not None:
+        occ.append("mmtbx mask %.4f" % r_mmtbx["mask_occupancy"])
+    if occ:
+        print("  mask occupancy: %s" % "; ".join(occ))
     if r_torch.get("protein_blur"):
         print("  protein blur: %.1f A^2 placed and removed again (sharpest "
               "atom B %.1f)" % (r_torch["protein_blur"], r_torch["b_sharpest"]))

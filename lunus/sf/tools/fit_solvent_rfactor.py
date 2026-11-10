@@ -53,6 +53,26 @@ while the bulk mask covers only the disordered remainder: the ordered waters
 and ligands in the model occupy the rest. gemmi's mask on the same coordinates
 already makes that subtraction, which is why it is the target.
 
+THE TARGET IS MEASURED ON A FIXED REFERENCE GRID (--target-spacing, default
+0.7 A), not on the working grid, since 2026-11-10. gemmi's occupancy on a
+grid steps with the voxel size where its shrink stencil gains neighbours, at
+r_shrink/sqrt(k) (0.8 and 0.57 A for the Refmac radii), and drifts slowly in
+between (7FPV cut to 3 A: 0.19 on 1 A voxels, 0.26-0.28 between 0.8 and
+0.57 A, 0.29 below; 3I7M: 0.297 on d_min/3 voxels, 0.316 on d_min/4), so a
+target measured on the working grid jumped whenever the grid crossed a step,
+and the two grid changes of 2026-11-10 had worked almost entirely through
+it: with the target held, a finer grid reproduces the coarser one's R to four
+decimals, and a coarse d_min/3 grid with the target on a 0.7 A reference
+reaches the same R as the capped grid. 0.7 A sits inside the Refmac plateau
+(0.57, 0.8), the regime of mmtbx's own fixed 0.6 A step; the default was
+tuned for --radii-set Refmac, and the run prints the actual reference spacing
+and warns when it lands near a step.
+Measured on 40 benchmark entries (binned R-free gap to mmtbx, median): at
+2.6-3.0 A a 1.0 A reference gives +0.0270, 0.7 A +0.0105, 0.5 A +0.0115,
+and the target is 0.88, 0.98 and 0.99 of mmtbx's own mask occupancy; at
+1.8-2.2 A 1.0 A gives +0.0146 against +0.0035 for the other two. --target-
+spacing same measures it on the working grid, as every run before did.
+
 --mask gemmi runs the entire fit on gemmi's geometric mask instead of ours.
 Comparing the two R-factors separates "the mask model is wrong" from
 "everything downstream of the mask is wrong", which no single number can.
@@ -690,19 +710,26 @@ def sharpest_b(b_per_atom, u_cart=None, is_aniso=None, occ=None):
     return float(b[keep].min())
 
 
-def protein_blur_arg(text):
-    """argparse type for --protein-blur: "auto", or B >= 0 in A^2."""
-    if text.lower() == "auto":
-        return "auto"
-    try:
-        b = float(text)
-    except ValueError:
-        raise argparse.ArgumentTypeError(
-            "expected 'auto' or B in A^2, got %r" % text)
-    if b < 0.0:
-        raise argparse.ArgumentTypeError(
-            "--protein-blur must be >= 0 A^2 (0 disables it)")
-    return b
+def keyword_or_number_arg(keyword, option, unit, allow_zero):
+    """An argparse type: the keyword (any case, returned lower-case) or a
+    number in unit, >= 0 when allow_zero and > 0 otherwise."""
+    def parse(text):
+        if text.lower() == keyword:
+            return keyword
+        try:
+            value = float(text)
+        except ValueError:
+            raise argparse.ArgumentTypeError(
+                "expected %r or a number in %s, got %r" % (keyword, unit, text))
+        if value < 0.0 or (value == 0.0 and not allow_zero):
+            raise argparse.ArgumentTypeError(
+                "%s must be %s %s" % (option, ">= 0" if allow_zero else "> 0", unit))
+        return value
+    return parse
+
+
+# --protein-blur: "auto", or B >= 0 in A^2 (0 disables it)
+protein_blur_arg = keyword_or_number_arg("auto", "--protein-blur", "A^2", allow_zero=True)
 
 
 def protein_blur(setting, b_min, grid, orth_np, d_min):
@@ -762,18 +789,89 @@ def gemmi_mask_occupancy(pdb_path, grid, radii_set):
     once the model's own atoms, ordered waters and ligands included, are
     accounted for -- computed by the conventional method rather than ours.
     """
+    arr = np.array(gemmi_mask_grid(pdb_path, radii_set, size=grid), copy=False)
+    return float(arr.mean()), arr
+
+
+def gemmi_mask_grid(pdb_path, radii_set, size=None, spacing=None):
+    """gemmi's geometric mask on the model, as a gemmi FloatGrid of the given
+    size, or of the given spacing (rounded up to a symmetry-compatible size
+    by gemmi) when no size is given."""
     import gemmi
 
     st = gemmi.read_structure(pdb_path)
     st.setup_entities()
     g = gemmi.FloatGrid()
-    g.set_size(*grid)
+    if size is not None:
+        g.set_size(*size)
     g.set_unit_cell(st.cell)
     g.spacegroup = gemmi.find_spacegroup_by_name(st.spacegroup_hm)
+    if size is None:
+        g.set_size_from_spacing(float(spacing), gemmi.GridSizeRounding.Up)
     masker = gemmi.SolventMasker(getattr(gemmi.AtomicRadiiSet, radii_set))
     masker.put_mask_on_float_grid(g, st[0])
-    arr = np.array(g, copy=False)
-    return float(arr.mean()), arr
+    return g
+
+
+TARGET_SPACING_DEFAULT = 0.7   # A; see gemmi_mask_occupancy_at_spacing()
+
+
+# --target-spacing: "same" (the working grid), or a spacing in A > 0
+target_spacing_arg = keyword_or_number_arg("same", "--target-spacing", "A", allow_zero=False)
+
+
+def gemmi_mask_occupancy_at_spacing(pdb_path, spacing, radii_set):
+    """gemmi's geometric-mask occupancy on a REFERENCE grid of the given
+    spacing (rounded up to a symmetry-compatible size by gemmi), independent
+    of the grid the fit runs on.
+
+    THE TARGET MUST NOT MOVE WITH THE WORKING GRID. gemmi's occupancy on a
+    grid depends on the voxel size, and not smoothly: it STEPS where the
+    shrink stencil gains neighbours, at voxel edges of r_shrink/sqrt(k)
+    (Refmac radii: r_shrink 0.8 A, so steps at 0.8 and 0.57 A), and falls
+    slowly between the steps. On 7FPV it is 0.19 on voxels coarser than
+    0.8 A, 0.24-0.28 between 0.8 and 0.57, 0.29 below (3I7M: 0.297 on
+    d_min/3 voxels, 0.316 on d_min/4). A threshold calibrated to the working
+    grid's value therefore jumped whenever the grid crossed a step, and the
+    grid changes of 2026-11-10 acted through it: holding the target, a
+    finer grid reproduced the coarser one's R to four decimals. Measuring
+    the target on one fixed spacing makes the calibration a property of the
+    model, the radii set, and the cell and space group (through gemmi's
+    rounding of the spacing to a symmetry-compatible size) alone. The 0.7 A
+    default sits inside the Refmac plateau (0.57, 0.8), the regime of
+    mmtbx's own fixed 0.6 A step with its 0.9 A shrink; the plateaus differ
+    for the other radii sets, and run() says when the actual spacing lands
+    near a step.
+    Returns (occupancy, grid shape)."""
+    g = gemmi_mask_grid(pdb_path, radii_set, spacing=spacing)
+    return float(np.array(g, copy=False).mean()), (g.nu, g.nv, g.nw)
+
+
+# gemmi's shrink radius per AtomicRadiiSet (gemmi/solmask.hpp), which sets
+# where its mask occupancy steps with the voxel size: at r_shrink/sqrt(k).
+SHRINK_RADIUS = {"Refmac": 0.8, "Cctbx": 0.9, "VanDerWaals": 1.1}
+
+
+def shrink_step_distance(orth_np, grid, r_shrink, margin=0.05):
+    """The voxel edge or face diagonal that lies within `margin` of gemmi's
+    shrink radius on this grid, or None.
+
+    gemmi's occupancy steps when its shrink stencil gains a neighbour, i.e.
+    when a voxel EDGE, or the FACE DIAGONAL of two edges, crosses r_shrink
+    (measured on 7FPV: edges .55/.56/.69 A with a face diagonal of 0.784 A
+    jump by 0.013 against .68/.56/.69 A, whose diagonals all exceed 0.8).
+    The lengths are taken through the orthogonalisation matrix, so an oblique
+    cell's diagonals are the true ones; the shorter of the two diagonals of
+    each face is the one the stencil reaches first. The body diagonal would
+    be the next step, below ~0.46 A for Refmac, and is not checked."""
+    M = np.asarray(orth_np, dtype=float)
+    v = [M[:, i] / float(grid[i]) for i in range(3)]
+    lengths = [np.linalg.norm(vi) for vi in v]
+    for i in range(3):
+        for j in range(i + 1, 3):
+            lengths.append(min(np.linalg.norm(v[i] + v[j]), np.linalg.norm(v[i] - v[j])))
+    near = [L for L in lengths if abs(L - r_shrink) <= margin * r_shrink]
+    return float(min(near, key=lambda L: abs(L - r_shrink))) if near else None
 
 
 # --------------------------------------------------------------------- scaling
@@ -1509,8 +1607,14 @@ def mmtbx_fit(pdb, cif, d_min=None, isotropic=False, select="all"):
     with contextlib.redirect_stdout(_io.StringIO()):
         fmodel.update_all_scales(remove_outliers=False)
     k_sol, b_sol = fmodel.k_sol_b_sol_from_k_mask()
+    # mmtbx's own mask occupancy (its default mask: fixed ~0.6 A step,
+    # solvent radius 1.1, shrink 0.9), the quantity our calibration target
+    # is the gemmi analogue of. The manager keeps the contact_surface_fraction
+    # of the asu_mask it built for F_mask, so it is not built a second time.
+    mask_occupancy = float(fmodel.mask_manager.solvent_content_via_mask)
     return {"R-work": float(fmodel.r_work()), "R-free": float(fmodel.r_free()),
             "k_sol": float(k_sol), "b_sol": float(b_sol),
+            "mask_occupancy": mask_occupancy,
             "n_work": int(F_obs.size() - free_np.sum()),
             "n_free": int(free_np.sum()),
             "n_atoms": int(xrs.scatterers().size()),
@@ -1613,6 +1717,15 @@ def build_parser():
     p.add_argument("--radii-set", default="Refmac",
                    choices=["Refmac", "Cctbx", "VanDerWaals"],
                    help="gemmi radii set, for the calibration target and --mask gemmi")
+    p.add_argument("--target-spacing", type=target_spacing_arg,
+                   default=TARGET_SPACING_DEFAULT, metavar="A",
+                   help="grid spacing the calibration target (gemmi's mask "
+                        "occupancy) is measured on, independent of the working "
+                        "grid (default %g A, tuned for --radii-set Refmac: "
+                        "inside the plateau between the steps of gemmi's "
+                        "occupancy at 0.8 and 0.57 A); 'same' measures it on "
+                        "the working grid, as every run before 2026-11-10 did"
+                        % TARGET_SPACING_DEFAULT)
     p.add_argument("--target-occupancy", type=float, default=None,
                    help="override the gemmi-measured calibration target")
     p.add_argument("--taper-frac", type=float, default=0.5,
@@ -1789,20 +1902,50 @@ def run(args):
     # ---- the mask
     print("\nsolvent mask")
     with timed(timing, "gemmi mask (cpu)"):
-        target, gemmi_grid = gemmi_mask_occupancy(args.pdb, grid, args.radii_set)
+        occ_working, gemmi_grid = gemmi_mask_occupancy(args.pdb, grid, args.radii_set)
+        if args.target_occupancy is not None:
+            target, target_source = args.target_occupancy, "--target-occupancy"
+        elif args.target_spacing == "same":
+            target, target_source = occ_working, "gemmi, working grid"
+        else:
+            target, target_grid = gemmi_mask_occupancy_at_spacing(
+                args.pdb, args.target_spacing, args.radii_set)
+            target_source = "gemmi, %g A reference grid" % args.target_spacing
     print("  gemmi %s geometric mask on the same model and grid: occupancy %.4f"
-          % (args.radii_set, target))
+          % (args.radii_set, occ_working))
+    if args.target_occupancy is not None:
+        print("  calibration target: occupancy %.4f (--target-occupancy)" % target)
+    elif args.target_spacing == "same":
+        print("  calibration target: that occupancy (--target-spacing same)")
+    else:
+        actual = max(cell[i] / target_grid[i] for i in range(3))
+        print("  calibration target: occupancy %.4f of the same mask on a %g A "
+              "reference grid %s (actual spacing up to %.3f A), independent "
+              "of the working grid"
+              % (target, args.target_spacing, target_grid, actual))
+        r_shrink = SHRINK_RADIUS.get(args.radii_set)
+        near = (shrink_step_distance(orth_matrix(*cell), target_grid, r_shrink)
+                if r_shrink is not None else None)
+        if near is not None:
+            warnings.warn(
+                "a voxel edge or face diagonal of the reference grid (%.3f A) "
+                "is within 5%% of gemmi's %s shrink radius (%.2f A), where its "
+                "mask occupancy steps as the shrink stencil gains a neighbour; "
+                "the target is then sensitive to the cell's rounding of "
+                "--target-spacing. Choose a spacing whose edges and diagonals "
+                "keep clear of %.2f A."
+                % (near, args.radii_set, r_shrink, r_shrink),
+                SolventMaskWarning, stacklevel=2)
     if args.select != "all":
         print("  (gemmi's mask is built from the file as deposited, not from "
               "--select %r; its masker ignores hydrogens)" % args.select)
-    if args.target_occupancy is not None:
-        target = args.target_occupancy
-        print("  overridden by --target-occupancy %.4f" % target)
 
     if args.mask == "gemmi":
         mask = torch.tensor(np.array(gemmi_grid), dtype=dtype, device=device)
         print("  using gemmi's mask directly (--mask gemmi)")
-        occupancy, shell, cutoff = target, 0, float("nan")
+        # the occupancy of the mask in use, which is gemmi's on the working
+        # grid, not the target's reference-grid (or overridden) value
+        occupancy, shell, cutoff = occ_working, 0, float("nan")
     else:
         with torch.no_grad(), timed(timing, "threshold mask", device):
             # the density already carries the protein blur, which is the
@@ -1910,6 +2053,10 @@ def run(args):
     result = {"n_atoms": len(elements), "protein_blur": float(blur),
               "rate": float(rate), "max_voxel": float(args.max_voxel),
               "grid_rule": grid_rule,     # says whether the cap or --rate set the grid
+              "target_occupancy": float(target),
+              "target_source": target_source,
+              "target_spacing": args.target_spacing,
+              "gemmi_occupancy_working_grid": float(occ_working),
               "grid": tuple(int(n) for n in grid),
               "b_sharpest": b_sharpest, "mask_cutoff": cutoff,
               "mask_occupancy": occupancy,

@@ -872,3 +872,113 @@ def test_grid_rate_rule():
         f.grid_rate(3.0, 0.0, 0.7)
     with pytest.raises(ValueError):
         f.grid_rate(3.0, None, 0.0)
+
+
+@requires_cctbx
+def test_calibration_target_does_not_move_with_the_working_grid(tmp_path):
+    """The threshold mask is calibrated to gemmi's mask occupancy, which steps
+    with the voxel size of the grid it is measured on (3I7M: 0.297 on d_min/3
+    voxels, 0.316 on d_min/4), so a finer working grid used to change the
+    answer through the target. The target is now measured on a fixed reference
+    spacing (--target-spacing, default 0.7 A): the same number on every
+    working grid, while gemmi's occupancy on the working grid still moves;
+    --target-spacing same restores the old coupling."""
+    import contextlib
+    import io
+
+    import fit_solvent_rfactor
+
+    pdb, mtz = sharp_toy(tmp_path, sharp=False)
+
+    def cell_edges():
+        return (20.0, 22.0, 24.0)
+
+    def fit(*extra):
+        args = fit_solvent_rfactor.build_parser().parse_args(
+            [pdb, mtz, "--shells", "2"] + list(extra))
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            r = fit_solvent_rfactor.run(args)
+        return args, r, out.getvalue()
+
+    args, r_cap, text = fit()
+    assert args.target_spacing == fit_solvent_rfactor.TARGET_SPACING_DEFAULT
+    _, r_15, _ = fit("--rate", "1.5")
+    _, r_3, _ = fit("--rate", "3")
+    assert r_15["grid"] != r_3["grid"]
+    assert r_15["target_occupancy"] == r_3["target_occupancy"] == r_cap["target_occupancy"], (
+        "the calibration target moved with the working grid: %r"
+        % [r_15["target_occupancy"], r_cap["target_occupancy"], r_3["target_occupancy"]])
+    assert r_15["gemmi_occupancy_working_grid"] != r_3["gemmi_occupancy_working_grid"]
+    assert "reference grid" in text and "independent of the working grid" in text
+    assert "actual spacing up to" in text
+    assert 0.0 < r_cap["target_occupancy"] < 1.0
+    # the value itself is the reference-grid measurement, so a quiet fallback
+    # to the working grid fails on a number, not only on the keys
+    ref, ref_grid = fit_solvent_rfactor.gemmi_mask_occupancy_at_spacing(
+        pdb, fit_solvent_rfactor.TARGET_SPACING_DEFAULT, "Refmac")
+    assert r_cap["target_occupancy"] == ref
+    assert max(e / n for e, n in zip(cell_edges(), ref_grid)) <= 0.7 + 1e-9
+
+    _, s_15, text_s = fit("--rate", "1.5", "--target-spacing", "same")
+    _, s_3, _ = fit("--rate", "3", "--target-spacing", "same")
+    assert s_15["target_occupancy"] == s_15["gemmi_occupancy_working_grid"]
+    assert s_3["target_occupancy"] == s_3["gemmi_occupancy_working_grid"]
+    assert s_15["target_occupancy"] != s_3["target_occupancy"]
+    assert "--target-spacing same" in text_s
+
+    # an explicit --target-occupancy still wins over either, and is reported
+    # as the override it is, not as a gemmi measurement
+    _, o, text_o = fit("--target-occupancy", "0.95")     # the toy is mostly empty cell
+    assert o["target_occupancy"] == 0.95 and o["target_source"] == "--target-occupancy"
+    assert "reference grid" not in text_o
+    assert r_cap["target_source"] == "gemmi, 0.7 A reference grid"
+    assert s_15["target_source"] == "gemmi, working grid"
+
+    # --mask gemmi uses gemmi's mask on the WORKING grid, and the occupancy
+    # reported is that mask's, whatever the target was measured on or set to
+    _, g, _ = fit("--mask", "gemmi", "--target-occupancy", "0.95")
+    assert g["mask_occupancy"] == g["gemmi_occupancy_working_grid"] != 0.95
+
+
+def test_target_spacing_arg():
+    import argparse
+
+    import pytest
+
+    import fit_solvent_rfactor as f
+
+    assert f.target_spacing_arg("same") == "same" and f.target_spacing_arg("SAME") == "same"
+    assert f.target_spacing_arg("0.6") == 0.6
+    for bad in ("0", "-1", "fine"):
+        with pytest.raises(argparse.ArgumentTypeError):
+            f.target_spacing_arg(bad)
+    assert f.TARGET_SPACING_DEFAULT > 0.0
+
+
+def test_shrink_step_distance():
+    """The near-step check looks at voxel edges and face diagonals against
+    gemmi's shrink radius, the lengths at which its occupancy steps; the
+    7FPV grids the reviewer measured are the cases."""
+    import numpy as np
+
+    import fit_solvent_rfactor as f
+    from lunus.sf.cell_utils import orth_matrix
+
+    M = orth_matrix(34.196, 45.558, 99.044, 90.0, 90.0, 90.0)     # 7FPV
+    assert f.shrink_step_distance(M, (50, 72, 144), 0.8) is None    # edges .68 .63 .69
+    assert f.shrink_step_distance(M, (50, 82, 144), 0.8) is None    # one edge .56, diagonals > .8
+    near = f.shrink_step_distance(M, (62, 82, 144), 0.8)            # (a,b) diagonal 0.784
+    assert near is not None and abs(near - 0.784) < 2e-3
+    assert f.shrink_step_distance(M, (43, 57, 124), 0.8) is not None  # an edge at ~0.8
+    # an oblique cell: the shorter face diagonal is the one that counts.
+    # gamma = 75 deg with 0.652 A edges puts |a - b| at 0.794 A, within 5% of
+    # 0.8, while the edges (0.652) and the other diagonals (0.92, 1.04) are
+    # clear; the same edges in a rectangular cell have no diagonal near 0.8
+    n = 46
+    Mo = orth_matrix(30.0, 30.0, 30.0, 90.0, 90.0, 75.0)
+    d_short = np.linalg.norm(Mo[:, 0] / n - Mo[:, 1] / n)
+    assert abs(d_short - 0.794) < 2e-3
+    near = f.shrink_step_distance(Mo, (n, n, n), 0.8)
+    assert near is not None and abs(near - d_short) < 1e-9
+    Mr = orth_matrix(30.0, 30.0, 30.0, 90.0, 90.0, 90.0)
+    assert f.shrink_step_distance(Mr, (n, n, n), 0.8) is None

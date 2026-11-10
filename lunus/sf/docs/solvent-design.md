@@ -38,7 +38,19 @@ value, nearest mmtbx's step. The gain begins at about 2.5 A (two entries at
 2.49-2.50 A improve by 0.004 and 0.013); at 1.8-2.4 A the entries move within
 noise, and at 1.8-2.2 A only 0.6 A binds. On SW40 the cap binds on 3IAC and
 4OLE only; every R is unchanged from the d_min/3 grid except 4OLE's R-free,
-by 0.0001.
+by 0.0001. Since the same day the calibration target, gemmi's occupancy, is
+measured on a fixed 0.7 A reference grid (`--target-spacing`) rather than on
+the working grid: gemmi's occupancy steps with the voxel size where its shrink
+stencil gains neighbours, at r_shrink/sqrt(k) (0.8 and 0.57 A for the Refmac
+radii; 7FPV at 3 A: 0.19 on 1 A voxels, 0.26-0.28 between 0.8 and 0.57 A;
+3I7M 0.297 to 0.316), and holding the target showed that the grid changes
+above had acted almost entirely through it. 0.7 A sits inside the Refmac
+plateau, the regime of mmtbx's fixed 0.6 A step with its 0.9 A shrink; the
+tool prints the actual reference spacing and warns near a step. With the reference target
+the d_min/3 grid reaches the same R as the capped one on the low-resolution
+entries, and the target sits at 0.98 of mmtbx's mask occupancy (0.88 on a
+1.0 A reference, which costs 0.017 at low resolution; 0.99 on 0.5 A, slightly
+worse at both ends).
 
 Written 2026-08-15, revised the same day against the current code — the API
 assumptions below were checked, the cost estimate was replaced with a
