@@ -19,14 +19,18 @@ missing scaling rather than the mask. Fitting three parameters against 70,000
 observations is standard practice and is what makes the residual attributable
 to the model.
 
---scale-bins N replaces the single overall scale with one per resolution bin,
+--scale-bins replaces the single overall scale with one per resolution bin,
 which is what mmtbx.f_model fits and is most of why its R is lower on the same
-model: across the 40 sampleworks entries the swap test (lunus.sf F_calc and
-mask, mmtbx scaling) put two thirds of the R gap in the scaling model and none
-in the structure factors. It is off by default so the numbers in the design
-note stay reproducible. The cost is that the lowest-resolution bin overlaps the
-solvent term, so a binned fit WITHOUT solvent recovers some of what the mask
-would have, and the drop in R from switching the solvent on is smaller.
+model. `--scale-bins log` uses mmtbx's own bins (cctbx's log_binning: fine at
+low resolution, wide at high, as many as the data support up to 30);
+`--scale-bins N` uses N equal-count bins, which is what every binned number
+recorded before 2026-11-09 was measured with. Across the 40 sampleworks
+entries the swap test (lunus.sf F_calc and mask, mmtbx scaling) put two thirds
+of the R gap in the scaling model and none in the structure factors. It is off
+by default so the numbers in the design note stay reproducible. The cost is
+that the lowest-resolution bin overlaps the solvent term, so a binned fit
+WITHOUT solvent recovers some of what the mask would have, and the drop in R
+from switching the solvent on is smaller.
 
 WHAT THE ANSWER MEANS, AND WHAT IT DOES NOT.
 
@@ -69,6 +73,7 @@ from inside this pipeline.
 import argparse
 import contextlib
 import io
+import math
 import sys
 
 import numpy as np
@@ -591,6 +596,134 @@ def resolution_bins(inv_d2, n_bins):
     return bins
 
 
+def log_resolution_bins(d, n_lowest=100, min_per_bin=50, max_bins=30,
+                        eps=1e-4, device="cpu"):
+    """mmtbx's resolution bins: an index per reflection, 0 the lowest
+    resolution, from d spacings in A.
+
+    A port of cctbx.miller.set.log_binning (Urzhumtsev et al. 2009), which is
+    what mmtbx.f_model bins its scales by, with the same defaults: the first
+    bin holds the n_lowest lowest-resolution reflections, every later bin is a
+    step of equal width in ln(1/d^2) set by the second n_lowest, the step is
+    widened if that would make more than max_bins, a last bin under a quarter
+    of the one before is merged into it, and any bin under min_per_bin
+    reflections is merged into the one before. Fine at low resolution, where
+    the solvent term and the scale change fastest; few and wide at high
+    resolution; and fewer bins when there are fewer reflections, which
+    equal-count bins (resolution_bins) do not do. Fewer than 2*n_lowest
+    reflections is one bin.
+
+    Pass the d spacings cctbx itself computed for these reflections
+    (F_obs_array.d_spacings()) to get mmtbx's bins exactly: limits fall on
+    data values by construction, so recomputing d some other way can move a
+    reflection that sits on a limit. Free reflections are binned with the
+    rest, as in resolution_bins.
+
+    One deliberate difference from cctbx: if reflections n_lowest to
+    2*n_lowest share one d spacing the bin step is zero, and cctbx's loop
+    never ends; this raises ValueError instead. Merged data do not do that."""
+    d = np.asarray(d, dtype=np.float64)
+    n = len(d)
+    if 2 * n_lowest >= n:
+        return torch.zeros(n, dtype=torch.long, device=device)
+    assert max_bins > 1
+    d_sorted = np.sort(d)[::-1]               # lowest resolution first
+
+    # Scalar math, not numpy: only these four ln(1/d^2) are ever used, and
+    # the limits sit on data values, so a reflection on a limit lands in the
+    # bin cctbx puts it in only if the roundoff is libm's, as in cctbx --
+    # numpy's vectorised log/exp can differ in the last place.
+    def lnss(x):
+        return math.log(1.0 / (x * x))
+
+    def d_of(x):
+        return math.sqrt(1.0 / math.exp(x))
+
+    s0, s1, s2, top = (lnss(float(d_sorted[i]))
+                       for i in (0, n_lowest, 2 * n_lowest, n - 1))
+    if s2 == s1:
+        raise ValueError("log_resolution_bins: reflections %d to %d share one "
+                         "d spacing, so the bin step is zero"
+                         % (n_lowest, 2 * n_lowest))
+
+    def limits_for(step):
+        limits = [d_of(s0)]
+        x = s1
+        while x <= top:
+            limits.append(d_of(x))
+            x += step
+        limits.append(d_of(min(top, x)))
+        return limits
+
+    limits = limits_for(s2 - s1)
+    if len(limits) > max_bins:
+        limits = limits_for((top - s1) / (max_bins - 1))
+    pairs = []
+    for i in range(len(limits)):
+        if i < len(limits) - 2:
+            pairs.append((limits[i], limits[i + 1]))
+        elif i == len(limits) - 1:
+            pairs.append((limits[i - 1], limits[i]))
+    selections = []
+    for i, (d_max, d_min) in enumerate(pairs):
+        if i == 0:
+            sel = (d <= d_max + eps) & (d > d_min)
+        elif i == len(pairs) - 1:
+            sel = (d <= d_max) & (d > d_min - eps)
+        else:
+            sel = (d <= d_max) & (d > d_min)
+        selections.append(sel)
+    last, before = selections[-1], selections[-2]
+    if last.sum() < before.sum() / 4:
+        selections = selections[:-2] + [before | last]
+    merged = []
+    for sel in selections:
+        if sel.sum() < min_per_bin and merged:
+            merged[-1] = merged[-1] | sel
+        else:
+            merged.append(sel)
+    bins = np.full(n, -1, dtype=np.int64)
+    for i, sel in enumerate(merged):
+        bins[sel] = i
+    if (bins < 0).any():
+        raise ValueError("log_resolution_bins left %d reflections unbinned"
+                         % int((bins < 0).sum()))
+    return torch.as_tensor(bins, device=device)
+
+
+def scale_bins_arg(text):
+    """argparse type for a bin specification: "log" for mmtbx's bins, or an
+    integer N >= 0 for N equal-count bins (0 = no bins)."""
+    if text == "log":
+        return text
+    try:
+        n = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            "expected 'log' or a whole number of bins, got %r" % text)
+    if n < 0:
+        raise argparse.ArgumentTypeError("number of bins must be >= 0")
+    return n
+
+
+def assign_scale_bins(spec, inv_d2, d):
+    """The bin index per reflection for a scale_bins_arg value, or None for 0.
+    inv_d2 is the torch tensor the fit uses; d the cctbx d spacings of the
+    same reflections, in the same order."""
+    if spec == "log":
+        return log_resolution_bins(d, device=inv_d2.device)
+    if spec:
+        return resolution_bins(inv_d2, spec)
+    return None
+
+
+def describe_bins(spec, bins):
+    """"10 log bins" or "20 equal-count bins", for printed output."""
+    n = int(bins.max()) + 1
+    return "%d %s bin%s" % (n, "log" if spec == "log" else "equal-count",
+                           "" if n == 1 else "s")
+
+
 def fit_scales(F_obs, F_protein, F_mask, inv_d2, s_cart, work, aniso,
                fit_solvent=True, bins=None, log=sys.stdout):
     """
@@ -606,12 +739,13 @@ def fit_scales(F_obs, F_protein, F_mask, inv_d2, s_cart, work, aniso,
          factor sets are computed once, before the scan.
       2. LBFGS on every parameter at once from the best node.
 
-      3. Only with bins (resolution_bins): the single overall scale becomes
-         one scale per bin, refined by LBFGS jointly with everything else from
-         where stage 2 finished. This is mmtbx's binned k_isotropic, and it is
-         what lets the model follow a falloff that no Gaussian B can -- 8VQ1,
-         room-temperature XFEL data, goes from R-work 0.198 to 0.138 with 20
-         bins, against mmtbx's 0.137. k_sol and b_sol stay single numbers, so
+      3. Only with bins (resolution_bins or log_resolution_bins): the
+         single overall scale becomes one scale per bin, refined by LBFGS
+         jointly with everything else from where stage 2 finished. This is
+         mmtbx's binned k_isotropic, and it is what lets the model follow a
+         falloff that no Gaussian B can -- 8VQ1, room-temperature XFEL data,
+         goes from R-work 0.198 to 0.138 with 20 equal-count bins, against
+         mmtbx's 0.137. k_sol and b_sol stay single numbers, so
          they remain the diagnostic they are without bins.
 
     Fitting on amplitudes rather than intensities matches the quantity R is
@@ -945,12 +1079,17 @@ def build_parser():
                    help="also report what mmtbx reaches on the same model")
     p.add_argument("--aniso", action="store_true",
                    help="fit a full anisotropic scale tensor instead of one B")
-    p.add_argument("--scale-bins", type=int, default=0, metavar="N",
-                   help="refine one overall scale per resolution bin (N "
-                        "equal-count bins) instead of a single one, as mmtbx "
-                        "does; 20 is a good choice. Default 0, off")
-    p.add_argument("--also-scale-bins", type=int, default=0, metavar="N",
-                   help="after the main fit, fit again with N scale bins and "
+    p.add_argument("--scale-bins", type=scale_bins_arg, default=0,
+                   metavar="log|N",
+                   help="refine one overall scale per resolution bin instead "
+                        "of a single one, as mmtbx does. 'log' uses mmtbx's "
+                        "own logarithmic bins; N uses N equal-count bins (how "
+                        "binned numbers before 2026-11-09 were measured, "
+                        "with N = 20). Default 0, off")
+    p.add_argument("--also-scale-bins", type=scale_bins_arg, default=0,
+                   metavar="log|N",
+                   help="after the main fit, fit again with scale bins ('log' "
+                        "or N, as --scale-bins) and "
                         "report that R alongside it, leaving the main fit and "
                         "everything printed from it unchanged. This is how "
                         "pdb_rfactor.py shows how much of a gap to mmtbx is "
@@ -1089,7 +1228,10 @@ def run(args):
     # ---- the fits
     print("\nfitting %d work reflections (%d free held out)"
           % (work.sum(), free_np.sum()))
-    bins = resolution_bins(inv_d2, args.scale_bins) if args.scale_bins else None
+    bins = assign_scale_bins(args.scale_bins, inv_d2, d_np)
+    if bins is not None:
+        print("overall scale per resolution bin: %s"
+              % describe_bins(args.scale_bins, bins))
     print("no solvent:")
     fit0 = fit_scales(F_obs, F_protein, None, inv_d2, s_cart, work, args.aniso,
                       fit_solvent=False, bins=bins)
@@ -1126,7 +1268,10 @@ def run(args):
     result = {"n_atoms": len(elements),
               "k_sol": float(fit1["k_sol"]), "b_sol": float(fit1["b_sol"]),
               "k_overall": float(torch.exp(fit1["log_k"])),
-              "n_work": int(work.sum()), "n_free": int(free_np.sum())}
+              "n_work": int(work.sum()), "n_free": int(free_np.sum()),
+              "main_scale_bins": 0 if bins is None else int(bins.max()) + 1,
+              "main_bin_scheme": (None if bins is None
+                                  else describe_bins(args.scale_bins, bins))}
     for name, sel in (("R-work", work), ("R-free", free_np)):
         if sel.sum() < 2:
             result[name + " no solvent"] = result[name] = float("nan")
@@ -1140,21 +1285,28 @@ def run(args):
         # Reuses F_protein and F_mask, so this costs a scale fit, not a
         # structure-factor calculation. Reported, never used for anything
         # below: the single-scale fit stays the measure of the model.
-        n = args.also_scale_bins
+        bins_b = assign_scale_bins(args.also_scale_bins, inv_d2, d_np)
+        n = int(bins_b.max()) + 1
         with contextlib.redirect_stdout(io.StringIO()):
             fitb = fit_scales(F_obs, F_protein, F_mask, inv_d2, s_cart, work,
-                              args.aniso, fit_solvent=True,
-                              bins=resolution_bins(inv_d2, n))
+                              args.aniso, fit_solvent=True, bins=bins_b)
         mb = model_amplitudes(fitb, F_protein, F_mask, inv_d2, s_cart)
-        result.update({"scale_bins": n, "k_sol binned": float(fitb["k_sol"]),
+        result.update({"scale_bins": n,
+                       "bin_scheme": describe_bins(args.also_scale_bins,
+                                                   bins_b),
+                       "k_sol binned": float(fitb["k_sol"]),
                        "b_sol binned": float(fitb["b_sol"])})
         for name, sel in (("R-work", work), ("R-free", free_np)):
             rb = (r_factor(F_obs[sel], mb[sel]) if sel.sum() >= 2
                   else float("nan"))
             result[name + " binned"] = rb
+        # The scheme on its own line, so that the line below keeps the format
+        # log parsers written before log bins existed already match.
+        print("  binned row: %s" % result["bin_scheme"])
         print("  with %d scale bins instead (--also-scale-bins): R-work %.4f, "
               "R-free %.4f, k_sol %.3f, b_sol %.1f"
-              % (n, result["R-work binned"], result["R-free binned"],
+              % (n, result["R-work binned"],
+                 result["R-free binned"],
                  result["k_sol binned"], result["b_sol binned"]))
 
     with torch.no_grad():
@@ -1198,9 +1350,9 @@ def run(args):
     print("  * No positional, ADP or occupancy refinement happens here at all:")
     print("    the deposited coordinates are used exactly as given, against")
     print("    which only 3-4 scale parameters are fitted.")
-    if args.scale_bins:
+    if bins is not None:
         print("  * The overall scale is fitted per resolution bin (%d bins), so"
-              % args.scale_bins)
+              % (int(bins.max()) + 1))
         print("    k_overall above is the single-scale value it started from.")
         print("    The lowest bin overlaps the solvent term and absorbs part")
         print("    of it, which shrinks the no-solvent/with-solvent change.")

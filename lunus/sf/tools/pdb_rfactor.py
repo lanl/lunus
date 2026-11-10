@@ -36,13 +36,16 @@ comes out at 0.2060 rather than 0.1312. --iso-scale turns it off.
 mmtbx also fits its overall scale per resolution bin, which the torch fit does
 not: a binned scale absorbs resolution-dependent errors, including the ones in
 a structure-factor model that this comparison exists to expose. So the torch
-row stays single-scale, and a second row beside it (--binned-row, 20 bins by
-default) is fitted the way mmtbx is, from the same structure factors. The
-distance between the two rows is the part of the gap that is scaling. On the
-40 sampleworks entries the single-scale row is a median 0.005 above mmtbx in
-R-work and the binned row 0.002; what remains is mostly the solvent mask. On
-data whose falloff is not Gaussian the difference is large (8VQ1,
-room-temperature XFEL: 0.198 against mmtbx's 0.137, and 0.139 binned).
+row stays single-scale, and a second row beside it (--binned-row) is fitted
+the way mmtbx is, from the same structure factors and, by default, on mmtbx's
+own logarithmic resolution bins ('log'; an integer N gives N equal-count bins
+instead). The distance between the two rows is the part of the gap that is
+scaling. On the 40 sampleworks entries, with 20 equal-count bins (the default
+before 2026-11-09; --binned-row 20 reproduces it), the single-scale row is a
+median 0.005 above mmtbx in R-work and the binned row 0.002; what remains is
+mostly the solvent mask. On data whose falloff is not Gaussian the difference
+is large (8VQ1, room-temperature XFEL: 0.198 against mmtbx's 0.137, and 0.139
+binned).
 
 Files are cached: an existing <ID>.pdb or <ID>-sf.cif in --dir is used as is,
 so running in examples/compare_gemmi/ never touches the network for 7FPV. If
@@ -106,7 +109,7 @@ def fetch_entry(pdb_id, out_dir, mirror="rcsb", log=sys.stdout):
     return model, sf
 
 
-def main():
+def build_parser():
     p = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -126,11 +129,14 @@ def main():
                    help="use the deposited ANISOTROPIC ADPs. Without this "
                         "both methods flatten them to isotropic, so the two "
                         "stay comparable either way")
-    p.add_argument("--binned-row", type=int, default=20, metavar="N",
-                   help="add a torch row fitted with N resolution-bin scales, "
-                        "as mmtbx scales, beside the single-scale one; it "
+    p.add_argument("--binned-row", type=fit_solvent_rfactor.scale_bins_arg,
+                   default="log", metavar="log|N",
+                   help="add a torch row fitted with one scale per resolution "
+                        "bin, as mmtbx scales, beside the single-scale one; it "
                         "shows how much of a gap to mmtbx is the scaling "
-                        "model. 0 omits it (default: 20)")
+                        "model. 'log' uses mmtbx's own logarithmic bins, N "
+                        "uses N equal-count bins (20 was the default before "
+                        "2026-11-09), 0 omits the row (default: log)")
     p.add_argument("--select", default="all", metavar="SEL",
                    help="an iotbx atom selection applied to the model for "
                         "BOTH methods, e.g. \"not element H\" to drop "
@@ -138,12 +144,18 @@ def main():
     p.epilog = ("Anything else -- after a bare '--' to be safe -- is passed "
                 "through to fit_solvent_rfactor.py: --mask gemmi, --device, "
                 "--mask-blur, --reference, ...")
+    return p
+
+
+def main():
+    p = build_parser()
     args, passthrough = p.parse_known_args()
     passthrough = [a for a in passthrough if a != "--"]
 
     model, sf = fetch_entry(args.pdb_id, args.dir, args.mirror)
 
     rows = []
+    r_torch = {}
     if args.method in ("torch", "both"):
         argv = [model, sf]
         if args.d_min is not None:
@@ -160,10 +172,13 @@ def main():
         print("\ntorch: fit_solvent_rfactor.py %s\n" % " ".join(argv[2:]))
         torch_args = fit_solvent_rfactor.build_parser().parse_args(argv)
         r = fit_solvent_rfactor.run(torch_args)
+        r_torch = r
         # A --scale-bins passed through makes the main fit itself binned; say
         # so in its label, and run() then skips the extra row as redundant.
-        main = ("torch, %d scale bins" % torch_args.scale_bins
-                if torch_args.scale_bins else "torch")
+        # Row labels keep the "torch, N scale bins" form log parsers match;
+        # the bin scheme is printed beside the table instead.
+        main = ("torch, %d scale bins" % r["main_scale_bins"]
+                if r["main_scale_bins"] else "torch")
         rows.append(("torch, no solvent", r["R-work no solvent"],
                      r["R-free no solvent"], float("nan"), float("nan")))
         rows.append((main, r["R-work"], r["R-free"], r["k_sol"],
@@ -197,6 +212,10 @@ def main():
               % (name, rw, "-" if n_free == 0 else "%.4f" % rf,
                  "-" if ks != ks else "%.3f" % ks,
                  "-" if bs != bs else "%.1f" % bs))
+    schemes = [r_torch[k] for k in ("main_bin_scheme", "bin_scheme")
+               if r_torch.get(k)]
+    if schemes:
+        print("  scale bins: %s" % ", ".join(schemes))
     if n_free == 0:
         print("  no R-free flags deposited: every reflection is in the work set")
     if args.method == "both":
