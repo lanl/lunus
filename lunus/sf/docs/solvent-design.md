@@ -24,12 +24,21 @@ xtraj defaults to is now measured against the same R factors, and exposed as
 protein density with the extra B xtraj's `recommended_blur` prescribes and
 removes it from F_protein (`--protein-blur`, default auto, 2026-11-10): on the
 d_min/3 grid an atom at B ~ 1-2 A^2 aliased, and so did 7FPV's B = 10 atoms
-once the data were cut to 3 A. The tool's default grid is now `--rate 2`
-(d_min/4; 2026-11-10; mmtbx's own mask sits on a fixed ~0.6 A step): the
-mask on d_min/3 voxels, boundary and calibration target alike, was the larger
-part of the low-resolution gap to mmtbx in the 1,000-entry run, and the finer
-grid closes about 60% of it at 2.4x the voxels, while below 2.4 A it changes
-nothing and costs ~0.0003 at high resolution.
+once the data were cut to 3 A. The tool's grid is now capped at
+`--max-voxel` 0.7 A, i.e. d_min/3 voxels below 2.1 A and 0.7 A beyond
+(2026-11-10; mmtbx's own mask sits on a fixed ~0.6 A step): the mask on
+d_min/3 voxels, boundary and calibration target alike, was the larger part of
+the low-resolution gap to mmtbx in the 1,000-entry run, and the finer grid
+closes about 60% of it there, while a finer grid at higher resolution changes
+nothing and costs ~0.0003 and 20-30% time. A sweep of 0.6, 0.7 and 0.8 A over
+40 benchmark entries does not tell the three apart: at 2.6-3.0 A the median
+gap is +0.0109, +0.0105 and +0.0114 against +0.0258 uncapped, with per-entry
+differences smaller than the ~0.003 grid noise; 0.7 A was chosen as the middle
+value, nearest mmtbx's step. The gain begins at about 2.5 A (two entries at
+2.49-2.50 A improve by 0.004 and 0.013); at 1.8-2.4 A the entries move within
+noise, and at 1.8-2.2 A only 0.6 A binds. On SW40 the cap binds on 3IAC and
+4OLE only; every R is unchanged from the d_min/3 grid except 4OLE's R-free,
+by 0.0001.
 
 Written 2026-08-15, revised the same day against the current code — the API
 assumptions below were checked, the cost estimate was replaced with a

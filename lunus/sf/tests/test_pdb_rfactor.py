@@ -194,10 +194,11 @@ def test_log_binned_row_through_run_on_7fpv_at_3a():
     # Pinned, so that some other 6-bin partition cannot pass. History of the
     # pins on this run: 0.1880 / 0.1929 with no protein blur on the d_min/3
     # grid; 0.1847 / 0.1975 with the blur (2026-11-10); 0.1676 / 0.1924 on
-    # the d_min/4 grid that became the default the same day (--rate 1.5
-    # reproduces the earlier pair).
-    assert abs(r["R-work binned"] - 0.1676) < 5e-4
-    assert abs(r["R-free binned"] - 0.1924) < 1e-3
+    # the d_min/4 grid that was the default for a few hours the same day;
+    # 0.1678 / 0.1928 on the 0.7 A voxels of the cap rule (--rate 1.5
+    # reproduces the second pair).
+    assert abs(r["R-work binned"] - 0.1678) < 5e-4
+    assert abs(r["R-free binned"] - 0.1928) < 1e-3
 
 
 def test_main_fit_with_log_bins_through_run_on_7fpv_at_3a():
@@ -216,17 +217,18 @@ def test_main_fit_with_log_bins_through_run_on_7fpv_at_3a():
     assert "overall scale per resolution bin: 6 log bins" in out.getvalue()
     assert "fitted per resolution bin (6 bins)" in out.getvalue()
     # The main fit with bins also scales the solvent per bin by default
-    # (measured 2026-11-10 on the d_min/4 grid: 0.1685 / 0.1944), and the
-    # exponential is one flag away (0.1676 / 0.1924). On the d_min/3 grid
-    # (--rate 1.5) these were 0.1852 / 0.1985 and 0.1847 / 0.1975.
+    # (measured 2026-11-10 on the 0.7 A voxels of the cap rule: 0.1686 /
+    # 0.1946), and the exponential is one flag away (0.1678 / 0.1928). On
+    # the d_min/3 grid (--rate 1.5) these were 0.1852 / 0.1985 and 0.1847 /
+    # 0.1975.
     assert r["solvent_scheme"] == "per bin"
     assert "solvent scale is one value per bin" in out.getvalue()
-    assert abs(r["R-work"] - 0.1685) < 5e-4 and abs(r["R-free"] - 0.1944) < 1e-3
+    assert abs(r["R-work"] - 0.1686) < 5e-4 and abs(r["R-free"] - 0.1946) < 1e-3
     args.solvent_bins = "off"
     with contextlib.redirect_stdout(io.StringIO()):
         r2 = fit_solvent_rfactor.run(args)
     assert r2["solvent_scheme"] == "exponential"
-    assert abs(r2["R-work"] - 0.1676) < 5e-4 and abs(r2["R-free"] - 0.1924) < 1e-3
+    assert abs(r2["R-work"] - 0.1678) < 5e-4 and abs(r2["R-free"] - 0.1928) < 1e-3
 
 
 def test_main_forwards_the_default_binned_row(monkeypatch, capsys):
@@ -285,12 +287,12 @@ def test_binned_row_defaults_to_per_bin_solvent_on_7fpv_at_3a():
     assert r["solvent_scheme"] == "exponential"
     assert "binned row: 6 log bins, solvent per bin" in text
     assert "solvent scale per bin (low to high resolution):" in text
-    # Measured 2026-11-10 on the d_min/4 grid with the protein blur; the
-    # exponential gives 0.1676 / 0.1924 (d_min/3 grid: 0.1852 / 0.1985,
-    # single 0.1868).
-    assert abs(r["R-work binned"] - 0.1685) < 5e-4
-    assert abs(r["R-free binned"] - 0.1944) < 1e-3
-    assert abs(r["R-work"] - 0.1679) < 5e-4    # single-scale row: not moved by the binned row
+    # Measured 2026-11-10 on the 0.7 A voxels of the cap rule, protein blur
+    # on; the exponential gives 0.1678 / 0.1928 (d_min/3 grid: 0.1852 /
+    # 0.1985, single 0.1868).
+    assert abs(r["R-work binned"] - 0.1686) < 5e-4
+    assert abs(r["R-free binned"] - 0.1946) < 1e-3
+    assert abs(r["R-work"] - 0.1680) < 5e-4    # single-scale row: not moved by the binned row
     assert 0.0 <= r["b_sol binned"] <= 150.0 and 0.0 <= r["k_sol binned"] <= 0.6
     # per-phase timing: every phase this run goes through is present, none
     # negative, the phases do not exceed the total, and the table is printed
@@ -612,7 +614,7 @@ def test_status_column_with_wavelength_id_is_still_the_free_set(tmp_path):
 
 def sharp_toy(tmp_path, d_min=2.5, sharp=True, aniso=False):
     """A P1 cell with atoms at B = 20 and, with sharp, at B = 2 (narrower
-    than the default d_min/4 voxel), and an MTZ whose 'observations' are the exact
+    than the voxel), and an MTZ whose 'observations' are the exact
     |F_calc| of that model from cctbx direct summation, so that any R above a
     few 1e-3 in the no-solvent fit is the grid's error and nothing else. With
     aniso, one more atom carries an ANISOU with principal B 1.6, 2.4, 3.2
@@ -650,8 +652,8 @@ def sharp_toy(tmp_path, d_min=2.5, sharp=True, aniso=False):
 
 @requires_cctbx
 def test_protein_blur_fixes_sharp_atoms_on_the_default_grid(tmp_path):
-    """An atom at B = 2 A^2 is a Gaussian narrower than the default d_min/4
-    voxel and aliases when placed on the grid: against exact |F_calc| the
+    """An atom at B = 2 A^2 is a Gaussian narrower than the voxel
+    and aliases when placed on the grid: against exact |F_calc| the
     no-solvent fit cannot get below R ~ 0.1. Placing the density with
     recommended_blur's extra B and removing it from F_protein (the default,
     --protein-blur auto) brings the same fit to the few-1e-3 floor of the
@@ -743,8 +745,7 @@ def test_protein_blur_leaves_the_threshold_mask_as_shipped(tmp_path):
 
     def fit(*extra):
         # on the d_min/3 grid, where B = 20 atoms still earn a blur of ~20
-        # A^2; the default d_min/4 grid gives them 2 A^2, too little for
-        # smoothing twice to show against the 0.5% margin below
+        # A^2, pinned so the margin below does not depend on the grid rule
         args = fit_solvent_rfactor.build_parser().parse_args(
             [pdb, mtz, "--shells", "2", "--rate", "1.5"] + list(extra))
         with contextlib.redirect_stdout(io.StringIO()):
@@ -806,31 +807,68 @@ def test_sharpest_b_and_protein_blur_setting():
 
 
 @requires_cctbx
-def test_default_grid_is_d_min_over_4(tmp_path):
-    """The tool's default --rate is 2, so the grid it builds the density and
-    the solvent mask on has voxels no coarser than d_min/4 along every axis,
-    not the d_min/3 that gemmi and xtraj default to and that every number
-    recorded before 2026-11-10 was measured with. The 1.5 of before is one
-    flag away. (mmtbx's mask is on a fixed ~0.6 A step, which this does not
-    copy.)"""
+def test_default_grid_caps_the_voxel_edge(tmp_path):
+    """The tool's grid rule is spacing = min(d_min/3, --max-voxel), default
+    cap 0.7 A: at 2.5 A, where d_min/3 is 0.83 A, the voxels are capped at
+    0.7 A; at 1.8 A, where d_min/3 is 0.6 A, the grid is the plain rate-1.5
+    grid every number before 2026-11-10 was measured on. --rate overrides the
+    rule. (mmtbx's mask is on a fixed ~0.6 A step, which this does not copy.)"""
     import contextlib
     import io
 
     import fit_solvent_rfactor
 
-    pdb, mtz = sharp_toy(tmp_path, sharp=False)
-    args = fit_solvent_rfactor.build_parser().parse_args([pdb, mtz, "--shells", "2"])
-    assert args.rate == 2.0, "default --rate is %r, not 2" % args.rate
-    with contextlib.redirect_stdout(io.StringIO()):
-        r = fit_solvent_rfactor.run(args)
-    assert r["rate"] == 2.0
-    d_min = 2.5
-    for edge, n in zip((20.0, 22.0, 24.0), r["grid"]):
-        assert edge / n <= d_min / 4.0 + 1e-9, (edge, n)
-    assert any(edge / n > d_min / 6.0 for edge, n in zip((20.0, 22.0, 24.0), r["grid"]))
-    args15 = fit_solvent_rfactor.build_parser().parse_args(
-        [pdb, mtz, "--shells", "2", "--rate", "1.5"])
-    with contextlib.redirect_stdout(io.StringIO()):
-        r15 = fit_solvent_rfactor.run(args15)
+    cell = (20.0, 22.0, 24.0)
+
+    def fit(d_min, *extra):
+        pdb, mtz = sharp_toy(tmp_path, d_min=d_min, sharp=False)
+        args = fit_solvent_rfactor.build_parser().parse_args(
+            [pdb, mtz, "--shells", "2"] + list(extra))
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            r = fit_solvent_rfactor.run(args)
+        return args, r, out.getvalue()
+
+    args, r, text = fit(2.5)
+    assert args.rate is None and args.max_voxel == 0.7, (
+        "default grid rule is --rate %r --max-voxel %r, not the 0.7 A cap"
+        % (args.rate, args.max_voxel))
+    # the rate is d_min/(2 cap) with d_min the data's own, just above 2.5
+    assert r["max_voxel"] == 0.7 and 1.75 < r["rate"] < 1.85
+    assert "grid: voxels capped at --max-voxel 0.7 A" in text
+    for edge, n in zip(cell, r["grid"]):
+        assert edge / n <= 0.7 + 1e-9, (edge, n)
+    assert any(edge / n > 0.5 for edge, n in zip(cell, r["grid"]))
+
+    # below 2.1 A the cap is not reached and the grid is the rate-1.5 one
+    _, r18, text18 = fit(1.8)
+    assert r18["rate"] == 1.5 and "rate 1.5; finer than the --max-voxel cap" in text18
+    _, r18_15, _ = fit(1.8, "--rate", "1.5")
+    assert r18_15["grid"] == r18["grid"]
+
+    # an explicit --rate wins over the cap, both ways
+    _, r2, text2 = fit(2.5, "--rate", "2")
+    assert r2["rate"] == 2.0 and "--rate 2:" in text2
+    assert r2["grid_rule"].startswith("--rate 2") and r["grid_rule"].startswith("voxels capped")
+    assert all(a >= b for a, b in zip(r2["grid"], r["grid"])) and r2["grid"] != r["grid"]
+    _, r15, _ = fit(2.5, "--rate", "1.5")
     assert r15["rate"] == 1.5 and all(a <= b for a, b in zip(r15["grid"], r["grid"]))
-    assert r15["grid"] != r["grid"]
+
+
+def test_grid_rate_rule():
+    """grid_rate: the cap binds only where d_min/3 is coarser than it, an
+    explicit rate wins, and non-positive settings are errors."""
+    import pytest
+
+    import fit_solvent_rfactor as f
+
+    assert f.grid_rate(1.8, None, 0.7)[0] == 1.5             # d_min/3 = 0.60 < 0.7
+    assert f.grid_rate(2.1, None, 0.7)[0] == 1.5             # exactly at the cap
+    assert abs(f.grid_rate(3.0, None, 0.7)[0] - 3.0 / 1.4) < 1e-12
+    assert abs(f.grid_rate(3.0, None, 0.6)[0] - 2.5) < 1e-12
+    assert f.grid_rate(3.0, 2.0, 0.7)[0] == 2.0 and "--rate 2" in f.grid_rate(3.0, 2.0, 0.7)[1]
+    assert f.grid_rate(3.0, 1.5, 0.1)[0] == 1.5             # the override ignores the cap
+    assert f.MAX_VOXEL_DEFAULT == 0.7
+    with pytest.raises(ValueError):
+        f.grid_rate(3.0, 0.0, 0.7)
+    with pytest.raises(ValueError):
+        f.grid_rate(3.0, None, 0.0)
