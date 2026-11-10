@@ -231,8 +231,12 @@ def main():
         print("  scale bins: %s" % "; ".join(schemes))
     occ = []
     if r_torch.get("target_occupancy") is not None:
-        occ.append("torch target %.4f (%s)"
-                   % (r_torch["target_occupancy"], r_torch.get("target_source", "gemmi")))
+        source = r_torch.get("target_source", "gemmi")
+        if source.startswith("none"):
+            occ.append("torch gemmi mask %.4f, no calibration (--mask gemmi)"
+                       % r_torch["target_occupancy"])
+        else:
+            occ.append("torch target %.4f (%s)" % (r_torch["target_occupancy"], source))
     if r_mmtbx is not None and r_mmtbx.get("mask_occupancy") is not None:
         occ.append("mmtbx mask %.4f" % r_mmtbx["mask_occupancy"])
     if occ:

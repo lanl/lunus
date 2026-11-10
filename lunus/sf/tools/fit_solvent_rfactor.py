@@ -76,6 +76,12 @@ spacing same measures it on the working grid, as every run before did.
 --mask gemmi runs the entire fit on gemmi's geometric mask instead of ours.
 Comparing the two R-factors separates "the mask model is wrong" from
 "everything downstream of the mask is wrong", which no single number can.
+That mask is built on the WORKING grid and keeps the step dependence on the
+voxel size that the reference-grid target removes from ours: on 1 A voxels
+(d_min/3 at 3 A) gemmi's shrink stencil has no neighbours and the mask is
+too large (7FPV at 3 A: occupancy 0.19, R-free 0.1895, against 0.26 and
+0.1634 on 0.7 A voxels). Beyond ~2.1 A run --mask gemmi with --max-voxel 0.7;
+the run warns when the voxels are no finer than the shrink radius.
 
 --mask-blur B smooths the density with exp(-B s^2/4) BEFORE thresholding, which
 is the threshold mask's analogue of the probe radius a geometric mask is built
@@ -85,30 +91,24 @@ did before this existed, which is where the unphysical scales come from (with
 --protein-blur 0 as well: the placement blur below is the same smoothing, and
 stays in the density the threshold sees).
 
-THE GRID RULE is a cap on the voxel edge: spacing = min(d_min/3, --max-voxel),
-default cap 0.7 A (2026-11-10). Below 2.1 A that is gemmi's and xtraj's rate
-1.5, the grid every number recorded before 2026-11-10 was measured on; beyond
-it the voxels stay at 0.7 A. --rate overrides the rule with a plain
-oversampling (spacing d_min/(2 rate)); between the two changes of 2026-11-10
-the default was a plain rate 2. (mmtbx builds its mask on a FIXED step of
-~0.6 A whatever the resolution.) The finer grid is for the SOLVENT MASK:
-F_protein does not move with it once the protein blur is on, while two things
-about the mask do. Its boundary is drawn on the voxels, 1 A at 3 A
-resolution; and its calibration target, gemmi's mask occupancy on the same
-grid, moves with the grid too -- on 7FPV cut to 3 A from 0.19 on d_min/3
-voxels to 0.27 at d_min/4 (0.28 at d_min/6). That was the larger part of the
-gap to mmtbx in the torchref1000 run. Measured on a sweep of caps over 40
-benchmark entries (binned R-free gap to mmtbx, median per band; CPU time):
-at 2.6-3.0 A rate 1.5 +0.0258 (2.6 s), cap 0.6 +0.0109 (3.8 s), cap 0.7
-+0.0105 (3.3 s), cap 0.8 +0.0114 (2.8 s), every entry better than at rate
-1.5 whichever the cap; the three caps are indistinguishable there (per-entry
-grid noise is ~0.003, larger than their differences), and 0.7 was chosen as
-the middle one, nearest mmtbx's step. The gain starts at about 2.5 A (7DFC
-+0.0183 -> +0.0142, 3NHV +0.0258 -> +0.0124); at 2.2-2.4 A the entries move
-within noise; at 1.8-2.2 A caps of 0.7 and 0.8 do not bind and 0.6 moves
-single entries by up to 0.003 either way for no net gain. A plain rate 2
-costs ~0.0003 and 20-30% time below 2.4 A for nothing, which is why the
-rule is a cap and not a rate.
+THE GRID is gemmi's and xtraj's rate 1.5, voxels of d_min/3, the grid every
+number recorded before 2026-11-10 was measured on. --rate overrides it with a
+plain oversampling (spacing d_min/(2 rate)); --max-voxel caps the voxel edge
+(spacing = min(d_min/3, cap)). Both were tried as defaults on 2026-11-10 (a
+plain rate 2, then a 0.7 A cap) because a finer grid closed ~60% of the
+low-resolution gap to mmtbx; that gain turned out to come entirely through
+the calibration target, gemmi's mask occupancy, which STEPS with the voxel
+size (see "THE TARGET IS MEASURED ON A FIXED REFERENCE GRID" below). With the
+target on its own reference grid, the d_min/3 grid gives the same R as the
+capped one in every resolution band (40 benchmark entries, 2026-11-10: no
+entry moves by more than 0.0011; THE THRESHOLD MASK ONLY, see --mask gemmi
+below) with 16% less torch time at 2.6-3.0 A (median per-entry ratio; 0.43x
+the voxels), 7% less at 2.2-2.6 A and the same grid below 2.2 A, so the
+default went back to d_min/3 the same day. F_protein
+does not move with the grid once the protein blur is on, and the mask's
+boundary on 1 A voxels at 3 A costs nothing measurable; mmtbx builds its mask
+on a fixed ~0.6 A step. (A plain rate 2 had also cost ~0.0003 and 20-30%
+time below 2.4 A.)
 
 --protein-blur B places the PROTEIN density with B added to every atom and
 removes it again from F_protein, exactly (exp(+B s^2/4) in reciprocal space).
@@ -119,10 +119,10 @@ B = 1-2 A^2 is a Gaussian narrower than the voxel and aliases on the grid
 above mmtbx). The default, auto,
 is cell_utils.recommended_blur, the rule xtraj's torch engine uses: zero
 whenever the model's sharpest atom already clears the grid's own target of
-57 h^2 with h the voxel edge -- on the default grid 6 A^2 at d_min 1 A, 25
-at 2 A and 28 at 3 A, where the 0.7 A cap binds (57 on the d_min/3 grid of
---rate 1.5; 32 on the d_min/4 grid of --rate 2) -- so a model is touched
-whenever its sharpest atom is below that. The threshold
+57 h^2 with h the voxel edge -- on the default d_min/3 grid 6 A^2 at d_min
+1 A, 25 at 2 A and 57 at 3 A (28 at 3 A with --max-voxel 0.7, where the cap
+binds; 32 on the d_min/4 grid of --rate 2) -- so a model is touched whenever
+its sharpest atom is below that. The threshold
 mask's own smoothing (--mask-blur) is a total and is reduced by the same
 amount, so the mask the fit sees is the shipped one up to the aliasing this
 removes; when the placement blur exceeds --mask-blur the mask is smoother
@@ -663,24 +663,26 @@ def build_density(xrs, elements, b_per_atom, occ, frac, grid, device, dtype,
     return density, orth, float(np.linalg.det(M_np))
 
 
-MAX_VOXEL_DEFAULT = 0.7   # A; see grid_rate() and the module docstring
+MAX_VOXEL_DEFAULT = None  # A; no cap: plain d_min/3. See grid_rate() and the module docstring
 
 
 def grid_rate(d_min, rate=None, max_voxel=MAX_VOXEL_DEFAULT):
     """The oversampling rate the grid is built with, and a line saying why.
 
-    The rule is a cap on the voxel edge: spacing = min(d_min/3, max_voxel),
-    i.e. gemmi's and xtraj's rate 1.5 wherever that is already finer than
-    max_voxel, and max_voxel beyond. Expressed as a rate so that
-    grid_shape_for_resolution, and every caller that reads --rate, see one
-    quantity. An explicit rate overrides the rule."""
+    The default is gemmi's and xtraj's rate 1.5, voxels of d_min/3, the grid
+    every number recorded before 2026-11-10 was measured on. max_voxel, when
+    given, caps the voxel edge: spacing = min(d_min/3, max_voxel). Expressed
+    as a rate so that grid_shape_for_resolution, and every caller that reads
+    --rate, see one quantity. An explicit rate overrides both."""
     if rate is not None:
         if rate <= 0.0:
             raise ValueError("--rate must be > 0, got %g" % rate)
         return float(rate), "--rate %g: voxels of d_min/(2 rate) = %.3f A" % (rate, d_min / (2 * rate))
+    natural = d_min / 3.0
+    if max_voxel is None:
+        return 1.5, "voxels of d_min/3 = %.3f A (rate 1.5, the default)" % natural
     if max_voxel <= 0.0:
         raise ValueError("--max-voxel must be > 0 A, got %g" % max_voxel)
-    natural = d_min / 3.0
     if natural <= max_voxel * (1.0 + 1e-9):      # at the cap counts as under it
         return 1.5, ("voxels of d_min/3 = %.3f A (rate 1.5; finer than the "
                      "--max-voxel cap of %g A)" % (natural, max_voxel))
@@ -799,6 +801,8 @@ def gemmi_mask_grid(pdb_path, radii_set, size=None, spacing=None):
     by gemmi) when no size is given."""
     import gemmi
 
+    if size is None and spacing is None:
+        raise ValueError("gemmi_mask_grid needs a grid size or a spacing")
     st = gemmi.read_structure(pdb_path)
     st.setup_entities()
     g = gemmi.FloatGrid()
@@ -1699,17 +1703,14 @@ def build_parser():
     p.add_argument("--d-min", type=float, default=None,
                    help="truncate the observations (default: use them all)")
     p.add_argument("--max-voxel", type=float, default=MAX_VOXEL_DEFAULT, metavar="A",
-                   help="the grid rule: voxels of d_min/3 (gemmi's and xtraj's "
-                        "rate 1.5) but no coarser than this, in A (default "
-                        "%g, which binds beyond %.1f A). Finer than d_min/3 "
-                        "only matters to the solvent mask, and measurably only "
-                        "beyond ~2.5 A; see the module docstring"
-                        % (MAX_VOXEL_DEFAULT, 3 * MAX_VOXEL_DEFAULT))
+                   help="cap the voxel edge: voxels of d_min/3 but no coarser "
+                        "than this, in A (default: no cap). With the "
+                        "calibration target on its own reference grid a cap "
+                        "no longer changes R; it was the default for part of "
+                        "2026-11-10 at 0.7 A. See the module docstring")
     p.add_argument("--rate", type=float, default=None,
                    help="override the grid rule with a plain oversampling: "
-                        "spacing d_min/(2*rate). 1.5 (d_min/3) is what every "
-                        "number recorded before 2026-11-10 was measured with, "
-                        "2 (d_min/4) the default between then and the cap")
+                        "spacing d_min/(2*rate); the default is 1.5 (d_min/3)")
     p.add_argument("--device", default="cpu")
     p.add_argument("--dtype", default="float64", choices=["float32", "float64"])
     p.add_argument("--mask", default="threshold", choices=["threshold", "gemmi"],
@@ -1867,8 +1868,8 @@ def run(args):
     b_sharpest = sharpest_b(b_per_atom, u_cart if args.aniso_adp else None, is_aniso,
                             occ=occ)
     blur_is_auto = str(args.protein_blur).lower() == "auto"
-    blur = protein_blur(args.protein_blur, b_sharpest, grid, orth_matrix(*cell),
-                        d_min_grid)
+    orth_np = orth_matrix(*cell)
+    blur = protein_blur(args.protein_blur, b_sharpest, grid, orth_np, d_min_grid)
     if blur > 0.0:
         print("protein density placed with B + %.1f A^2 (sharpest atom B %.1f, "
               "%s) and F_protein corrected by exp(+B s^2/4)"
@@ -1905,6 +1906,11 @@ def run(args):
         occ_working, gemmi_grid = gemmi_mask_occupancy(args.pdb, grid, args.radii_set)
         if args.target_occupancy is not None:
             target, target_source = args.target_occupancy, "--target-occupancy"
+        elif args.mask == "gemmi":
+            # --mask gemmi calibrates nothing: the mask in use is this one,
+            # so there is no reference-grid target to build or to warn about;
+            # the "target" reported is simply that mask's occupancy
+            target, target_source = occ_working, "none (--mask gemmi)"
         elif args.target_spacing == "same":
             target, target_source = occ_working, "gemmi, working grid"
         else:
@@ -1915,6 +1921,8 @@ def run(args):
           % (args.radii_set, occ_working))
     if args.target_occupancy is not None:
         print("  calibration target: occupancy %.4f (--target-occupancy)" % target)
+    elif args.mask == "gemmi":
+        print("  calibration target: none (--mask gemmi uses that mask as it is)")
     elif args.target_spacing == "same":
         print("  calibration target: that occupancy (--target-spacing same)")
     else:
@@ -1924,7 +1932,7 @@ def run(args):
               "of the working grid"
               % (target, args.target_spacing, target_grid, actual))
         r_shrink = SHRINK_RADIUS.get(args.radii_set)
-        near = (shrink_step_distance(orth_matrix(*cell), target_grid, r_shrink)
+        near = (shrink_step_distance(orth_np, target_grid, r_shrink)
                 if r_shrink is not None else None)
         if near is not None:
             warnings.warn(
@@ -1935,6 +1943,20 @@ def run(args):
                 "--target-spacing. Choose a spacing whose edges and diagonals "
                 "keep clear of %.2f A."
                 % (near, args.radii_set, r_shrink, r_shrink),
+                SolventMaskWarning, stacklevel=2)
+    if args.mask == "gemmi":
+        # whatever the target line said: the mask in use is gemmi's on the
+        # working grid, which keeps the step dependence on the voxel size
+        r_shrink = SHRINK_RADIUS.get(args.radii_set)
+        coarsest = max(cell[i] / grid[i] for i in range(3))
+        if r_shrink is not None and coarsest >= r_shrink:
+            warnings.warn(
+                "the working grid's voxels are no finer than gemmi's %s shrink "
+                "radius (%.2f A) along at least one axis (up to %.2f A), where "
+                "gemmi's mask loses its shrink step and its occupancy drops "
+                "below the plateau the threshold mask is calibrated on (7FPV at "
+                "3 A: 0.19 against 0.26); for --mask gemmi beyond ~2.1 A use "
+                "--max-voxel 0.7" % (args.radii_set, r_shrink, coarsest),
                 SolventMaskWarning, stacklevel=2)
     if args.select != "all":
         print("  (gemmi's mask is built from the file as deposited, not from "
@@ -2051,7 +2073,8 @@ def run(args):
 
     print("\noverall")
     result = {"n_atoms": len(elements), "protein_blur": float(blur),
-              "rate": float(rate), "max_voxel": float(args.max_voxel),
+              "rate": float(rate),
+              "max_voxel": None if args.max_voxel is None else float(args.max_voxel),
               "grid_rule": grid_rule,     # says whether the cap or --rate set the grid
               "target_occupancy": float(target),
               "target_source": target_source,
