@@ -212,10 +212,13 @@ def main():
               % (name, rw, "-" if n_free == 0 else "%.4f" % rf,
                  "-" if ks != ks else "%.3f" % ks,
                  "-" if bs != bs else "%.1f" % bs))
-    schemes = [r_torch[k] for k in ("main_bin_scheme", "bin_scheme")
+    # One entry per binned row, each with the solvent scale that row used.
+    schemes = ["%s, solvent %s" % (r_torch[k], r_torch.get(sk, "exponential"))
+               for k, sk in (("main_bin_scheme", "solvent_scheme"),
+                             ("bin_scheme", "solvent_scheme binned"))
                if r_torch.get(k)]
     if schemes:
-        print("  scale bins: %s" % ", ".join(schemes))
+        print("  scale bins: %s" % "; ".join(schemes))
     if n_free == 0:
         print("  no R-free flags deposited: every reflection is in the work set")
     if args.method == "both":

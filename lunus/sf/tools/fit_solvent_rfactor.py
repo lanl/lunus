@@ -646,16 +646,22 @@ def log_resolution_bins(d, n_lowest=100, min_per_bin=50, max_bins=30,
                          "d spacing, so the bin step is zero"
                          % (n_lowest, 2 * n_lowest))
 
-    def limits_for(step):
+    def limits_for(step, cap=None):
+        # cap: stop as soon as there are more limits than max_bins. The
+        # first call's result is then discarded in favour of the rescaled
+        # step, so a step that is tiny but not zero cannot loop for as long
+        # as cctbx's would.
         limits = [d_of(s0)]
         x = s1
         while x <= top:
+            if cap is not None and len(limits) > cap:
+                return limits
             limits.append(d_of(x))
             x += step
         limits.append(d_of(min(top, x)))
         return limits
 
-    limits = limits_for(s2 - s1)
+    limits = limits_for(s2 - s1, cap=max_bins)
     if len(limits) > max_bins:
         limits = limits_for((top - s1) / (max_bins - 1))
     pairs = []
@@ -717,6 +723,96 @@ def assign_scale_bins(spec, inv_d2, d):
     return None
 
 
+def mmtbx_moving_average(x):
+    """mmtbx.bulk_solvent.scaler.moving_average, ported: five passes of a
+    three-point mean applied only at local extrema, ends padded by
+    repetition. Takes and returns a list of floats."""
+    x_ = [x[0]] + list(x) + [x[-1]]
+    for _ in range(5):
+        result = x_[:]
+        extremum = [i for i in range(1, len(result) - 1)
+                    if ((result[i - 1] < result[i] and result[i + 1] < result[i]) or
+                        (result[i - 1] > result[i] and result[i + 1] > result[i]))]
+        for i in extremum:
+            result[i] = (x_[i - 1] + x_[i] + x_[i + 1]) / 3.0
+        x_ = result[:]
+    return result[1:-1]
+
+
+def solvent_curve_rule(k_bins, d_min_bins, smooth=True, d_cut=3.0):
+    """mmtbx's regularisation of a per-bin solvent scale (scaler.smooth and
+    the non-negative grid it searches): negatives to zero; from the first
+    bin that is zero AND whose high-resolution edge is below d_cut, zero in
+    every bin from there on; and the moving average at extrema. The solvent
+    term has no signal at high resolution and a free bin fits noise
+    (unregularised, 36 of 40 SW40 entries went negative there).
+
+    Values under 0.005, half of mmtbx's grid step, count as zero.
+
+    One deliberate difference in order: mmtbx smooths first and truncates
+    after, which works for its grid search because that lands on exact
+    zeros in runs. A least-squares bin lands on noise around zero instead,
+    and smoothing first would average a clamped zero with its neighbours and
+    re-admit the noise; so here the cut is found on the clamped values and
+    the smoothing is applied to the bins that survive it. k_bins is a
+    tensor, low resolution first; d_min_bins the bins' high-resolution edges
+    in A."""
+    # Values below half of mmtbx's grid step (0.01) are zero, as the grid
+    # would have them. This is what makes the cut fire on a numerical zero:
+    # a least-squares bin in a region with no solvent lands at +-1e-6 with a
+    # sign the optimizer decides, and without the snap the cut would depend
+    # on that sign. It also keeps a 0.001 bin next to a zero from being a
+    # strict extremum that the moving average lifts off the floor. The edge
+    # therefore sits at 0.005: a bin at 0.0051 is kept and smoothed, one at
+    # 0.0049 is a zero, which is the same jump mmtbx's grid has at its step.
+    k = [float(v) if float(v) >= 0.005 else 0.0 for v in k_bins]
+    keep = solvent_cut_index(k, d_min_bins, d_cut)
+    head = k[:keep]
+    if smooth and len(head) > 2:
+        head = mmtbx_moving_average(head)      # a mean of >= 0 values is >= 0
+    out = head + [0.0] * (len(k) - keep)
+    return torch.tensor(out, dtype=k_bins.dtype, device=k_bins.device)
+
+
+def solvent_cut_index(k_bins, d_min_bins, d_cut=3.0):
+    """Index of the first bin that is non-positive AND has its high-resolution
+    edge below d_cut; bins from there on carry no solvent. len(k_bins) when
+    there is none."""
+    for i, (v, d) in enumerate(zip(k_bins, d_min_bins)):
+        if float(v) <= 0.0 and d < d_cut:
+            return i
+    return len(k_bins)
+
+
+def exponential_from_curve(k_bins, bins, inv_d2, d_cut=4.0):
+    """(k_sol, b_sol, n): the exponential k exp(-b s^2/4) closest, in least
+    squares over the reflections at d >= d_cut, to the per-bin curve they
+    see; n is how many reflections that was. The same quantity mmtbx reports
+    as k_sol/b_sol from its k_mask curve (f_model.k_sol_b_sol_from_k_mask:
+    reflections at d >= 4 A, k in [0, 0.6], b in [0, 150]; mmtbx searches
+    locally around its own starting guess, this is a global grid at the same
+    bounds, so the two can differ in the second digit). A diagnostic, not a
+    model parameter. With fewer than 2 reflections at d >= d_cut there is
+    nothing to fit: n is 0 and the result is (max of the curve, 0)."""
+    s2 = inv_d2.detach().to(torch.float64).cpu()
+    k_refl = k_bins.detach().to(torch.float64).cpu()[bins.cpu()]
+    sel = s2 <= 1.0 / d_cut ** 2
+    n = int(sel.sum())
+    if n < 2:
+        return min(0.6, max(0.0, float(k_bins.max()))), 0.0, 0
+    k, s2 = k_refl[sel], s2[sel]
+    k_grid = torch.arange(0.0, 0.6001, 0.005, dtype=torch.float64)
+    b_grid = torch.arange(0.0, 150.001, 1.0, dtype=torch.float64)
+    # sum over reflections of (k_g e^{-b s2/4} - k)^2, expanded so that the
+    # per-reflection work is two reductions rather than a (121, 151, n) grid
+    e = torch.exp(-0.25 * b_grid[:, None] * s2[None, :])           # (151, n)
+    ee = (e * e).sum(1)                                             # (151,)
+    ek = (e * k[None, :]).sum(1)                                    # (151,)
+    cost = (k_grid[:, None] ** 2) * ee[None, :] - 2.0 * k_grid[:, None] * ek[None, :]
+    i, j = divmod(int(torch.argmin(cost)), len(b_grid))
+    return float(k_grid[i]), float(b_grid[j]), n
+
+
 def describe_bins(spec, bins):
     """"10 log bins" or "20 equal-count bins", for printed output."""
     n = int(bins.max()) + 1
@@ -724,8 +820,28 @@ def describe_bins(spec, bins):
                            "" if n == 1 else "s")
 
 
+def solvent_scheme(fit):
+    """"per bin" or "exponential": which solvent scale a fit_scales result
+    used, for printed output and the result dict."""
+    return "per bin" if fit.get("k_mask_bins") is not None else "exponential"
+
+
+def solvent_weight(fit, inv_d2):
+    """The factor on F_mask the fit applies, per reflection: k_mask[bin] for
+    a per-bin solvent fit, k_sol exp(-b_sol s^2/4) otherwise, zero for a fit
+    without solvent. model_amplitudes and the shell table's solvent column
+    both take it from here, so they cannot disagree about which solvent
+    model was fitted -- the k_sol/b_sol of a per-bin fit are a diagnostic
+    the model never used."""
+    if fit.get("k_mask_bins") is not None:
+        return fit["k_mask_bins"][fit["bins"]]
+    if not fit["fit_solvent"]:
+        return torch.zeros_like(inv_d2)
+    return fit["k_sol"] * torch.exp(-0.25 * fit["b_sol"] * inv_d2)
+
+
 def fit_scales(F_obs, F_protein, F_mask, inv_d2, s_cart, work, aniso,
-               fit_solvent=True, bins=None, log=sys.stdout):
+               fit_solvent=True, bins=None, solvent_bins=False, log=sys.stdout):
     """
     Least squares on amplitudes over the work set. Returns a parameter dict.
 
@@ -747,6 +863,28 @@ def fit_scales(F_obs, F_protein, F_mask, inv_d2, s_cart, work, aniso,
          goes from R-work 0.198 to 0.138 with 20 equal-count bins, against
          mmtbx's 0.137. k_sol and b_sol stay single numbers, so
          they remain the diagnostic they are without bins.
+
+      4. Only with bins AND solvent_bins=True: the solvent scale becomes one
+         value per bin as well, k_mask[bin] in place of k_sol exp(-b_sol s^2/4),
+         which is what mmtbx fits (a free k_mask per bin). Least squares
+         jointly with the bin scales, started from the exponential of stage
+         3, B_cart held where stage 3 left it, and regularised by mmtbx's own
+         rule (solvent_curve_rule): no negative values, a moving average at
+         local extrema, and zero from the first zero below 3 A outward. The
+         surviving bins are refit from the regularised curve and the bin
+         scales are then solved in closed form. (In practice the second pass
+         returns to the least-squares optimum of the bins it frees, so its
+         effect is to refit after the cut has zeroed bins that carried
+         weight.) The curve is a step per bin; mmtbx additionally chooses,
+         per bin, between the step and a linear interpolation to the next
+         bin, which this does not do. Measured on SW40 (stage 0,
+         2026-11-09) this closes the lunus-vs-mmtbx R-free gap from a median
+         +0.0020 to +0.0011, which is where mmtbx's complete scaling on the
+         same structure factors lands; the exponential's shape -- too little
+         solvent at 6-4 A, too much at 3-2 A -- was the whole remaining
+         scaling difference. The k_sol/b_sol returned by such a fit are an
+         exponential fitted to the curve at d >= 4 A, as mmtbx reports them,
+         not parameters the model used.
 
     Fitting on amplitudes rather than intensities matches the quantity R is
     computed from. The fit is unweighted -- weighting by 1/sigma^2 would tilt
@@ -864,23 +1002,108 @@ def fit_scales(F_obs, F_protein, F_mask, inv_d2, s_cart, work, aniso,
                        " ".join("%.2f" % float(v) for v in k)), file=log)
         log_k_bins = log_k_bins.detach()
 
+    k_mask_bins, n_fit = None, 0
+    k_sol_out, b_sol_out = k_sol.detach(), b_sol.detach()
+    if bins is not None and fit_solvent and solvent_bins:
+        # Bin edges and centres from every reflection in the bin, not the
+        # work subset: a bin is never empty that way, and it is what
+        # mmtbx's ss_bin_values are.
+        d_min_bins = [float(1.0 / torch.sqrt(inv_d2[bins == i].max()))
+                      for i in range(n_bins)]
+        s2_bins = [float(inv_d2[bins == i].mean()) for i in range(n_bins)]
+        k_mask_bins, log_k_bins = _fit_solvent_bins(
+            Fo, Fp, Fm, s2, s, b, n_bins, log_k_bins, u_params, aniso,
+            k_sol_out, b_sol_out, d_min_bins, s2_bins)
+        ks, bs, n_fit = exponential_from_curve(k_mask_bins, bins, inv_d2)
+        k_sol_out = torch.tensor(ks, dtype=dtype, device=device)
+        b_sol_out = torch.tensor(bs, dtype=dtype, device=device)
+        print("  solvent scale per bin (low to high resolution): %s"
+              % " ".join("%.2f" % float(v) for v in k_mask_bins), file=log)
+        if n_fit:
+            print("  exponential closest to it over the %d reflections at d >= 4 A: "
+                  "k_sol %.3f, b_sol %.1f (reported as k_sol/b_sol; not used by "
+                  "the model)" % (n_fit, ks, bs), file=log)
+        else:
+            print("  fewer than 2 reflections at d >= 4 A to fit an exponential to; "
+                  "k_sol is reported as the curve's maximum and b_sol as 0", file=log)
+
     return {
         "log_k": log_k.detach(),
         "log_k_bins": log_k_bins,
         "bins": bins,
         "u_params": [p.detach() for p in u_params],
         "aniso": aniso,
-        "k_sol": k_sol.detach(),
-        "b_sol": b_sol.detach(),
+        "k_sol": k_sol_out,
+        "b_sol": b_sol_out,
         "fit_solvent": fit_solvent,
+        "k_mask_bins": k_mask_bins,
+        "n_refl_exp_fit": n_fit if k_mask_bins is not None else None,
     }
 
+
+def _fit_solvent_bins(Fo, Fp, Fm, s2, s, b, n_bins, log_k_bins, u_params, aniso,
+                      k_sol, b_sol, d_min_bins, s2_bins):
+    """Stage 4 of fit_scales, on the work set: one solvent scale per bin.
+    d_min_bins and s2_bins are each bin's high-resolution edge (A) and mean
+    s^2, over every reflection in it. Returns (k_mask_bins, log_k_bins),
+    both detached. A bin with no work reflections (possible with many
+    equal-count bins on little data) keeps its stage-3 scale and starts the
+    solvent at the exponential's value at the bin centre."""
+    dtype, device = s2.dtype, s2.device
+    u = [p.detach() for p in u_params]
+    in_bin = [b == i for i in range(n_bins)]
+    with torch.no_grad():
+        km0 = k_sol * torch.exp(-0.25 * b_sol * s2)
+        km = torch.stack([
+            km0[sel].mean() if bool(sel.any())
+            else k_sol * torch.exp(-0.25 * b_sol * s2_bins[i])
+            for i, sel in enumerate(in_bin)])
+
+    def solve(active, km_start, lk_start):
+        km_p = km_start.clone().requires_grad_(True)
+        lk_p = lk_start.clone().requires_grad_(True)
+        opt = torch.optim.LBFGS([km_p, lk_p], max_iter=300,
+                                line_search_fn="strong_wolfe",
+                                tolerance_grad=1e-10, tolerance_change=1e-12)
+
+        def closure():
+            opt.zero_grad()
+            km_eff = torch.where(active, km_p, torch.zeros_like(km_p))
+            F_c = Fp + km_eff[b].to(Fp.dtype) * Fm
+            model = _scaled_amplitudes(F_c, s2, s, lk_p[b], u, aniso)
+            loss = ((Fo - model) ** 2).sum()
+            loss.backward()
+            return loss
+        opt.step(closure)
+        return km_p.detach(), lk_p.detach()
+
+    active = torch.ones(n_bins, dtype=torch.bool, device=device)
+    km, lk = solve(active, km, log_k_bins)
+    km = solvent_curve_rule(km, d_min_bins)
+    # Second pass: every bin before the cut stays free, including one the
+    # first pass clamped to zero above 3 A, so that it can come back positive
+    # once its neighbours are regularised (mmtbx's grid allows the same);
+    # bins beyond the cut are held at zero.
+    cut = solvent_cut_index(km, d_min_bins)
+    active = torch.arange(n_bins, device=device) < cut
+    if cut > 0:
+        km, lk = solve(active, km, lk)
+        km = solvent_curve_rule(torch.where(active, km, torch.zeros_like(km)), d_min_bins)
+    # Bin scales in closed form with the curve fixed: exactly linear per bin.
+    with torch.no_grad():
+        F_c = Fp + km[b].to(Fp.dtype) * Fm
+        zero = torch.zeros((), dtype=dtype, device=device)
+        g = _scaled_amplitudes(F_c, s2, s, zero, u, aniso)
+        lk = torch.stack([optimal_log_k(Fo[sel], g[sel]) if bool(sel.any())
+                          else lk[i] for i, sel in enumerate(in_bin)])
+    return km, lk
 
 
 def model_amplitudes(fit, F_protein, F_mask, inv_d2, s_cart):
     with torch.no_grad():
-        F_c = _f_calc(F_protein, F_mask if fit["fit_solvent"] else None,
-                      inv_d2, fit["k_sol"], fit["b_sol"])
+        F_c = F_protein
+        if fit["fit_solvent"] and F_mask is not None:
+            F_c = F_c + solvent_weight(fit, inv_d2).to(F_protein.dtype) * F_mask
         log_k = fit["log_k"]
         if fit.get("log_k_bins") is not None:
             log_k = fit["log_k_bins"][fit["bins"]]
@@ -1004,8 +1227,9 @@ def shell_table(d, F_obs, model_no_solvent, model_solvent, work, free,
     """R by resolution shell, lowest resolution first.
 
     THE LAST COLUMN IS THE ONE THAT SAYS WHERE THE SOLVENT ACTS. It is
-    |k_sol exp(-b_sol s^2/4) F_mask| / |F_protein|, the size of the solvent
-    term itself, and it dies away by ~4 A as bulk solvent must.
+    |k_sol exp(-b_sol s^2/4) F_mask| / |F_protein| (|k_mask[bin] F_mask| /
+    |F_protein| for a per-bin solvent fit), the size of the solvent term
+    itself, and it dies away by ~4 A as bulk solvent must.
 
     Read it before reading dR, because dR alone is misleading here: the
     no-solvent column is not a clean baseline but a fit DISTORTED by the
@@ -1094,6 +1318,16 @@ def build_parser():
                         "everything printed from it unchanged. This is how "
                         "pdb_rfactor.py shows how much of a gap to mmtbx is "
                         "the scaling model. Default 0, off")
+    p.add_argument("--solvent-bins", default="auto", choices=["auto", "on", "off"],
+                   help="with scale bins, fit one solvent scale per bin "
+                        "(mmtbx's k_mask) instead of the single exponential "
+                        "k_sol exp(-b_sol s^2/4). 'auto' (default) turns it on "
+                        "for log bins only, which is also the only binning "
+                        "mmtbx does it on: equal-count bins put every "
+                        "reflection to about 3 A in ONE bin, and one flat "
+                        "solvent scale over that range is worse than the "
+                        "exponential (7FPV, 20 bins: R-free +0.0035). 'off' "
+                        "reproduces binned numbers recorded before 2026-11-10")
     p.add_argument("--no-expand-symmetry", action="store_true",
                    help="the model already contains every symmetry copy")
     p.add_argument("--no-special-position-weights", action="store_true",
@@ -1232,12 +1466,17 @@ def run(args):
     if bins is not None:
         print("overall scale per resolution bin: %s"
               % describe_bins(args.scale_bins, bins))
+
+    def per_bin_solvent(spec):
+        """The --solvent-bins rule: on for log bins unless told otherwise."""
+        return {"on": True, "off": False}.get(args.solvent_bins, spec == "log")
     print("no solvent:")
     fit0 = fit_scales(F_obs, F_protein, None, inv_d2, s_cart, work, args.aniso,
                       fit_solvent=False, bins=bins)
     print("with solvent:")
     fit1 = fit_scales(F_obs, F_protein, F_mask, inv_d2, s_cart, work, args.aniso,
-                      fit_solvent=True, bins=bins)
+                      fit_solvent=True, bins=bins,
+                      solvent_bins=per_bin_solvent(args.scale_bins))
 
     m0 = model_amplitudes(fit0, F_protein, None, inv_d2, s_cart)
     m1 = model_amplitudes(fit1, F_protein, F_mask, inv_d2, s_cart)
@@ -1271,7 +1510,8 @@ def run(args):
               "n_work": int(work.sum()), "n_free": int(free_np.sum()),
               "main_scale_bins": 0 if bins is None else int(bins.max()) + 1,
               "main_bin_scheme": (None if bins is None
-                                  else describe_bins(args.scale_bins, bins))}
+                                  else describe_bins(args.scale_bins, bins)),
+              "solvent_scheme": solvent_scheme(fit1)}
     for name, sel in (("R-work", work), ("R-free", free_np)):
         if sel.sum() < 2:
             result[name + " no solvent"] = result[name] = float("nan")
@@ -1287,9 +1527,14 @@ def run(args):
         # below: the single-scale fit stays the measure of the model.
         bins_b = assign_scale_bins(args.also_scale_bins, inv_d2, d_np)
         n = int(bins_b.max()) + 1
+        # fit_scales's own log defaults to the stdout bound at import, which
+        # redirect_stdout does not reach; hand it a sink explicitly so the
+        # curve is printed once, below, and not twice.
         with contextlib.redirect_stdout(io.StringIO()):
             fitb = fit_scales(F_obs, F_protein, F_mask, inv_d2, s_cart, work,
-                              args.aniso, fit_solvent=True, bins=bins_b)
+                              args.aniso, fit_solvent=True, bins=bins_b,
+                              solvent_bins=per_bin_solvent(args.also_scale_bins),
+                              log=io.StringIO())
         mb = model_amplitudes(fitb, F_protein, F_mask, inv_d2, s_cart)
         result.update({"scale_bins": n,
                        "bin_scheme": describe_bins(args.also_scale_bins,
@@ -1302,7 +1547,22 @@ def run(args):
             result[name + " binned"] = rb
         # The scheme on its own line, so that the line below keeps the format
         # log parsers written before log bins existed already match.
-        print("  binned row: %s" % result["bin_scheme"])
+        result["solvent_scheme binned"] = solvent_scheme(fitb)
+        print("  binned row: %s, solvent %s" % (result["bin_scheme"],
+                                                result["solvent_scheme binned"]))
+        kb = torch.exp(fitb["log_k_bins"])
+        print("  binned row scales (low to high resolution): %s"
+              % " ".join("%.2f" % float(v) for v in kb))
+        if fitb.get("k_mask_bins") is not None:
+            print("  solvent scale per bin (low to high resolution): %s"
+                  % " ".join("%.2f" % float(v) for v in fitb["k_mask_bins"]))
+            if fitb["n_refl_exp_fit"]:
+                print("  k_sol/b_sol below are the exponential closest to that curve "
+                      "over the %d reflections at d >= 4 A, as mmtbx reports them"
+                      % fitb["n_refl_exp_fit"])
+            else:
+                print("  fewer than 2 reflections at d >= 4 A: k_sol below is the "
+                      "curve's maximum and b_sol 0, not a fit")
         print("  with %d scale bins instead (--also-scale-bins): R-work %.4f, "
               "R-free %.4f, k_sol %.3f, b_sol %.1f"
               % (n, result["R-work binned"],
@@ -1310,8 +1570,10 @@ def run(args):
                  result["k_sol binned"], result["b_sol binned"]))
 
     with torch.no_grad():
-        contribution = (fit1["k_sol"] * torch.exp(-0.25 * fit1["b_sol"] * inv_d2)
-                        * F_mask.abs())
+        # solvent_weight, not k_sol/b_sol: for a per-bin fit those are the
+        # exponential nearest the curve, and the column must show the
+        # solvent the model applied.
+        contribution = solvent_weight(fit1, inv_d2) * F_mask.abs()
         solvent_share = (contribution / F_protein.abs()).cpu().numpy()
     shell_table(d_np, F_obs, m0, m1, work, free_np, args.shells, solvent_share)
 
@@ -1356,6 +1618,11 @@ def run(args):
         print("    k_overall above is the single-scale value it started from.")
         print("    The lowest bin overlaps the solvent term and absorbs part")
         print("    of it, which shrinks the no-solvent/with-solvent change.")
+        if result["solvent_scheme"] == "per bin":
+            print("  * The solvent scale is one value per bin as well (mmtbx's")
+            print("    k_mask); the k_sol/b_sol printed for this fit are the")
+            print("    exponential closest to that curve at d >= 4 A, as mmtbx")
+            print("    reports them. --solvent-bins off restores the exponential.")
     print("  * The fit is unweighted least squares on amplitudes.")
     if args.aniso:
         print("  * The off-diagonal B_cart components are unconstrained. In an")
