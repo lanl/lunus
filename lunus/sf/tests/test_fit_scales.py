@@ -469,3 +469,74 @@ def test_timed_accumulates_and_can_be_switched_off():
     assert lines[1].split() == ["density", "1.00"]
     assert lines[2].split() == ["fit", "0.50"]
     assert lines[-2].split() == ["other", "1.50"] and lines[-1].split() == ["total", "3.00"]
+
+
+def test_per_bin_solvent_scale_is_bounded_as_mmtbx_bounds_it(monkeypatch):
+    """Where the observed amplitudes look like the mask and nothing like the
+    protein, a free per-bin solvent scale runs away: the bin scale goes to
+    zero and the solvent stands in for the protein (4Y0B in the torchref1000
+    run reached 147). mmtbx's grid stops at 1.0, and so does the fit now.
+    The control, with the bound removed, shows the runaway is real."""
+    import io
+    F_obs, Fp, Fm, s2, s, work, bins, d = _synthetic_cliff(seed=4)
+    # a solvent scale that never reaches zero (so the curve rule's cut never
+    # fires, as on 4Y0B), and beyond 2.2 A 'observations' that are pure mask
+    damp = torch.exp(-0.25 * 10.0 * s2)
+    F_obs = damp * (Fp + 0.3 * Fm).abs()
+    hi = d < 2.2
+    F_obs = torch.where(hi, 3.0 * Fm.abs() * damp, F_obs)
+    fit = fsr.fit_scales(F_obs, Fp, Fm, s2, s, work, aniso=False, bins=bins,
+                         solvent_bins=True, log=io.StringIO())
+    km = fit["k_mask_bins"]
+    assert float(km.max()) <= 1.0 + 1e-12, (
+        "per-bin solvent scale ran away to %.3g; mmtbx's grid stops at 1.0" % float(km.max()))
+    assert (km >= 0).all()
+    assert fsr.SOLVENT_BIN_MAX == 1.0
+    with monkeypatch.context() as m:
+        m.setattr(fsr, "SOLVENT_BIN_MAX", None)
+        free = fsr.fit_scales(F_obs, Fp, Fm, s2, s, work, aniso=False, bins=bins,
+                              solvent_bins=True, log=io.StringIO())
+    assert float(free["k_mask_bins"].max()) > 2.0, free["k_mask_bins"]
+
+
+def test_bounded_per_bin_solve_keeps_a_small_positive_bin():
+    """A bin below 3 A whose solvent scale is small but positive (0.012)
+    must survive the solve above the 0.005 snap, so the curve rule's cut
+    does not fire there: a clamp inside an optimizer once let such a bin
+    overshoot below 0, come back as 0 and cut the curve (4Y0B). Each bin is
+    also recovered close to its true value."""
+    import io
+    F_obs, Fp, Fm, s2, s, work, bins, d = _synthetic_cliff(seed=5)
+    damp = torch.exp(-0.25 * 10.0 * s2)
+    k_true = torch.where(d >= 3.0, torch.tensor(0.3, dtype=s2.dtype), torch.tensor(0.012, dtype=s2.dtype))
+    F_obs = damp * (Fp + k_true * Fm).abs()
+    fit = fsr.fit_scales(F_obs, Fp, Fm, s2, s, work, aniso=False, bins=bins,
+                         solvent_bins=True, log=io.StringIO())
+    km = fit["k_mask_bins"]
+    n_bins = int(bins.max()) + 1
+    d_min_bins = [float(d[(bins == i).numpy()].min()) for i in range(n_bins)]
+    d_max_bins = [float(d[(bins == i).numpy()].max()) for i in range(n_bins)]
+    small = [i for i in range(n_bins) if d_max_bins[i] < 3.0]
+    assert small and all(float(km[i]) > 0.005 for i in small), km
+    assert fsr.solvent_cut_index(km.tolist(), d_min_bins) == n_bins
+    for i in small:
+        assert abs(float(km[i]) - 0.012) < 0.004, (i, float(km[i]))
+
+
+def test_bounded_solve_keeps_the_starting_value_of_an_empty_bin(monkeypatch):
+    """A bin with no work reflections keeps its starting solvent scale (the
+    exponential's at the bin centre) in the bounded solve, as the unbounded
+    one did, instead of coming out as 0 and firing the curve rule's cut."""
+    import io
+    F_obs, Fp, Fm, s2, s, work, bins, d = _synthetic_cliff(seed=6)
+    damp = torch.exp(-0.25 * 10.0 * s2)
+    F_obs = damp * (Fp + 0.3 * Fm).abs()
+    n_bins = int(bins.max()) + 1
+    target = n_bins - 2                       # a high-resolution bin, below 3 A
+    work = work & ~(bins == target).numpy()   # all its reflections to the free set
+    fit = fsr.fit_scales(F_obs, Fp, Fm, s2, s, work, aniso=False, bins=bins,
+                         solvent_bins=True, log=io.StringIO())
+    km = fit["k_mask_bins"]
+    assert float(km[target]) > 0.005, km
+    d_min_bins = [float(d[(bins == i).numpy()].min()) for i in range(n_bins)]
+    assert fsr.solvent_cut_index(km.tolist(), d_min_bins) > target
