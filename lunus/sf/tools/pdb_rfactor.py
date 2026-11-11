@@ -242,7 +242,10 @@ def main():
         occ.append("mmtbx mask %.4f" % r_mmtbx["mask_occupancy"])
     if occ:
         print("  mask occupancy: %s" % "; ".join(occ))
-    if r_torch.get("mask_source") == "atoms":
+    if r_torch.get("mask_source") == "spheres":
+        print("  mask source: soft spheres, edge %.2f A (--mask-source spheres)"
+              % r_torch["sphere_edge"])
+    elif r_torch.get("mask_source") == "atoms":
         print("  mask source: atom-presence field, unit weight at B = %.0f A^2 "
               "(--mask-source atoms)" % r_torch["mask_source_b"])
     elif r_torch.get("mask_source") == "density":

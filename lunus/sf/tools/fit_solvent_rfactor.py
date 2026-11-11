@@ -83,7 +83,16 @@ too large (7FPV at 3 A: occupancy 0.19, R-free 0.1895, against 0.26 and
 0.1634 on 0.7 A voxels). Beyond ~2.1 A run --mask gemmi with --max-voxel 0.7;
 the run warns when the voxels are no finer than the shrink radius.
 
---mask-source atoms|density is what the threshold is cut from (2026-11-10).
+--mask-source spheres|atoms|density is what the threshold is cut from. The
+default since 2026-11-10 is SPHERES: every atom a flat-top soft sphere of
+half its OPLS united-atom Lennard-Jones sigma (lunus.sf.mask_spheres), with
+no further smoothing; on the benchmark it reaches gemmi's geometric mask at
+2.6-3.0 A (median binned R-free gap to mmtbx -0.0003, against +0.0046 for
+the atom-presence field and -0.0015 for gemmi) and beats the field at 1.8-
+2.6 A (-0.0017 against +0.0017) and on SW40 (-0.0018 against -0.0005, 38 of
+39 better); see docs/solvent-design.md, "Soft spheres of the Lennard-Jones
+radius". The rest of this paragraph is the atoms source, the default for
+part of the same day.
 The default, atoms, is an ATOM-PRESENCE FIELD: every atom placed as a
 unit-weight Gaussian at one B (--mask-source-b, default 20 A^2), from the
 same coordinates, blur and symmetry expansion as the density, so the mask no
@@ -1782,12 +1791,25 @@ def build_parser():
                         "F_protein is corrected for, so sharp atoms do not "
                         "alias on the grid. auto (default): "
                         "cell_utils.recommended_blur, as xtraj; 0 disables it")
-    p.add_argument("--mask-source", default="atoms", choices=["atoms", "density"],
-                   help="what the threshold mask is cut from: 'atoms' (default "
-                        "since 2026-11-10), an atom-presence field in which every "
-                        "atom is a unit-weight Gaussian at --mask-source-b, or "
-                        "'density', the electron density itself, as every run "
-                        "before. See solvent_torch.mask_source_weights")
+    p.add_argument("--mask-source", default="spheres", choices=["spheres", "atoms", "density"],
+                   help="what the threshold mask is cut from: 'spheres' (default "
+                        "since 2026-11-10), a flat-top soft sphere per atom of half "
+                        "its Lennard-Jones sigma (lunus.sf.mask_spheres: OPLS "
+                        "united-atom radii by residue and atom name, element "
+                        "fallback), with no further smoothing unless --mask-blur "
+                        "is given; 'atoms', an atom-presence field in which every "
+                        "atom is a unit-weight Gaussian at --mask-source-b (the "
+                        "default for part of 2026-11-10); or 'density', the "
+                        "electron density itself, as every run before")
+    p.add_argument("--sphere-edge", type=positive_float_arg("--sphere-edge"), default=None,
+                   metavar="W", help="edge width of the soft spheres, A (default 0.5)")
+    p.add_argument("--sphere-offset", type=float, default=0.0, metavar="A",
+                   help="added to every sphere's radius (sigma/2 + offset); the "
+                        "geometric mask's probe-minus-shrink, swept (default 0)")
+    p.add_argument("--sphere-radii", default="ua", choices=["ua", "element"],
+                   help="'ua': OPLS united-atom Lennard-Jones radii (sigma/2) by residue "
+                        "and atom name; 'element': the element fallback for every "
+                        "atom (to separate the typing from the shape)")
     p.add_argument("--mask-source-b", type=positive_float_arg("--mask-source-b"),
                    default=SOURCE_B_DEFAULT, metavar="B",
                    help="the B every atom is placed with in the 'atoms' mask "
@@ -1797,9 +1819,9 @@ def build_parser():
                         "better on SW40" % SOURCE_B_DEFAULT)
     p.add_argument("--mask-blur", type=float, default=None, metavar="B",
                    help="smooth the mask's source by exp(-B s^2/4) before "
-                        "thresholding; the threshold mask's probe radius "
-                        "(default: SolventModel's own, so the tool reports "
-                        "the shipped configuration; 0 disables it)")
+                        "thresholding (default: 0 for --mask-source spheres, "
+                        "whose soft edge is the smoothing; SolventModel's own "
+                        "100 A^2 for atoms and density)")
     p.add_argument("--aniso-adp", action="store_true",
                    help="use each atom's ANISOTROPIC DISPLACEMENT PARAMETER "
                         "instead of its isotropic equivalent. Distinct from "
@@ -1872,7 +1894,8 @@ def run(args):
         mask_occupancy, mask_source_weights, shell_voxels, solvent_mask,
     )
     if args.mask_blur is None:
-        args.mask_blur = MASK_BLUR_DEFAULT
+        # the sphere field's 0.5 A edge is all the smoothing it wants
+        args.mask_blur = 0.0 if args.mask_source == "spheres" else MASK_BLUR_DEFAULT
     from lunus.sf.structure_factor_torch import compute_fcalc, reciprocal_inv_d2
     from lunus.sf.symmetry_torch import adjust_grid_for_symmetry
 
@@ -1946,6 +1969,10 @@ def run(args):
     # --mask gemmi thresholds nothing, so no field is placed for it.
     mask_density = density
     mask_source = args.mask_source if args.mask != "gemmi" else "none (--mask gemmi)"
+    # the B already placed into the mask's field: the protein blur, except
+    # for the sphere field, which is placed without it
+    source_blur = blur
+    sphere_edge = None
     if args.mask == "gemmi":
         print("mask source: none (--mask gemmi uses that mask as it is)")
     elif args.mask_source == "atoms":
@@ -1961,6 +1988,32 @@ def run(args):
                 cutoff=args.density_cutoff, blur=blur, log=io.StringIO())
         print("mask source: atom-presence field, %d atoms of unit weight at "
               "B = %.1f A^2 (--mask-source atoms)" % (len(elements), args.mask_source_b))
+    elif mask_source == "spheres":
+        from lunus.sf import mask_spheres
+        from lunus.sf.density_torch import compute_density
+        from lunus.sf.symmetry_torch import build_grid_ops_from_cctbx, symmetrize_sum
+
+        labels = [sc.label for sc in xrs.scatterers()]
+        radii = mask_spheres.sphere_radii(labels, elements, offset=args.sphere_offset,
+                                          by_element=args.sphere_radii == "element")
+        sphere_edge = (args.sphere_edge if args.sphere_edge is not None
+                       else mask_spheres.EDGE_WIDTH_DEFAULT)
+        source_blur = 0.0
+        with timed(timing, "mask source field", device):
+            sA, slam, soff, srad, staper, sidx = mask_spheres.sphere_kernels(
+                radii, grid, orth.cpu().numpy(), width=sphere_edge, device=device, dtype=dtype)
+            mask_density = compute_density(
+                torch.tensor(np.asarray(frac), dtype=dtype, device=device), sidx,
+                torch.tensor(np.asarray(occ), dtype=dtype, device=device),
+                sA, slam, soff, srad, grid, orth, staper, compile_core=False)
+            if not args.no_expand_symmetry:
+                mask_density = symmetrize_sum(
+                    mask_density, build_grid_ops_from_cctbx(xrs.space_group(), grid))
+        vals, counts = np.unique(np.round(radii, 3), return_counts=True)
+        print("mask source: soft spheres (--mask-source spheres, %s radii, offset %.2f, "
+              "edge %.2f A): %d atoms, radii %s"
+              % (args.sphere_radii, args.sphere_offset, sphere_edge, len(radii),
+                 ", ".join("%.2f A x%d" % (v, c) for v, c in zip(vals, counts))))
     else:
         print("mask source: the electron density (--mask-source density)")
 
@@ -2052,15 +2105,21 @@ def run(args):
             # is applied: the mask the fit sees is the shipped one up to
             # the aliasing the protein blur removes. Nothing here can
             # sharpen a density placed with more than --mask-blur.
-            mask_blur = max(args.mask_blur - blur, 0.0)
-            source = blur_density(mask_density, orth, mask_blur)
-            if blur > args.mask_blur:
+            # the sphere field is placed without the protein blur, so it
+            # takes the whole --mask-blur (source_blur 0)
+            source = blur_density(mask_density, orth,
+                                  max(args.mask_blur - source_blur, 0.0))
+            if source_blur > args.mask_blur:
                 warnings.warn(
                     "the protein blur (%.1f A^2) exceeds --mask-blur (%.1f), "
                     "so the mask is smoother than asked for; lower "
                     "--protein-blur or accept the wider effective probe"
                     % (blur, args.mask_blur), SolventMaskWarning, stacklevel=2)
-            if args.mask_blur:
+            if mask_source == "spheres":
+                if args.mask_blur:
+                    print("  sphere field smoothed by B = %.1f A^2 before "
+                          "thresholding (it carries no protein blur)" % args.mask_blur)
+            elif args.mask_blur:
                 sigma = np.sqrt(args.mask_blur / (8.0 * np.pi ** 2))
                 if blur <= 0.0:
                     already = ""
@@ -2083,7 +2142,8 @@ def run(args):
         cutoff = float(cutoff)
         print("  threshold mask calibrated to it: cutoff %.4g %s "
               "(%.3f of peak %.3f)"
-              % (cutoff, "atoms/A^3" if args.mask_source == "atoms" else "e/A^3",
+              % (cutoff, {"atoms": "atoms/A^3", "spheres": "sphere overlaps"}.get(
+                     args.mask_source, "e/A^3"),
                  cutoff / float(source.max()), float(source.max())))
         print("  occupancy %.4f, taper shell %d voxels (%.2f%% of the grid)"
               % (occupancy, shell, 100.0 * shell / np.prod(grid)))
@@ -2156,6 +2216,7 @@ def run(args):
               "target_occupancy": float(target),
               "mask_source": mask_source,
               "mask_source_b": float(args.mask_source_b) if mask_source == "atoms" else None,
+              "sphere_edge": sphere_edge,
               "target_source": target_source,
               "target_spacing": args.target_spacing,
               "gemmi_occupancy_working_grid": float(occ_working),

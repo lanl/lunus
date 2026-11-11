@@ -1218,3 +1218,38 @@ def test_atom_presence_source_in_the_batch_path():
     assert not torch.allclose(F_rows[1], F[1])
     with pytest.raises(ValueError):
         structure_factors_batch(*args, mask_occ=torch.ones(3, 7), **kw)
+
+
+def test_sphere_source_through_the_pipeline():
+    """SolventModel(spheres=True) with mask_spheres.sphere_kernels as
+    mask_kernels: the mask is thresholded from the sphere field placed
+    from the same coordinates, the pipeline blur is not subtracted from it,
+    the model and the pipeline refuse to run without it, and it is
+    exclusive with source_b."""
+    from lunus.sf import mask_spheres
+    from lunus.sf.solvent_torch import SolventModel
+
+    sys = _system(seed=7)
+    radii = [0.5 * mask_spheres.SIGMA_UA["C"]] * len(sys["occ"])
+    kernels = mask_spheres.sphere_kernels(radii, GRID, orth_matrix(*CELL), dtype=DTYPE)
+    source = compute_density(sys["frac"], kernels[5], sys["occ"], *kernels[:4],
+                             sys["grid_shape"], sys["orth"], kernels[4], compile_core=False)
+    model = SolventModel(cutoff=1.0, taper_width=0.5, check_occupancy=False,
+                         mask_blur=0.0, spheres=True)
+    model.calibrate(_density(sys), sys["orth"], 0.9, source=source)
+    F = _sf(sys, solvent=model, mask_kernels=kernels)
+    F_hand, mask = model.apply(_density(sys), _sf(sys), sys["cell_volume"], sys["hkl"],
+                               sys["orth"], source=source)
+    assert torch.allclose(F, F_hand)
+    assert abs(float(mask.mean()) - 0.9) < 3e-3
+    # a pipeline blur does not leak into the sphere mask
+    assert torch.equal(model.mask_source(_density(sys), sys["orth"], 40.0, source=source),
+                       model.mask_source(_density(sys), sys["orth"], 0.0, source=source))
+    with pytest.raises(ValueError):
+        model.build_mask(_density(sys), sys["orth"])
+    with pytest.raises(ValueError):
+        _sf(sys, solvent=model)
+    with pytest.raises(ValueError):
+        _sf(sys, solvent=model, mask_kernels=kernels[:5])
+    with pytest.raises(ValueError):
+        SolventModel(cutoff=1.0, taper_width=0.5, source_b=20.0, spheres=True)

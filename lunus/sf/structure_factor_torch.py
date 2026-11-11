@@ -110,10 +110,20 @@ def structure_factors_one_config(
     occupancies times solvent_torch.mask_source_weights(). The field is placed
     from the same coordinates, symmetry-expanded and folded exactly like the
     density, and the mask is thresholded from it instead; F_protein is
-    untouched. Required when solvent.source_b is not None, ignored otherwise."""
+    untouched. Required when solvent.source_b is not None, ignored otherwise.
+
+    With solvent.spheres, mask_kernels is the 6-tuple mask_spheres.
+    sphere_kernels() returns (its last entry the field's own element index,
+    all zeros, since the sphere kernels are grouped by radius rather than
+    element) and mask_occ is the plain occupancies."""
     from .density_torch import compute_density
     from .symmetry_torch import fold_supercell, symmetrize_sum
 
+    uses_field = solvent is not None and (solvent.source_b is not None or solvent.spheres)
+    if solvent is not None and solvent.spheres and (mask_kernels is None or len(mask_kernels) != 6):
+        raise ValueError(
+            "solvent.spheres is set, so mask_kernels= must be the 6-tuple "
+            "mask_spheres.sphere_kernels() returns")
     if solvent is not None and solvent.source_b is not None and (
             mask_kernels is None or mask_occ is None):
         # both, not either: the kernels alone would place the field with the
@@ -148,10 +158,11 @@ def structure_factors_one_config(
         max_atoms_per_batch=max_atoms_per_batch, compile_core=compile_core,
     )
     source = None
-    if solvent is not None and solvent.source_b is not None:
-        m_A, m_lam, m_offsets, m_radius, m_taper = mask_kernels
+    if uses_field:
+        m_A, m_lam, m_offsets, m_radius, m_taper = mask_kernels[:5]
+        m_idx = mask_kernels[5] if len(mask_kernels) == 6 else element_idx
         source = compute_density(
-            dens_frac, element_idx, mask_occ,
+            dens_frac, m_idx, occ if mask_occ is None else mask_occ,
             m_A, m_lam, m_offsets, m_radius,
             dens_grid, dens_orth, m_taper,
             max_atoms_per_batch=max_atoms_per_batch, compile_core=compile_core,

@@ -446,8 +446,9 @@ class SolventModel:
       u_aniso       (3,3) anisotropic scaling tensor, or None
       mask_blur     B in A^2 smoothing the density before it is thresholded --
                     this model's probe radius, see the module docstring.
-                    Defaults to MASK_BLUR_DEFAULT (sigma 1.13 A); 0.0 restores
-                    the unsmoothed threshold and does NOT reproduce
+                    Defaults to MASK_BLUR_DEFAULT (sigma 1.13 A), or to 0.0
+                    with spheres=True; 0.0 on the density restores the
+                    unsmoothed threshold and does NOT reproduce
                     conventional solvent scales on real data.
       detach_mask   build the mask from a detached copy of the density
                     (default FALSE). False is the consistent choice: the
@@ -463,6 +464,16 @@ class SolventModel:
                     Phenix and REFMAC do per macro-cycle. That model is the
                     better long-term design and is not implementable here yet,
                     because nothing can pin a mask across calls.
+      spheres       False (default). True: the caller places a soft-sphere
+                    field for the mask (lunus.sf.mask_spheres: every atom a
+                    flat-top sphere of half its Lennard-Jones sigma, edge
+                    0.5 A) and hands it in as `source`; it is placed WITHOUT
+                    the pipeline blur, so pipeline_blur is not subtracted
+                    from mask_blur, and mask_blur defaults to 0 (its own edge
+                    is all the smoothing it wants: 25 A^2 more cost 0.003).
+                    On the R-factor benchmark it beat the atom-presence field
+                    at every resolution; see docs/solvent-design.md. Exclusive
+                    with source_b.
       source_b      None (default): the mask is thresholded from the electron
                     density itself. A number: the caller places a SECOND field
                     for the mask, every atom a unit-weight Gaussian at this B
@@ -484,18 +495,21 @@ class SolventModel:
 
     __slots__ = ("cutoff", "taper_width", "k_sol", "b_sol", "k_overall",
                  "u_aniso", "detach_mask", "check_occupancy",
-                 "density_scale", "mask_blur", "source_b", "last_occupancy",
+                 "density_scale", "mask_blur", "source_b", "spheres", "last_occupancy",
                  "last_shell_voxels", "_inv_d2_grid", "_inv_d2_key",
                  "_warned_blur")
 
     def __init__(self, cutoff, taper_width, k_sol=K_SOL_DEFAULT,
                  b_sol=B_SOL_DEFAULT, k_overall=1.0, u_aniso=None,
                  detach_mask=False, check_occupancy=True, density_scale=1.0,
-                 mask_blur=MASK_BLUR_DEFAULT, source_b=None):
+                 mask_blur=None, source_b=None, spheres=False):
         if taper_width <= 0:
             raise ValueError(
                 "taper_width must be > 0; a hard threshold has no usable "
                 "gradient (that is the whole reason for the taper)")
+        if mask_blur is None:
+            # the sphere field's own soft edge is all the smoothing it wants
+            mask_blur = 0.0 if spheres else MASK_BLUR_DEFAULT
         if mask_blur < 0:
             raise ValueError("mask_blur must be >= 0 A^2; a negative B "
                              "sharpens the density and amplifies exactly the "
@@ -513,6 +527,10 @@ class SolventModel:
         if source_b is not None and source_b <= 0:
             raise ValueError("source_b must be > 0 A^2 or None")
         self.source_b = source_b
+        if spheres and source_b is not None:
+            raise ValueError("spheres and source_b are two different mask "
+                             "sources; set one")
+        self.spheres = bool(spheres)
         self.last_occupancy = None
         self.last_shell_voxels = None
         self._inv_d2_grid = None
@@ -556,13 +574,17 @@ class SolventModel:
         on 7FPV, that misses the requested occupancy by more than a third.
         calibrate() below does this correctly; anything hand-rolled must too.
         """
-        if source is None and self.source_b is not None:
+        if source is None and (self.source_b is not None or self.spheres):
             raise ValueError(
-                "SolventModel.source_b is set, so the mask expects the "
-                "atom-presence field as `source`; structure_factors_one_config "
-                "builds it from mask_kernels= (see mask_source_weights)")
+                "SolventModel.%s is set, so the mask expects its field as "
+                "`source`; structure_factors_one_config builds it from "
+                "mask_kernels= (see %s)"
+                % (("spheres", "mask_spheres.sphere_kernels") if self.spheres
+                   else ("source_b", "mask_source_weights")))
         field = density if source is None else source
         rho = field.detach() if self.detach_mask else field
+        if self.spheres:
+            pipeline_blur = 0.0             # the sphere field carries none
         remaining = self.mask_blur - pipeline_blur
         if remaining <= 0.0:
             if pipeline_blur > self.mask_blur and not self._warned_blur:
@@ -658,11 +680,11 @@ class SolventModel:
 
     def __repr__(self):
         return ("SolventModel(cutoff=%r, taper_width=%r, k_sol=%r, b_sol=%r, "
-                "k_overall=%r, u_aniso=%s, detach_mask=%r, source_b=%r, "
+                "k_overall=%r, u_aniso=%s, detach_mask=%r, source_b=%r, spheres=%r, "
                 "occupancy=%s)"
                 % (self.cutoff, self.taper_width, self.k_sol, self.b_sol,
                    self.k_overall,
                    "None" if self.u_aniso is None else "set", self.detach_mask,
-                   self.source_b,
+                   self.source_b, self.spheres,
                    "unmeasured" if self.last_occupancy is None
                    else "%.4f" % self.last_occupancy))
