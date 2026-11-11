@@ -69,15 +69,18 @@ def test_passthrough_reaches_the_torch_parser():
         (2.0, True, "gemmi", 4)
 
 
-def test_binned_row_is_extra_and_off_in_the_torch_tool_by_default():
-    """pdb_rfactor asks run() for the binned fit with --also-scale-bins, which
-    must leave the main fit single-scale; fit_solvent_rfactor itself bins
-    nothing unless told to."""
+def test_binned_row_is_extra_and_on_in_the_torch_tool_by_default():
+    """The binned fit (--also-scale-bins) is an extra row that leaves the
+    main fit single-scale. Since 2026-11-11 fit_solvent_rfactor runs it on
+    mmtbx's log bins by default, as pdb_rfactor already asked it to, because
+    it is the model --write-mtz writes; 0 turns it off."""
     import fit_solvent_rfactor
 
     parse = fit_solvent_rfactor.build_parser().parse_args
     plain = parse(["m.pdb", "m-sf.cif"])
-    assert (plain.scale_bins, plain.also_scale_bins) == (0, 0)
+    assert (plain.scale_bins, plain.also_scale_bins) == (0, "log")
+    off = parse(["m.pdb", "m-sf.cif", "--also-scale-bins", "0"])
+    assert (off.scale_bins, off.also_scale_bins) == (0, 0)
     extra = parse(["m.pdb", "m-sf.cif", "--also-scale-bins", "20"])
     assert (extra.scale_bins, extra.also_scale_bins) == (0, 20)
     # 'log' (mmtbx's own bins) likewise leaves the main fit single-scale.
@@ -257,7 +260,8 @@ def test_main_forwards_the_default_binned_row(monkeypatch, capsys):
     monkeypatch.setattr(pdb_rfactor, "fetch_entry",
                         lambda *a, **k: ("m.pdb", "m-sf.cif"))
     monkeypatch.setattr(pdb_rfactor.fit_solvent_rfactor, "run", fake_run)
-    for extra, expected in (([], "log"), (["--binned-row", "20"], 20)):
+    for extra, expected in (([], "log"), (["--binned-row", "20"], 20),
+                            (["--binned-row", "0"], 0)):
         monkeypatch.setattr(sys, "argv",
                             ["pdb_rfactor.py", "7FPV", "--method", "torch"] + extra)
         pdb_rfactor.main()
@@ -609,8 +613,16 @@ def test_status_column_with_wavelength_id_is_still_the_free_set(tmp_path):
 
     cs = crystal.symmetry(unit_cell=(30, 36, 42, 90, 90, 90), space_group_symbol="P 1")
     log = io.StringIO()
-    F, free = fit_solvent_rfactor.read_observations(str(path), crystal_symmetry=cs, log=log)
+    info = {}
+    F, free = fit_solvent_rfactor.read_observations(str(path), crystal_symmetry=cs, log=log,
+                                                    info=info)
     assert "no R-free flags found" not in log.getvalue()
+    # the status letters come back in the CCP4 convention: test set 0, work
+    # bins 1..N-1, which CCP4 programs and iotbx's scorer read alike
+    flags, test_value = info["free_flags"]
+    assert test_value == 0 and flags.indices().all_eq(F.indices())
+    values = np.array(flags.data())
+    assert ((values == 0) == free).all() and values[~free].min() >= 1
     assert int(free.sum()) == n_free_expected and n_free_expected > 0
     assert F.size() == len(hkl) - n_zero
     assert "%d amplitude(s) deposited as exactly zero dropped" % n_zero in log.getvalue()
@@ -1373,3 +1385,483 @@ def test_default_mask_level_calibrates_hydrogens_and_offdefault_fields(tmp_path)
         r = fit(pdb, mtz, *extra)
         assert r["mask_level"] is None and name in r["mask_level_rule"], r["mask_level_rule"]
     assert fit(pdb, mtz)["mask_level"] == 1.0
+
+
+def read_mtz_columns(path):
+    """{label: numpy column} and the history of an MTZ, through gemmi, so
+    the round trip does not read back through the cctbx writer's own code."""
+    import gemmi
+    import numpy as np
+
+    mtz = gemmi.read_mtz_file(str(path))
+    cols = {c.label: np.array(c, copy=True) for c in mtz.columns}
+    return cols, list(mtz.history), mtz
+
+
+def write_mtz_7fpv(tmp_path, *extra):
+    import contextlib
+    import io
+
+    import fit_solvent_rfactor
+
+    out = tmp_path / "model.mtz"
+    args = fit_solvent_rfactor.build_parser().parse_args(
+        [os.path.join(COMPARE, "7FPV.pdb"), os.path.join(COMPARE, "7FPV-sf.cif"),
+         "--d-min", "3.0", "--aniso", "--shells", "3", "--write-mtz", str(out)]
+        + list(extra))
+    with contextlib.redirect_stdout(io.StringIO()) as text:
+        r = fit_solvent_rfactor.run(args)
+    return out, r, text.getvalue()
+
+
+def observations_7fpv():
+    """The fit's own observations and the flags as read, keyed by index,
+    and every flag the file has ({index: flag}), fitted or not."""
+    import contextlib
+    import io
+
+    import iotbx.pdb
+    import numpy as np
+
+    import fit_solvent_rfactor
+
+    xrs = iotbx.pdb.input(os.path.join(COMPARE, "7FPV.pdb")).xray_structure_simple()
+    info = {}
+    with contextlib.redirect_stdout(io.StringIO()):
+        F, free = fit_solvent_rfactor.read_observations(
+            os.path.join(COMPARE, "7FPV-sf.cif"), d_min=3.0,
+            crystal_symmetry=xrs.crystal_symmetry(), log=io.StringIO(), info=info)
+    flags, test_value = info["free_flags"]
+    hkl = [tuple(h) for h in F.indices()]
+    file_flags = {tuple(h): int(v) for h, v in zip(info["free_flags_file"].indices(),
+                                                   info["free_flags_file"].data())}
+    return ({h: i for i, h in enumerate(hkl)}, np.array(F.data()), np.array(F.sigmas()),
+            free, np.array(flags.data()), test_value, file_flags)
+
+
+def model_as_components(cols, model="FP", phase="PHIC"):
+    """F_model = a F_protein + b F_mask with a, b real, solved per reflection
+    from the written columns (two real equations each). Returns a, b and
+    where the solve is well conditioned: F_protein and F_mask not nearly
+    parallel."""
+    import numpy as np
+
+    def c(amp, ph):
+        return amp.astype(float) * np.exp(1j * np.radians(ph.astype(float)))
+
+    Fmod, Fp, Fm = (c(cols[model], cols[phase]), c(cols["FPROTEIN"], cols["PHIFPROTEIN"]),
+                    c(cols["FMASK"], cols["PHIFMASK"]))
+    det = Fp.real * Fm.imag - Fp.imag * Fm.real
+    with np.errstate(divide="ignore", invalid="ignore"):
+        a = (Fmod.real * Fm.imag - Fmod.imag * Fm.real) / det
+        b = (Fp.real * Fmod.imag - Fp.imag * Fmod.real) / det
+    ok = np.abs(det) > 1e-3 * np.abs(Fp) * np.abs(Fm)
+    return a, b, ok
+
+
+@requires_cctbx
+def test_write_mtz_round_trip_on_7fpv(tmp_path):
+    """--write-mtz writes the binned row's model as FP/SIGFP/FreeR_flag/PHIC
+    on exactly the fitted reflections: read back, FP against Fobs gives the
+    reported binned R-work and R-free, SIGFP is the observed sigma, the flags
+    are the ones the fit used (7FPV's _refln.status letters, written in the
+    CCP4 convention with 0 the test set), and PHIC with the unscaled components
+    is F_model = k (F_protein + k_mask F_mask) with k > 0 and one k_mask per
+    log bin."""
+    import numpy as np
+
+    import fit_solvent_rfactor
+
+    out, r, text = write_mtz_7fpv(tmp_path, "--mtz-components", "--mtz-observed")
+    assert "wrote %s: binned row" % out in text
+    cols, history, _ = read_mtz_columns(out)
+    assert set(cols) == {"H", "K", "L", "FP", "SIGFP", "PHIC", "FreeR_flag", "FPROTEIN",
+                         "PHIFPROTEIN", "FMASK", "PHIFMASK", "FOBS", "SIGFOBS"}
+    where, fobs, sig, free, flags, test_value, _ = observations_7fpv()
+    hkl = [tuple(int(v) for v in row) for row in zip(cols["H"], cols["K"], cols["L"])]
+    assert sorted(hkl) == sorted(where)                 # exactly the fitted reflections
+    order = np.array([where[h] for h in hkl])
+    fo, so, fr, fl = fobs[order], sig[order], free[order], flags[order]
+    fp = cols["FP"]
+    assert np.allclose(cols["FOBS"], fo) and np.allclose(cols["SIGFOBS"], so)
+    assert np.allclose(cols["SIGFP"], so, rtol=1e-6)
+    assert (cols["FreeR_flag"].astype(int) == fl).all()
+    assert (fr == (fl == test_value)).all() and test_value == 0
+    for sel, key in ((~fr, "R-work binned"), (fr, "R-free binned")):
+        R = np.abs(fp[sel] - fo[sel]).sum() / fo[sel].sum()
+        assert abs(R - r[key]) < 2e-5, (key, R, r[key])
+    assert any("model binned row" in line for line in history)
+    assert any("R-work %.4f  R-free %.4f" % (r["R-work binned"], r["R-free binned"]) in line
+               for line in history)
+
+    a, b, ok = model_as_components(cols)
+    # well conditioned where F_protein and F_mask are not nearly parallel
+    # (77% of 7FPV's reflections at 3 A)
+    assert ok.mean() > 0.5 and (a[ok] > 0).all()
+    from cctbx import crystal, miller
+    from cctbx.array_family import flex
+
+    _, _, mtz = read_mtz_columns(out)
+    cs = crystal.symmetry(unit_cell=mtz.cell.parameters, space_group_symbol=mtz.spacegroup.hm)
+    d = np.array(miller.set(cs, flex.miller_index(hkl), False).d_spacings().data())
+    bins = fit_solvent_rfactor.log_resolution_bins(d).cpu().numpy()
+    with np.errstate(divide="ignore", invalid="ignore"):
+        w = b / a
+    medians = []
+    for k in np.unique(bins):
+        sel = ok & (bins == k)
+        assert sel.sum() >= 10, k
+        # constant to the precision the single-precision columns allow once
+        # the 2x2 solve amplifies it; neighbouring bins differ by 0.01-0.1
+        medians.append(np.median(w[sel]))
+        assert np.abs(w[sel] - medians[-1]).max() < 1e-3, (k, np.abs(w[sel] - medians[-1]).max())
+    assert np.min(np.abs(np.diff(medians))) > 5e-3
+
+
+@requires_cctbx
+def test_write_mtz_complete_set_keeps_every_observed_flag(tmp_path):
+    """--mtz-complete adds FMODEL/PHIFMODEL on every reflection to d_min and
+    extends FreeR_flag to the unmeasured ones at the observed fraction, in
+    the file's own convention, without changing a measured reflection's flag;
+    FP/SIGFP stay on the measured reflections and FMODEL equals FP there."""
+    import numpy as np
+
+    out, r, text = write_mtz_7fpv(tmp_path, "--mtz-complete")
+    cols, history, mtz = read_mtz_columns(out)
+    assert {"FMODEL", "PHIFMODEL", "FP", "SIGFP", "PHIC", "FreeR_flag"} <= set(cols)
+    where, fobs, sig, free, flags, test_value, file_flags = observations_7fpv()
+    hkl = [tuple(int(v) for v in row) for row in zip(cols["H"], cols["K"], cols["L"])]
+    measured = np.array([h in where for h in hkl])
+    import gemmi
+    full = gemmi.make_miller_array(mtz.cell, mtz.spacegroup, 3.0 - 1e-6)
+    assert len(hkl) == len(full) > measured.sum() == len(where)
+    assert np.isfinite(cols["FMODEL"]).all() and not np.isnan(cols["FreeR_flag"]).any()
+    assert np.isnan(cols["FP"][~measured]).all() and np.isfinite(cols["FP"][measured]).all()
+    order = np.array([where[h] for h, m in zip(hkl, measured) if m])
+    assert (cols["FreeR_flag"][measured].astype(int) == flags[order]).all()
+    new = cols["FreeR_flag"][~measured].astype(int)
+    assert set(new.tolist()) <= set(flags.tolist())
+    assert np.allclose(cols["FMODEL"][measured], cols["FP"][measured])
+    assert np.allclose(np.cos(np.radians(cols["PHIFMODEL"][measured] - cols["PHIC"][measured])), 1.0)
+    # every reflection the file flags keeps its deposited flag, fitted or not
+    # (French-Wilson rejections included), in the convention written
+    in_file = [i for i, h in enumerate(hkl) if h in file_flags]
+    assert len(in_file) > measured.sum()                 # some flagged but not fitted
+    assert all(int(cols["FreeR_flag"][i]) == file_flags[hkl[i]] for i in in_file)
+    # the few the file never flagged (18 here) all go to the work set: CCP4
+    # bin 0 is the test set, and cctbx's own extension wrote them all as 0
+    drawn = [int(cols["FreeR_flag"][i]) for i, h in enumerate(hkl) if h not in file_flags]
+    assert 0 < len(drawn) <= 20 and min(drawn) >= 1, drawn
+    assert any("drawn for %d reflections" % len(drawn) in line for line in history)
+
+
+@requires_cctbx
+def test_write_mtz_falls_back_to_the_main_fit(tmp_path):
+    """With the binned row off the main fit's model is written, and both the
+    output and the history say so; a file without flags gets no FreeR_flag."""
+    import contextlib
+    import io
+
+    import numpy as np
+
+    import fit_solvent_rfactor
+
+    pdb, mtz_in = sharp_toy(tmp_path, sharp=False)
+    out = tmp_path / "model.mtz"
+    args = fit_solvent_rfactor.build_parser().parse_args(
+        [pdb, mtz_in, "--shells", "2", "--also-scale-bins", "0", "--write-mtz", str(out)])
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with contextlib.redirect_stdout(io.StringIO()) as text:
+            r = fit_solvent_rfactor.run(args)
+    assert "writing the main fit's model, since the binned row is off" in text.getvalue()
+    cols, history, _ = read_mtz_columns(out)
+    assert "FreeR_flag" not in cols and {"FP", "PHIC"} <= set(cols)
+    assert any(line.startswith("model main fit (single scale, solvent")
+               for line in history)
+    from iotbx.reflection_file_reader import any_reflection_file
+    fobs = [a for a in any_reflection_file(file_name=mtz_in).as_miller_arrays()][0]
+    obs = {tuple(h): v for h, v in zip(fobs.indices(), fobs.data())}
+    fo = np.array([obs[(int(h), int(k), int(l))] for h, k, l in zip(cols["H"], cols["K"], cols["L"])])
+    R = np.abs(cols["FP"] - fo).sum() / fo.sum()
+    assert abs(R - r["R-work"]) < 2e-5
+
+
+@requires_cctbx
+def test_write_mtz_keeps_and_extends_ccp4_flags(tmp_path):
+    """An input whose free set is a CCP4 FreeR_flag column (bins 0-19, test
+    set 0) comes back with those values, and --mtz-complete extends it in the
+    same convention: bin 0 stays the test set, and the new reflections fall
+    in it at the observed fraction, with work bins drawn from the file's own
+    (1-19). A third of the input is dropped so that the extension
+    draws at random (cctbx puts 20 or fewer new reflections all in the work
+    set, and 7FPV at 3 A is missing only 19)."""
+    import contextlib
+    import io
+
+    import iotbx.pdb
+    import numpy as np
+    from iotbx.reflection_file_reader import any_reflection_file
+
+    import fit_solvent_rfactor
+
+    xrs = iotbx.pdb.input(os.path.join(COMPARE, "7FPV.pdb")).xray_structure_simple()
+    arrays = any_reflection_file(os.path.join(COMPARE, "7FPV-sf.cif")).as_miller_arrays(
+        crystal_symmetry=xrs.crystal_symmetry(), force_symmetry=True)
+    with contextlib.redirect_stdout(io.StringIO()):
+        I = [a for a in arrays if a.is_xray_intensity_array()][0]
+        F = I.merge_equivalents().array().average_bijvoet_mates().french_wilson(log=None)
+    flags = [a for a in arrays if a.info().label_string().endswith("pdbx_r_free_flag")][0]
+    flags = flags.merge_equivalents().array().average_bijvoet_mates()
+    F, flags = F.resolution_filter(d_min=3.0).common_sets(flags)
+    from cctbx.array_family import flex
+    keep = flex.bool([i % 3 != 0 for i in range(F.size())])
+    F, flags = F.select(keep), flags.select(keep)
+    ds = F.as_mtz_dataset(column_root_label="FOBS")
+    ds.add_miller_array(flags, column_root_label="FreeR_flag")
+    mtz_in = tmp_path / "in.mtz"
+    ds.mtz_object().write(file_name=str(mtz_in))
+
+    out = tmp_path / "model.mtz"
+    args = fit_solvent_rfactor.build_parser().parse_args(
+        [os.path.join(COMPARE, "7FPV.pdb"), str(mtz_in), "--aniso", "--shells", "3",
+         "--write-mtz", str(out), "--mtz-complete", "--mtz-components"])
+    with contextlib.redirect_stdout(io.StringIO()):
+        fit_solvent_rfactor.run(args)
+    cols, history, _ = read_mtz_columns(out)
+    given = {tuple(h): int(v) for h, v in zip(flags.indices(), flags.data())}
+    hkl = [tuple(int(v) for v in row) for row in zip(cols["H"], cols["K"], cols["L"])]
+    measured = np.isfinite(cols["FP"])
+    written = cols["FreeR_flag"].astype(int)
+    assert all(written[i] == given[h] for i, h in enumerate(hkl) if measured[i])
+    new = written[~measured]
+    assert len(new) > 1000 and set(new.tolist()) <= set(range(20))
+    # FMODEL on the unmeasured reflections (a third of the set here, most
+    # of them acentric) is the same model: a (Fp + w Fm)
+    # with a > 0 and w one of the fitted per-bin solvent scales
+    a, b, ok = model_as_components(cols, "FMODEL", "PHIFMODEL")
+    k_mask = np.array([float(v) for line in history if line.startswith("k_mask")
+                       for v in line.split(":")[-1].split()])
+    sel = ok & ~measured
+    assert sel.sum() > 500 and (a[sel] > 0).all()
+    dev = np.array([np.abs(k_mask - w).min() for w in b[sel] / a[sel]])
+    assert (dev < 1e-3).all()
+    observed_fraction = np.mean([v == 0 for v in given.values()])
+    assert abs(np.mean(new == 0) - observed_fraction) < 0.02, (np.mean(new == 0), observed_fraction)
+    assert set(np.array([given[h] for h in given]).tolist()) == set(range(20))
+
+
+@requires_cctbx
+def test_write_mtz_options_are_checked_before_the_fit(tmp_path):
+    """The --mtz-* options need --write-mtz, and the output folder must
+    exist: both refused before any fitting is done."""
+    import fit_solvent_rfactor
+
+    pdb, mtz = sharp_toy(tmp_path, sharp=False)
+    parse = fit_solvent_rfactor.build_parser().parse_args
+    with pytest.raises(ValueError, match="pass --write-mtz too"):
+        fit_solvent_rfactor.run(parse([pdb, mtz, "--mtz-complete"]))
+    with pytest.raises(ValueError, match="is not a writable folder"):
+        fit_solvent_rfactor.run(parse([pdb, mtz, "--write-mtz",
+                                       str(tmp_path / "missing" / "out.mtz")]))
+    with pytest.raises(ValueError, match="is a folder"):
+        fit_solvent_rfactor.run(parse([pdb, mtz, "--write-mtz", str(tmp_path)]))
+
+
+@requires_cctbx
+def test_flags_as_read_survive_mismatched_work_bins(tmp_path):
+    """Friedel mates may carry different WORK bins (CCP4 flags 3 and 7);
+    keeping the integer flags must not turn that into an error, the test set
+    read back is the boolean free set's, and the work bins are redrawn
+    rather than all replaced by one."""
+    import io
+
+    import numpy as np
+    from cctbx import crystal, miller
+    from cctbx.array_family import flex
+
+    import fit_solvent_rfactor
+
+    cs = crystal.symmetry(unit_cell=(30, 36, 42, 90, 90, 90), space_group_symbol="P 1")
+    base = [(h, k, l) for h in range(1, 9) for k in range(0, 6) for l in range(0, 6)]
+    hkl = base + [(-h, -k, -l) for h, k, l in base]
+    ms = miller.set(cs, flex.miller_index(hkl), anomalous_flag=True)
+    rng = np.random.default_rng(1)
+    F = ms.array(data=flex.double(rng.uniform(50, 500, len(hkl)).tolist()),
+                 sigmas=flex.double(len(hkl), 5.0)).set_observation_type_xray_amplitude()
+    n = len(base)
+    flag = []
+    for i in range(2 * n):
+        j = i % n
+        if j % 20 == 0:
+            flag.append(0)                       # CCP4 test bin, same on both mates
+        else:                                    # work bins 1-19, the mates disagree
+            flag.append(1 + j % 19 if i < n else 1 + (j + 7) % 19)
+    flags = ms.array(data=flex.int(flag))
+    ds = F.as_mtz_dataset(column_root_label="F")
+    ds.add_miller_array(flags, column_root_label="FreeR_flag")
+    path = tmp_path / "mismatch.mtz"
+    ds.mtz_object().write(file_name=str(path))
+    info = {}
+    Fr, free = fit_solvent_rfactor.read_observations(str(path), crystal_symmetry=cs,
+                                                     log=io.StringIO(), info=info)
+    got, test_value = info["free_flags"]
+    assert test_value == 0 and got.size() == Fr.size() == n
+    assert (np.array(got.data()) == 0).sum() == free.sum() == len(range(0, n, 20))
+    assert ((np.array(got.data()) == 0) == free).all()
+    # the disagreeing work bins are redrawn, not piled into one bin
+    work = np.array(got.data())[~free]
+    assert work.min() >= 1 and np.bincount(work).max() < 0.3 * len(work), np.bincount(work)
+
+
+@requires_cctbx
+def test_write_mtz_without_a_test_set_writes_no_flags(tmp_path):
+    """A file whose status column marks no reflection free has no free set
+    to write: no FreeR_flag column (a column of work values would read as
+    all-free in CCP4), even with --mtz-complete."""
+    import contextlib
+    import io
+
+    import fit_solvent_rfactor
+
+    text = open(os.path.join(COMPARE, "7FPV-sf.cif")).read()
+    lines = []
+    for line in text.splitlines():
+        parts = line.split()
+        # the status item is the 7th column of 7FPV's _refln loop rows
+        if len(parts) > 8 and parts[0].isdigit() and parts[6] == "f":
+            parts[6] = "o"
+            line = " ".join(parts)
+        lines.append(line)
+    cif = tmp_path / "nofree-sf.cif"
+    cif.write_text("\n".join(lines) + "\n")
+    out = tmp_path / "model.mtz"
+    args = fit_solvent_rfactor.build_parser().parse_args(
+        [os.path.join(COMPARE, "7FPV.pdb"), str(cif), "--d-min", "3.0", "--shells", "3",
+         "--write-mtz", str(out), "--mtz-complete"])
+    with contextlib.redirect_stdout(io.StringIO()):
+        r = fit_solvent_rfactor.run(args)
+    assert r["n_free"] == 0
+    cols, history, _ = read_mtz_columns(out)
+    assert "FreeR_flag" not in cols and "FMODEL" in cols
+    assert not any("drawn" in line for line in history)
+    assert all(len(line) <= 80 for line in history)
+
+
+@requires_cctbx
+def test_status_flags_spread_work_bins_across_friedel_rows(tmp_path):
+    """Status letters become CCP4 bins drawn after the merge: with each
+    Friedel mate on its own row, drawing per row made the mates disagree and
+    the merge sent nearly every work reflection to one bin."""
+    import io
+
+    import numpy as np
+    from cctbx import crystal
+
+    import fit_solvent_rfactor
+
+    rng = np.random.default_rng(2)
+    rows = []
+    base = [(h, k, l) for h in range(1, 11) for k in range(0, 10) for l in range(0, 10)]
+    for i, (h, k, l) in enumerate(base):
+        status = "f" if i % 20 == 0 else "o"
+        for sign in (1, -1):
+            rows.append("%d %d %d %s %.1f 5.0" % (sign * h, sign * k, sign * l, status,
+                                                 rng.uniform(50, 500)))
+    cif = ("data_toy\n_cell.length_a 30.0\n_cell.length_b 36.0\n_cell.length_c 42.0\n"
+           "_cell.angle_alpha 90.0\n_cell.angle_beta 90.0\n_cell.angle_gamma 90.0\n"
+           "_symmetry.space_group_name_H-M 'P 1'\nloop_\n_refln.index_h\n_refln.index_k\n"
+           "_refln.index_l\n_refln.status\n_refln.F_meas_au\n_refln.F_meas_sigma_au\n"
+           + "\n".join(rows) + "\n")
+    path = tmp_path / "friedel-sf.cif"
+    path.write_text(cif)
+    cs = crystal.symmetry(unit_cell=(30, 36, 42, 90, 90, 90), space_group_symbol="P 1")
+    info = {}
+    F, free = fit_solvent_rfactor.read_observations(str(path), crystal_symmetry=cs,
+                                                    log=io.StringIO(), info=info)
+    flags, test_value = info["free_flags"]
+    values = np.array(flags.data())
+    assert test_value == 0 and ((values == 0) == free).all()
+    work = values[values != 0]
+    counts = np.bincount(work)
+    assert counts.max() < 0.2 * len(work), counts
+
+
+def test_extend_free_flags_conventions():
+    """extend_free_flags keeps every flag it is given; a small extension
+    goes all to work values of the file's own, a large one is drawn at the
+    flags' test fraction, for CCP4 bins and for a 0/1 column alike."""
+    import random
+
+    import numpy as np
+    pytest.importorskip("cctbx")
+    from cctbx import crystal, miller
+    from cctbx.array_family import flex
+
+    import fit_solvent_rfactor
+
+    cs = crystal.symmetry(unit_cell=(30, 36, 42, 90, 90, 90), space_group_symbol="P 1")
+    full = miller.build_set(cs, anomalous_flag=False, d_min=1.6)
+    rng = np.random.default_rng(3)
+    state = random.getstate()        # handed back, so later tests see it unseeded
+    try:
+        for test_value, work in ((0, list(range(1, 20))), (1, [0])):
+            for n_drop in (12, full.size() // 3):
+                keep = np.ones(full.size(), dtype=bool)
+                keep[rng.choice(full.size(), n_drop, replace=False)] = False
+                sub = full.select(flex.bool(keep.tolist()))
+                vals = [test_value if rng.random() < 0.05 else int(rng.choice(work))
+                        for _ in range(sub.size())]
+                flags = sub.array(data=flex.int(vals))
+                random.seed(0)
+                out, n = fit_solvent_rfactor.extend_free_flags(flags, test_value, full)
+                assert n == n_drop and out.size() == full.size()
+                got = {tuple(h): v for h, v in zip(out.indices(), out.data())}
+                assert all(got[tuple(h)] == v for h, v in zip(flags.indices(), flags.data()))
+                new = np.array([got[tuple(h)] for h, k in zip(full.indices(), keep) if not k])
+                assert set(new.tolist()) <= {test_value} | set(work)
+                if n_drop <= 20:
+                    assert (new != test_value).all()
+                else:
+                    assert abs(np.mean(new == test_value)
+                               - np.mean(np.array(vals) == test_value)) < 0.02
+    finally:
+        random.setstate(state)
+
+
+@requires_cctbx
+def test_zero_one_flags_are_written_in_the_ccp4_convention(tmp_path):
+    """A 0/1 flag column with 1 the free set (the phenix/CNS convention) is
+    read as phenix reads it, and handed on in the CCP4 convention -- test
+    set 0, work bins 1..N-1 -- with exactly the same reflections free, so
+    that CCP4 programs (FREE 0 by default) and iotbx read the output alike."""
+    import io
+
+    import numpy as np
+    from cctbx import crystal, miller
+    from cctbx.array_family import flex
+
+    import fit_solvent_rfactor
+
+    cs = crystal.symmetry(unit_cell=(30, 36, 42, 90, 90, 90), space_group_symbol="P 1")
+    ms = miller.build_set(cs, anomalous_flag=False, d_min=2.0)
+    rng = np.random.default_rng(4)
+    F = ms.array(data=flex.double(rng.uniform(50, 500, ms.size()).tolist()),
+                 sigmas=flex.double(ms.size(), 5.0)).set_observation_type_xray_amplitude()
+    is_free = rng.random(ms.size()) < 0.05
+    ds = F.as_mtz_dataset(column_root_label="F")
+    ds.add_miller_array(ms.array(data=flex.int(is_free.astype(int).tolist())),
+                        column_root_label="FreeR_flag")
+    path = tmp_path / "zero_one.mtz"
+    ds.mtz_object().write(file_name=str(path))
+    info = {}
+    Fr, free = fit_solvent_rfactor.read_observations(str(path), crystal_symmetry=cs,
+                                                     log=io.StringIO(), info=info)
+    flags, test_value = info["free_flags"]
+    values = np.array(flags.data())
+    order = {tuple(h): i for i, h in enumerate(ms.indices())}
+    deposited = is_free[[order[tuple(h)] for h in Fr.indices()]]
+    assert (free == deposited).all()                     # read as phenix reads it
+    assert test_value == 0 and ((values == 0) == deposited).all()
+    assert values[~deposited].min() >= 1 and values.max() >= 4    # CCP4 work bins
