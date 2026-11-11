@@ -616,7 +616,7 @@ def test_status_column_with_wavelength_id_is_still_the_free_set(tmp_path):
     assert "%d amplitude(s) deposited as exactly zero dropped" % n_zero in log.getvalue()
 
 
-def sharp_toy(tmp_path, d_min=2.5, sharp=True, aniso=False):
+def sharp_toy(tmp_path, d_min=2.5, sharp=True, aniso=False, hydrogen=False):
     """A P1 cell with atoms at B = 20 and, with sharp, at B = 2 (narrower
     than the voxel), and an MTZ whose 'observations' are the exact
     |F_calc| of that model from cctbx direct summation, so that any R above a
@@ -642,6 +642,10 @@ def sharp_toy(tmp_path, d_min=2.5, sharp=True, aniso=False):
                      % (i, "S", i, 9.0, 16.0, 9.5, 8 * 3.14159265 ** 2 * 0.03, "S"))
         lines.append("ANISOU%5d  %-3s ALA A%4d  %7d%7d%7d%7d%7d%7d       %2s"
                      % (i, "S", i, u11, u22, 400, u12, 0, 0, "S"))
+    if hydrogen:
+        i = len(lines)
+        lines.append("ATOM  %5d  %-3s ALA A%4d    %8.3f%8.3f%8.3f  1.00%6.2f          %2s"
+                     % (i, "H", 1, 11.2, 13.4, 15.6, 20.0, "H"))
     lines.append("END")
     pdb = tmp_path / "sharp.pdb"
     pdb.write_text("\n".join(lines) + "\n")
@@ -904,7 +908,7 @@ def test_calibration_target_does_not_move_with_the_working_grid(tmp_path):
 
     def fit(*extra):
         args = fit_solvent_rfactor.build_parser().parse_args(
-            [pdb, mtz, "--shells", "2"] + list(extra))
+            [pdb, mtz, "--shells", "2", "--mask-level", "calibrate"] + list(extra))
         with contextlib.redirect_stdout(io.StringIO()) as out:
             r = fit_solvent_rfactor.run(args)
         return args, r, out.getvalue()
@@ -1136,7 +1140,7 @@ def test_default_mask_source_is_soft_spheres(tmp_path):
 
     def fit(*extra):
         args = fit_solvent_rfactor.build_parser().parse_args(
-            [pdb, mtz, "--shells", "2"] + list(extra))
+            [pdb, mtz, "--shells", "2", "--mask-level", "calibrate"] + list(extra))
         with contextlib.redirect_stdout(io.StringIO()) as out:
             r = fit_solvent_rfactor.run(args)
         return args, r, out.getvalue()
@@ -1157,21 +1161,215 @@ def test_sphere_source_united_atom_radii_on_7fpv_without_hydrogens():
     """7FPV carries explicit hydrogens on every residue, so its other pins
     run the explicit-H radii. With the hydrogens selected away the spheres
     take the united-atom types (Ala and Val/Leu methyls at 1.955 A, alpha
-    carbons at 1.90, ring carbons at 1.775, Arg CZ at 1.125); pinned 2026-11-10."""
+    carbons at 1.90, ring carbons at 1.775, Arg CZ at 1.125); pinned 2026-11-10.
+    With no hydrogens left the default --mask-level auto cuts the field at
+    1.0 sphere overlaps instead of calibrating; --mask-level calibrate still
+    reproduces the calibrated pin, 0.1618 / 0.1874."""
     import contextlib
     import io
 
     import fit_solvent_rfactor
 
-    args = fit_solvent_rfactor.build_parser().parse_args(
-        [os.path.join(COMPARE, "7FPV.pdb"), os.path.join(COMPARE, "7FPV-sf.cif"),
-         "--d-min", "3.0", "--aniso", "--also-scale-bins", "log", "--shells", "3",
-         "--solvent-bins", "off", "--select", "not element H"])
-    with contextlib.redirect_stdout(io.StringIO()) as out:
-        r = fit_solvent_rfactor.run(args)
-    text = out.getvalue()
+    def fit(*extra):
+        args = fit_solvent_rfactor.build_parser().parse_args(
+            [os.path.join(COMPARE, "7FPV.pdb"), os.path.join(COMPARE, "7FPV-sf.cif"),
+             "--d-min", "3.0", "--aniso", "--also-scale-bins", "log", "--shells", "3",
+             "--solvent-bins", "off", "--select", "not element H"] + list(extra))
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            r = fit_solvent_rfactor.run(args)
+        return r, out.getvalue()
+
+    r, text = fit()
     assert r["mask_source"] == "spheres"
     for radius in ("1.90 A", "1.95 A", "1.77 A", "1.12 A"):
         assert radius in text.split("mask source: soft spheres")[1].split("\n")[0], radius
-    assert abs(r["R-work binned"] - 0.1618) < 5e-4
-    assert abs(r["R-free binned"] - 0.1874) < 1e-3
+    assert r["mask_level"] == 1.0 and r["mask_level_rule"] == "auto: no hydrogens in the model"
+    assert abs(r["R-work binned"] - 0.1616) < 5e-4
+    assert abs(r["R-free binned"] - 0.1860) < 1e-3
+    rc, _ = fit("--mask-level", "calibrate")
+    assert rc["mask_level"] is None
+    assert abs(rc["R-work binned"] - 0.1618) < 5e-4
+    assert abs(rc["R-free binned"] - 0.1874) < 1e-3
+
+
+@requires_cctbx
+def test_mask_level_cuts_the_sphere_field_without_calibrating(tmp_path, monkeypatch):
+    """--mask-level L cuts the sphere field at L sphere overlaps: no gemmi
+    reference-grid target is built and no cutoff is searched for, the result
+    says so, and a higher level calls more of the cell solvent. Calibrating to
+    the fixed-level mask's own occupancy finds the same level again. The toy
+    is three atoms in a 20 A cell, almost all solvent, which no crystal is,
+    and the fixed level says so where calibration would have hidden it. Its
+    atoms barely overlap, so the levels are below one overlap: an isolated
+    sphere is 1 only at its centre, and 0.5 at its radius."""
+    import contextlib
+    import io
+    import warnings
+
+    import fit_solvent_rfactor
+    import lunus.sf.solvent_torch as solvent_torch
+    from lunus.sf.solvent_torch import SolventMaskWarning
+
+    pdb, mtz = sharp_toy(tmp_path, sharp=False)
+    calls = []
+    real_target = fit_solvent_rfactor.gemmi_mask_occupancy_at_spacing
+    real_calibrate = solvent_torch.calibrate_cutoff
+
+    def spy_target(*a, **k):
+        calls.append("target")
+        return real_target(*a, **k)
+
+    def spy_calibrate(*a, **k):
+        calls.append("calibrate")
+        return real_calibrate(*a, **k)
+
+    monkeypatch.setattr(fit_solvent_rfactor, "gemmi_mask_occupancy_at_spacing", spy_target)
+    monkeypatch.setattr(solvent_torch, "calibrate_cutoff", spy_calibrate)
+
+    def fit(*extra):
+        args = fit_solvent_rfactor.build_parser().parse_args(
+            [pdb, mtz, "--shells", "2"] + list(extra))
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                r = fit_solvent_rfactor.run(args)
+        r["warned"] = any(issubclass(w.category, SolventMaskWarning)
+                          and "which no protein crystal has" in str(w.message)
+                          for w in caught)
+        return r, out.getvalue()
+
+    r1, text = fit("--mask-level", "0.5")
+    assert calls == [], calls
+    assert r1["mask_level"] == 0.5 and r1["mask_cutoff"] == 0.5
+    assert r1["target_occupancy"] is None and r1["target_spacing"] is None
+    assert r1["target_source"] == "none (fixed level 0.5)"
+    assert "threshold mask at a fixed level (--mask-level): cutoff 0.5 sphere overlaps" in text
+    assert r1["mask_occupancy"] > 0.95 and r1["warned"]
+    r2, _ = fit("--mask-level", "0.8")
+    assert calls == []
+    assert r2["mask_occupancy"] > r1["mask_occupancy"]
+    assert r2["R-work no solvent"] == r1["R-work no solvent"]
+
+    rc, _ = fit("--mask-level", "calibrate", "--target-occupancy", "%.6f" % r1["mask_occupancy"])
+    assert calls == ["calibrate"]
+    assert rc["mask_level"] is None and not rc["warned"]
+    assert abs(rc["mask_cutoff"] - 0.5) < 0.01, rc["mask_cutoff"]
+
+
+@requires_cctbx
+def test_mask_level_needs_the_sphere_field_and_no_target(tmp_path):
+    """A level is in sphere overlaps, so it is refused for the other mask
+    sources and for --mask gemmi, and alongside a calibration target."""
+    import fit_solvent_rfactor
+
+    pdb, mtz = sharp_toy(tmp_path, sharp=False)
+    parse = fit_solvent_rfactor.build_parser().parse_args
+    for extra in (["--mask-source", "atoms"], ["--mask-source", "density"],
+                  ["--mask", "gemmi"], ["--target-occupancy", "0.4"]):
+        with pytest.raises(ValueError, match="--mask-level"):
+            fit_solvent_rfactor.run(parse([pdb, mtz, "--mask-level", "1.0"] + extra))
+
+
+def test_mask_level_arg():
+    import argparse
+
+    import fit_solvent_rfactor as f
+
+    assert f.MASK_LEVEL_DEFAULT == "auto"
+    assert f.mask_level_arg("auto") == "auto" and f.mask_level_arg("Auto") == "auto"
+    assert f.mask_level_arg("calibrate") == "calibrate"
+    assert f.mask_level_arg("CALIBRATE") == "calibrate"
+    assert f.mask_level_arg("0.95") == 0.95
+    for bad in ("0", "-1", "half", "nan", "inf"):
+        with pytest.raises(argparse.ArgumentTypeError):
+            f.mask_level_arg(bad)
+    with pytest.raises(argparse.ArgumentTypeError, match="'auto' or 'calibrate'"):
+        f.mask_level_arg("half")
+
+
+def test_mask_level_auto_rule():
+    """auto cuts the sphere field at the fixed level for a model with no
+    hydrogens, and calibrates a model with any (charged or deuterium types
+    included), any other mask source, --mask gemmi, or an explicit target.
+    An explicit setting is taken as it is."""
+    import fit_solvent_rfactor as f
+
+    rule = f.mask_level_rule
+    heavy = ["C", "N", "O", "S", "O1-", "Zn2+"]
+    assert rule("auto", "threshold", "spheres", heavy, None) == (
+        f.MASK_LEVEL_FIXED, "auto: no hydrogens in the model")
+    assert f.MASK_LEVEL_FIXED == 1.0
+    for h in ("H", "D", "h"):
+        level, why = rule("auto", "threshold", "spheres", heavy + [h], None)
+        assert level is None and "1 hydrogens" in why, (h, why)
+    assert rule("auto", "threshold", "atoms", heavy, None)[0] is None
+    assert rule("auto", "threshold", "density", heavy, None)[0] is None
+    assert rule("auto", "gemmi", "spheres", heavy, None)[0] is None
+    assert rule("auto", "threshold", "spheres", heavy, 0.4)[0] is None
+    assert rule("calibrate", "threshold", "spheres", heavy, None)[0] is None
+    assert rule(0.9, "threshold", "spheres", heavy + ["H"], None) == (0.9, "--mask-level 0.9")
+    # a sphere field built away from the measured settings is calibrated
+    level, why = rule("auto", "threshold", "spheres", heavy, None,
+                      nondefault_field=["--sphere-offset"])
+    assert level is None and "--sphere-offset" in why, why
+    assert rule(0.9, "threshold", "spheres", heavy, None,
+                nondefault_field=["--mask-blur"])[0] == 0.9
+
+
+@requires_cctbx
+def test_default_mask_level_skips_the_gemmi_target_without_hydrogens(tmp_path, monkeypatch):
+    """A plain run on a model without hydrogens builds no gemmi
+    reference-grid mask and searches no cutoff: the field is cut at 1.0."""
+    import contextlib
+    import io
+    import warnings
+
+    import fit_solvent_rfactor
+    import lunus.sf.solvent_torch as solvent_torch
+
+    pdb, mtz = sharp_toy(tmp_path, sharp=False)
+    calls = []
+    monkeypatch.setattr(fit_solvent_rfactor, "gemmi_mask_occupancy_at_spacing",
+                        lambda *a, **k: calls.append("target"))
+    monkeypatch.setattr(solvent_torch, "calibrate_cutoff",
+                        lambda *a, **k: calls.append("calibrate"))
+    args = fit_solvent_rfactor.build_parser().parse_args([pdb, mtz, "--shells", "2"])
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")      # the sparse toy is almost all solvent
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            r = fit_solvent_rfactor.run(args)
+    assert calls == []
+    assert r["mask_level"] == 1.0 and r["mask_cutoff"] == 1.0
+    assert "mask level: 1 sphere overlaps (auto: no hydrogens in the model)" in out.getvalue()
+
+
+@requires_cctbx
+def test_default_mask_level_calibrates_hydrogens_and_offdefault_fields(tmp_path):
+    """Through run(): auto calibrates a model carrying a hydrogen, and a
+    model without hydrogens whose sphere field is built off the settings the
+    fixed level was measured with (here --sphere-offset and --taper-frac),
+    and says why."""
+    import contextlib
+    import io
+    import warnings
+
+    import fit_solvent_rfactor
+
+    def fit(pdb, mtz, *extra):
+        args = fit_solvent_rfactor.build_parser().parse_args(
+            [pdb, mtz, "--shells", "2"] + list(extra))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with contextlib.redirect_stdout(io.StringIO()):
+                return fit_solvent_rfactor.run(args)
+
+    (tmp_path / "h").mkdir()
+    r = fit(*sharp_toy(tmp_path / "h", sharp=False, hydrogen=True))
+    assert r["mask_level"] is None and "has 1 hydrogens" in r["mask_level_rule"]
+    assert r["target_source"].startswith("gemmi")
+    pdb, mtz = sharp_toy(tmp_path, sharp=False)
+    for extra, name in ((["--sphere-offset", "0.1"], "--sphere-offset"),
+                        (["--taper-frac", "0.4"], "--taper-frac")):
+        r = fit(pdb, mtz, *extra)
+        assert r["mask_level"] is None and name in r["mask_level_rule"], r["mask_level_rule"]
+    assert fit(pdb, mtz)["mask_level"] == 1.0

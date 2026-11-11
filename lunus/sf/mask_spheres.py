@@ -135,13 +135,18 @@ def bare_element(element):
     return m.group(1) if m else element.strip()
 
 
+def is_hydrogen(element):
+    """True for hydrogen or deuterium, charged or not, in any case."""
+    return bare_element(element).upper() in ("H", "D")
+
+
 def united_atom_type(resname, name, element):
     """OPLS united-atom type (a SIGMA_UA key) for a protein atom or water,
     or None for anything the table does not cover (the caller falls back to
     the element). Cystine CB (3.80) is not told from cysteine CB (3.905):
     that needs the disulfide, which the labels do not carry."""
     res, nm, el = resname.strip().upper(), name.strip().upper(), bare_element(element).upper()
-    if el in ("H", "D"):
+    if is_hydrogen(el):
         return "H"
     if res in ("HOH", "WAT", "DOD") and el == "O":
         return "OW"
@@ -222,7 +227,7 @@ def sphere_radii(labels, elements, offset=0.0, explicit_hydrogens=None, by_eleme
         parsed.append((q[0:4] if len(q) >= 4 else "", q[5:8] if len(q) >= 8 else "", q[5:]))
     if explicit_hydrogens is None:
         with_h = {key for (_, _, key), el in zip(parsed, elements)
-                  if bare_element(el).upper() in ("H", "D")}
+                  if is_hydrogen(el)}
         per_atom = [key in with_h for (_, _, key) in parsed]
     else:
         per_atom = [bool(explicit_hydrogens)] * len(parsed)

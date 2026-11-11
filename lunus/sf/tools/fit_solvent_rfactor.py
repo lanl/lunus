@@ -53,6 +53,20 @@ while the bulk mask covers only the disordered remainder: the ordered waters
 and ligands in the model occupy the rest. gemmi's mask on the same coordinates
 already makes that subtraction, which is why it is the target.
 
+FOR A MODEL WITHOUT HYDROGENS THERE IS NO CALIBRATION, since 2026-11-10:
+--mask-level auto (the default) cuts the sphere field at 1.0 sphere overlaps,
+where the calibration lands anyway (median 0.93-0.95): with no search and no
+gemmi target it gains at 2.6-3.0 A, ties at 1.8-2.6 A and is within 0.001 of
+calibration on every SW40 entry (slightly worse on more of them than better;
+mask_level_rule has the numbers). Models with
+hydrogens are still calibrated as below, because their extra spheres push
+the right level to 1.1-1.5 with the hydrogen fraction; so are the atoms and
+density sources, --target-occupancy, and a sphere field built with any of
+--sphere-offset, --sphere-edge, --sphere-radii, --mask-blur or --taper-frac
+away from its default. --mask-level calibrate calibrates
+every model; a number cuts at that level. See docs/solvent-design.md, "A
+fixed level instead of a calibration".
+
 THE TARGET IS MEASURED ON A FIXED REFERENCE GRID (--target-spacing, default
 0.7 A), not on the working grid, since 2026-11-10. gemmi's occupancy on a
 grid steps with the voxel size where its shrink stencil gains neighbours, at
@@ -748,23 +762,31 @@ def positive_float_arg(option):
             value = float(text)
         except ValueError:
             raise argparse.ArgumentTypeError("%s expects a number, got %r" % (option, text))
-        if value <= 0.0:
-            raise argparse.ArgumentTypeError("%s must be > 0, got %g" % (option, value))
+        if not math.isfinite(value) or value <= 0.0:
+            raise argparse.ArgumentTypeError("%s must be a finite number > 0, got %g"
+                                             % (option, value))
         return value
     return parse
 
 
-def keyword_or_number_arg(keyword, option, unit, allow_zero):
+def keyword_or_number_arg(keyword, option, unit, allow_zero, keywords=None):
     """An argparse type: the keyword (any case, returned lower-case) or a
-    number in unit, >= 0 when allow_zero and > 0 otherwise."""
+    finite number in unit, >= 0 when allow_zero and > 0 otherwise. keywords,
+    when given, is the full tuple of accepted keywords (keyword among them)."""
+    keywords = keywords or (keyword,)
+
     def parse(text):
-        if text.lower() == keyword:
-            return keyword
+        if text.lower() in keywords:
+            return text.lower()
         try:
             value = float(text)
         except ValueError:
             raise argparse.ArgumentTypeError(
-                "expected %r or a number in %s, got %r" % (keyword, unit, text))
+                "expected %s or a number in %s, got %r"
+                % (" or ".join(repr(k) for k in keywords), unit, text))
+        if not math.isfinite(value):
+            raise argparse.ArgumentTypeError(
+                "%s must be a finite number in %s, got %r" % (option, unit, text))
         if value < 0.0 or (value == 0.0 and not allow_zero):
             raise argparse.ArgumentTypeError(
                 "%s must be %s %s" % (option, ">= 0" if allow_zero else "> 0", unit))
@@ -774,6 +796,65 @@ def keyword_or_number_arg(keyword, option, unit, allow_zero):
 
 # --protein-blur: "auto", or B >= 0 in A^2 (0 disables it)
 protein_blur_arg = keyword_or_number_arg("auto", "--protein-blur", "A^2", allow_zero=True)
+
+# --mask-level: "auto", "calibrate" (to gemmi's occupancy), or a level > 0 in
+# sphere overlaps. auto is MASK_LEVEL_FIXED for a model without hydrogens and
+# calibration for one with them (mask_level_rule says why).
+MASK_LEVEL_DEFAULT = "auto"
+MASK_LEVEL_FIXED = 1.0
+
+
+mask_level_arg = keyword_or_number_arg("calibrate", "--mask-level", "sphere overlaps",
+                                       allow_zero=False, keywords=("auto", "calibrate"))
+
+
+def mask_level_rule(setting, mask, mask_source, elements, target_occupancy,
+                    nondefault_field=()):
+    """--mask-level resolved: (level or None to calibrate, the reason).
+
+    A fixed level is in sphere overlaps, so it only means anything for the
+    sphere field. 'auto' cuts that field at MASK_LEVEL_FIXED when the model
+    has no hydrogens and calibrates it to gemmi's occupancy when it has any.
+    Measured 2026-11-10 against calibration on every entry, the binned
+    R-free gap to mmtbx, medians: 1.0 is -0.0015 / -0.0021 / -0.0014 on the
+    models without hydrogens of the 2.6-3.0 A, 1.8-2.6 A and SW40 sets
+    (calibrated -0.0003 / -0.0022 / -0.0016). Per entry that is a gain at
+    low resolution (13 better, 3 worse), a wash at 1.8-2.6 A (9 / 7) and a
+    slight loss on SW40 (7 / 14, median +0.0001, none by more than 0.001).
+    0.9 is the best level on SW40 (-0.0017) but loses at low resolution
+    (6 entries worse by more than 0.001 against 1); 1.1 is worse on SW40
+    and at 1.8-2.6 A. The hydrogen test runs on the model as selected, so
+    --select "not element H" makes a model with hydrogens one without. A
+    model with explicit hydrogens has its sp3 carbons bare plus a sphere per
+    hydrogen, which packs the field deeper, and its calibrated level runs
+    from 1.12 to 1.46 with the hydrogen fraction; at 1.0 the four such
+    entries at 1.8-3.0 A lost 0.006-0.011. Typing them united-atom with the
+    hydrogens left out brings their level back to ~0.93 and recovers the
+    low-resolution loss, but costs SW40's hydrogen entries 0.0009, so they
+    keep the calibration. An explicit target (--target-occupancy) is a
+    request to calibrate, and auto honours it. So is any sphere-field setting
+    away from the one the level was measured with (nondefault_field, the
+    options' names): an offset, edge, radius table, extra smoothing or taper
+    moves where the field crosses 1.0, which calibration compensates for and
+    a fixed level does not."""
+    from lunus.sf.mask_spheres import is_hydrogen
+
+    if setting == "calibrate":
+        return None, "--mask-level calibrate"
+    if setting != "auto":
+        return float(setting), "--mask-level %g" % setting
+    if mask == "gemmi" or mask_source != "spheres":
+        return None, "auto: a fixed level is only defined for the sphere field"
+    if target_occupancy is not None:
+        return None, "auto: --target-occupancy given"
+    if nondefault_field:
+        return None, ("auto: %s differ from the settings the fixed level was "
+                      "measured with, so it is calibrated" % ", ".join(nondefault_field))
+    n_h = sum(is_hydrogen(e) for e in elements)
+    if n_h:
+        return None, ("auto: the model has %d hydrogens, whose spheres move the "
+                      "level, so it is calibrated" % n_h)
+    return MASK_LEVEL_FIXED, "auto: no hydrogens in the model"
 
 
 def protein_blur(setting, b_min, grid, orth_np, d_min):
@@ -1867,6 +1948,17 @@ def build_parser():
                         % TARGET_SPACING_DEFAULT)
     p.add_argument("--target-occupancy", type=float, default=None,
                    help="override the gemmi-measured calibration target")
+    p.add_argument("--mask-level", type=mask_level_arg, default=MASK_LEVEL_DEFAULT,
+                   metavar="auto|calibrate|L",
+                   help="where the sphere field is cut: 'calibrate' finds the "
+                        "cutoff at which the mask's occupancy matches gemmi's "
+                        "geometric mask on the reference grid; a number L cuts "
+                        "at L sphere overlaps directly, with no gemmi target and "
+                        "no search (--mask-source spheres only); 'auto' "
+                        "(default) is %g for a model without hydrogens and "
+                        "calibrate for one with them, for another source, or "
+                        "for a sphere field with non-default settings"
+                        % MASK_LEVEL_FIXED)
     p.add_argument("--taper-frac", type=float, default=0.5,
                    help="taper width as a fraction of the SOLVENT MASK cutoff")
     p.add_argument("--density-cutoff", type=float, default=1e-4, metavar="E",
@@ -1984,6 +2076,16 @@ def run(args):
         MASK_BLUR_DEFAULT, SolventMaskWarning, calibrate_cutoff, f_solvent,
         mask_occupancy, mask_source_weights, shell_voxels, solvent_mask,
     )
+    explicit_level = args.mask_level not in ("calibrate", "auto")
+    if explicit_level and (args.mask == "gemmi" or args.mask_source != "spheres"):
+        # a level is in sphere overlaps, a unit only the sphere field has
+        raise ValueError("--mask-level %g needs --mask threshold and "
+                         "--mask-source spheres; use --mask-level calibrate "
+                         "for the other sources" % args.mask_level)
+    if explicit_level and args.target_occupancy is not None:
+        raise ValueError("--target-occupancy is a calibration target, and "
+                         "--mask-level %g calibrates nothing; pass one or the "
+                         "other" % args.mask_level)
     if args.mask_blur is None:
         # the sphere field's 0.5 A edge is all the smoothing it wants
         args.mask_blur = 0.0 if args.mask_source == "spheres" else MASK_BLUR_DEFAULT
@@ -2122,9 +2224,30 @@ def run(args):
 
     # ---- the mask
     print("\nsolvent mask")
+    # the sphere-field settings MASK_LEVEL_FIXED was measured with; auto
+    # calibrates when any differs
+    nondefault_field = [name for name, changed in (
+        ("--sphere-offset", args.sphere_offset != 0.0),
+        ("--sphere-edge", args.sphere_edge not in (None, mask_spheres.EDGE_WIDTH_DEFAULT)
+         if mask_source == "spheres" else False),
+        ("--sphere-radii", args.sphere_radii != "ua"),
+        ("--mask-blur", args.mask_blur != 0.0),
+        ("--taper-frac", args.taper_frac != 0.5)) if changed]
+    mask_level, level_reason = mask_level_rule(
+        args.mask_level, args.mask, args.mask_source, elements, args.target_occupancy,
+        nondefault_field=nondefault_field)
+    fixed_level = mask_level is not None
+    if args.mask != "gemmi":
+        print("  mask level: %s (%s)"
+              % ("%g sphere overlaps" % mask_level if fixed_level else "calibrated",
+                 level_reason))
     with timed(timing, "gemmi mask (cpu)"):
         occ_working, gemmi_grid = gemmi_mask_occupancy(args.pdb, grid, args.radii_set)
-        if args.target_occupancy is not None:
+        if fixed_level:
+            # the cut is a fixed level of the sphere field: nothing to match,
+            # so the reference-grid mask is not built at all
+            target, target_source = None, "none (fixed level %g)" % mask_level
+        elif args.target_occupancy is not None:
             target, target_source = args.target_occupancy, "--target-occupancy"
         elif args.mask == "gemmi":
             # --mask gemmi calibrates nothing: the mask in use is this one,
@@ -2139,7 +2262,10 @@ def run(args):
             target_source = "gemmi, %g A reference grid" % args.target_spacing
     print("  gemmi %s geometric mask on the same model and grid: occupancy %.4f"
           % (args.radii_set, occ_working))
-    if args.target_occupancy is not None:
+    if fixed_level:
+        print("  calibration target: none (the sphere field is cut at %g)"
+              % mask_level)
+    elif args.target_occupancy is not None:
         print("  calibration target: occupancy %.4f (--target-occupancy)" % target)
     elif args.mask == "gemmi":
         print("  calibration target: none (--mask gemmi uses that mask as it is)")
@@ -2226,16 +2352,27 @@ def run(args):
                 print("  --mask-blur 0, but the placed density carries the "
                       "protein blur B = %.1f A^2, so the threshold sees that "
                       "smoothing (--protein-blur 0 removes it)" % blur)
-            cutoff = calibrate_cutoff(source, target,
-                                      taper_width_frac=args.taper_frac)
+            if fixed_level:
+                cutoff = float(mask_level)
+            else:
+                cutoff = calibrate_cutoff(source, target,
+                                          taper_width_frac=args.taper_frac)
             mask = solvent_mask(source, cutoff, args.taper_frac * cutoff)
         occupancy, shell = float(mask_occupancy(mask)), shell_voxels(mask)
         cutoff = float(cutoff)
-        print("  threshold mask calibrated to it: cutoff %.4g %s "
-              "(%.3f of peak %.3f)"
-              % (cutoff, {"atoms": "atoms/A^3", "spheres": "sphere overlaps"}.get(
+        print("  threshold mask %s: cutoff %.4g %s (%.3f of peak %.3f)"
+              % ("at a fixed level (--mask-level)" if fixed_level
+                 else "calibrated to it", cutoff,
+                 {"atoms": "atoms/A^3", "spheres": "sphere overlaps"}.get(
                      args.mask_source, "e/A^3"),
                  cutoff / float(source.max()), float(source.max())))
+        if fixed_level and not 0.05 < occupancy < 0.95:
+            warnings.warn(
+                "the mask level %g calls %.1f%% of the cell solvent, which no "
+                "protein crystal has; the level is wrong for this model, or the "
+                "model is not what the sphere field expects"
+                % (mask_level, 100.0 * occupancy),
+                SolventMaskWarning, stacklevel=2)
         print("  occupancy %.4f, taper shell %d voxels (%.2f%% of the grid)"
               % (occupancy, shell, 100.0 * shell / np.prod(grid)))
 
@@ -2304,12 +2441,14 @@ def run(args):
               "rate": float(rate),
               "max_voxel": None if args.max_voxel is None else float(args.max_voxel),
               "grid_rule": grid_rule,     # says whether the cap or --rate set the grid
-              "target_occupancy": float(target),
+              "target_occupancy": None if target is None else float(target),
+              "mask_level": mask_level,
+              "mask_level_rule": level_reason,
               "mask_source": mask_source,
               "mask_source_b": float(args.mask_source_b) if mask_source == "atoms" else None,
               "sphere_edge": sphere_edge,
               "target_source": target_source,
-              "target_spacing": args.target_spacing,
+              "target_spacing": None if fixed_level else args.target_spacing,
               "gemmi_occupancy_working_grid": float(occ_working),
               "grid": tuple(int(n) for n in grid),
               "b_sharpest": b_sharpest, "mask_cutoff": cutoff,

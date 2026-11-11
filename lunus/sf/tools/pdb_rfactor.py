@@ -238,6 +238,10 @@ def main():
                        % r_torch["target_occupancy"])
         else:
             occ.append("torch target %.4f (%s)" % (r_torch["target_occupancy"], source))
+    elif r_torch.get("mask_level") is not None:
+        occ.append("torch mask %.4f at a fixed level of %g sphere overlaps, "
+                   "no calibration (--mask-level)"
+                   % (r_torch["mask_occupancy"], r_torch["mask_level"]))
     if r_mmtbx is not None and r_mmtbx.get("mask_occupancy") is not None:
         occ.append("mmtbx mask %.4f" % r_mmtbx["mask_occupancy"])
     if occ:
