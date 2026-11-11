@@ -1508,6 +1508,28 @@ def fit_scales(F_obs, F_protein, F_mask, inv_d2, s_cart, work, aniso,
     }
 
 
+# THE PER-BIN SOLVENT SCALE IS BOUNDED AT 1.0. mmtbx's initial per-bin search
+# runs on a grid from 0 to 1.0 (bulk_solvent/scaler.py, k_mask_grid_search);
+# its later cycles are not strictly bounded but only accept a curve that lowers
+# R. A free least-squares bin can run away: on 4Y0B (data to 1.83 A, in the
+# torchref1000 run of 2026-11-10, once the soft-sphere mask had given F_mask
+# real high-resolution content) the high-resolution bins found a degenerate
+# solution in which the solvent stood in for the protein, solvent scales 2,
+# 5.6, 16, 49, 147 with the bin scales going to zero, binned R-free 0.507
+# against mmtbx's 0.324. Bounded, the last bin sits AT the bound (curve
+# ... 0.21 0.24 0.35 1.00) and R-free is 0.331: the bound binds, it does not
+# make the curve fall to zero. The solve is exact per bin (_fit_solvent_bins).
+# On the 20 + 20 + 39 entries of the low-, mid-resolution and SW40 sets no
+# other entry moves by more than 0.0009 and no median moves.
+SOLVENT_BIN_MAX = 1.0
+# Measured and rejected, kept for a later look: zeroing every bin whose
+# high-resolution edge is below this many A (with a 0.6 bound) fixed 4Y0B
+# equally but made 9 of those 79 entries worse by more than 0.001 and none
+# better; it discards real solvent signal beyond 3 A. mmtbx itself cuts only
+# from the first zero bin below 3 A, which solvent_curve_rule does. None = off.
+SOLVENT_BIN_FORCE_CUT = None
+
+
 def _fit_solvent_bins(Fo, Fp, Fm, s2, s, b, n_bins, log_k_bins, u_params, aniso,
                       k_sol, b_sol, d_min_bins, s2_bins):
     """Stage 4 of fit_scales, on the work set: one solvent scale per bin.
@@ -1526,7 +1548,8 @@ def _fit_solvent_bins(Fo, Fp, Fm, s2, s, b, n_bins, log_k_bins, u_params, aniso,
             else k_sol * torch.exp(-0.25 * b_sol * s2_bins[i])
             for i, sel in enumerate(in_bin)])
 
-    def solve(active, km_start, lk_start):
+    def solve_lbfgs(active, km_start, lk_start):
+        # the unbounded joint solve (SOLVENT_BIN_MAX = None), as before
         km_p = km_start.clone().requires_grad_(True)
         lk_p = lk_start.clone().requires_grad_(True)
         opt = torch.optim.LBFGS([km_p, lk_p], max_iter=300,
@@ -1544,7 +1567,71 @@ def _fit_solvent_bins(Fo, Fp, Fm, s2, s, b, n_bins, log_k_bins, u_params, aniso,
         opt.step(closure)
         return km_p.detach(), lk_p.detach()
 
+    # THE BOUNDED SOLVE IS EXACT, PER BIN. With the anisotropy u held fixed
+    # the model in bin i is exp(lk_i) * A * |Fp + k_i Fm| with A per
+    # reflection, so the bins are independent and lk_i has a closed form:
+    # what is left is a 1-D minimisation of the residual over k_i in
+    # [0, SOLVENT_BIN_MAX], done as mmtbx's initial search does it (a 0.01
+    # grid) followed by golden-section refinement in the bracketing cell.
+    # Not a clamp inside an optimizer: that was tried first and a bin that
+    # overshot below 0 got no gradient back, came out as 0, and fired the
+    # curve rule's cut on 4Y0B -- the right answer for the wrong reason.
+    with torch.no_grad():
+        A = _scaled_amplitudes(torch.ones_like(Fp), s2, s,
+                               torch.zeros((), dtype=dtype, device=device), u, aniso)
+
+    def bin_residual(k, sel):
+        # residual sum of squares at the closed-form scale, for a tensor of k
+        g = A[sel][None, :] * (Fp[sel][None, :] + k[:, None].to(Fp.dtype) * Fm[sel][None, :]).abs()
+        fo = Fo[sel][None, :]
+        num = (fo * g).sum(1)
+        den = (g * g).sum(1).clamp(min=1e-300)
+        return (fo * fo).sum(1) - num * num / den
+
+    def solve_bounded(active, km_start, lk_start):
+        km_out = torch.zeros_like(km_start)
+        k_max = float(SOLVENT_BIN_MAX)
+        grid = torch.arange(0.0, k_max + 1e-9, 0.01, dtype=dtype, device=device)
+        with torch.no_grad():
+            for i, sel in enumerate(in_bin):
+                if not bool(active[i]):
+                    continue
+                if not bool(sel.any()):
+                    # no work reflections: keep the starting value (the
+                    # exponential's at the bin centre), as the unbounded
+                    # solve did; a 0 here would fire the curve rule's cut
+                    km_out[i] = km_start[i].clamp(0.0, k_max)
+                    continue
+                r = bin_residual(grid, sel)
+                j0 = int(torch.argmin(r))
+                lo, hi = float(grid[max(j0 - 1, 0)]), float(grid[min(j0 + 1, len(grid) - 1)])
+                gr = 0.5 * (5 ** 0.5 - 1)
+                a, c = lo, hi
+                x1, x2 = c - gr * (c - a), a + gr * (c - a)
+                f1, f2 = (float(v) for v in bin_residual(
+                    torch.tensor([x1, x2], dtype=dtype, device=device), sel))
+                for _ in range(40):
+                    if f1 <= f2:
+                        c, x2, f2 = x2, x1, f1
+                        x1 = c - gr * (c - a)
+                        f1 = float(bin_residual(torch.tensor([x1], dtype=dtype, device=device), sel)[0])
+                    else:
+                        a, x1, f1 = x1, x2, f2
+                        x2 = a + gr * (c - a)
+                        f2 = float(bin_residual(torch.tensor([x2], dtype=dtype, device=device), sel)[0])
+                best = min((float(r[j0]), float(grid[j0])), (f1, x1), (f2, x2))
+                km_out[i] = best[1]
+        return km_out, lk_start
+
+    def solve(active, km_start, lk_start):
+        if SOLVENT_BIN_MAX is None:
+            return solve_lbfgs(active, km_start, lk_start)
+        return solve_bounded(active, km_start, lk_start)
+
     active = torch.ones(n_bins, dtype=torch.bool, device=device)
+    if SOLVENT_BIN_FORCE_CUT is not None:
+        active = torch.tensor([float(d) >= SOLVENT_BIN_FORCE_CUT for d in d_min_bins],
+                              dtype=torch.bool, device=device)
     km, lk = solve(active, km, log_k_bins)
     km = solvent_curve_rule(km, d_min_bins)
     # Second pass: every bin before the cut stays free, including one the
@@ -1552,7 +1639,7 @@ def _fit_solvent_bins(Fo, Fp, Fm, s2, s, b, n_bins, log_k_bins, u_params, aniso,
     # once its neighbours are regularised (mmtbx's grid allows the same);
     # bins beyond the cut are held at zero.
     cut = solvent_cut_index(km, d_min_bins)
-    active = torch.arange(n_bins, device=device) < cut
+    active = (torch.arange(n_bins, device=device) < cut) & active
     if cut > 0:
         km, lk = solve(active, km, lk)
         km = solvent_curve_rule(torch.where(active, km, torch.zeros_like(km)), d_min_bins)
@@ -1657,7 +1744,11 @@ def mmtbx_fit(pdb, cif, d_min=None, isotropic=False, select="all"):
     # solvent radius 1.1, shrink 0.9), the quantity our calibration target
     # is the gemmi analogue of. The manager keeps the contact_surface_fraction
     # of the asu_mask it built for F_mask, so it is not built a second time.
-    mask_occupancy = float(fmodel.mask_manager.solvent_content_via_mask)
+    # It stays None until the manager has computed F_mask itself, so pass
+    # None on rather than fail the whole fit over a reported number.
+    mask_occupancy = fmodel.mask_manager.solvent_content_via_mask
+    if mask_occupancy is not None:
+        mask_occupancy = float(mask_occupancy)
     return {"R-work": float(fmodel.r_work()), "R-free": float(fmodel.r_free()),
             "k_sol": float(k_sol), "b_sol": float(b_sol),
             "mask_occupancy": mask_occupancy,
