@@ -879,6 +879,59 @@ whole model to explicit-hydrogen radii, now decided per residue). In the library
 defaults to 0) with `mask_spheres.sphere_kernels` as the pipeline's
 `mask_kernels`; opt-in.
 
+### A fixed level instead of a calibration
+
+With spheres the calibrated cutoff lands near one sphere overlap on every
+model without hydrogens (median 0.93-0.95 across the three sets, range
+0.86-1.09), which is where a sum of sigma/2 spheres should be cut: an
+isolated sphere reaches 1 only at its centre, so the level set at 1 runs
+through the region where neighbouring spheres overlap. So the tool's default
+since 2026-11-10 (`--mask-level auto`) cuts the field of a model WITHOUT
+hydrogens at 1.0 overlaps, with no gemmi target and no search, and calibrates
+a model WITH any. Binned R-free gap to mmtbx, medians, same entries:
+
+| set | calibrated | 0.8 | 0.9 | 1.0 | 1.1 | auto (1.0, calibrated if H) | auto vs calibrated, per entry |
+|---|---|---|---|---|---|---|---|
+| 20 entries, 2.6-3.0 Å (2 with H) | −0.0003 | +0.0035 | +0.0002 | −0.0009 | −0.0007 | −0.0010 | 13 better, 1 worse by > 0.001 |
+| 20 entries, 1.8-2.6 Å (2 with H) | −0.0017 | +0.0003 | −0.0012 | −0.0020 | −0.0013 | −0.0020 | 9 better, none worse by > 0.001 |
+| SW40, 39 entries (12 with H) | −0.0018 | −0.0008 | −0.0013 | −0.0014 | −0.0011 | −0.0016 | 7 better, none worse by > 0.001; median change 0 |
+
+The last column counts the hydrogen entries, which auto leaves calibrated.
+On the entries it does change, those without hydrogens, the fixed level
+against calibration is 13 better / 3 worse at 2.6-3.0 Å (median −0.0006),
+9 / 7 at 1.8-2.6 Å (median 0) and 7 better / 14 worse / 6 equal on SW40
+(median +0.0001, none by more than 0.001): a gain at low resolution, a wash
+in the middle, and a slight loss on SW40 that the SW40 median shows as
+−0.0018 to −0.0016. 0.9 would disturb SW40 least (median −0.0017, 13 of 39
+better) but leaves six low-resolution entries worse by more than 0.001,
+against one at 1.0; 1.0 is that trade.
+
+Hydrogens are why one level does not serve every model. A residue that
+carries them has its sp3 carbons bare and a sphere per hydrogen, which packs
+the field deeper, and its calibrated level runs from 1.12 to 1.46 with the
+hydrogen fraction; cut at 1.0, the four low- and mid-resolution entries with
+hydrogens lost 0.006-0.011. Typing those models united-atom with the
+hydrogens left out of the field brings their calibrated level back to 0.93
+(0.79-1.04) and at 1.0 recovers the loss at 1.8-3.0 Å (median of the four
++0.0020 against calibrated +0.0023), but costs SW40's twelve hydrogen entries 0.0009
+(−0.0014 against −0.0023), so they keep the calibration. The rule is "any
+hydrogen or deuterium in the model", the same flag the measurement used,
+counted after `--select`: a model whose hydrogens are selected away is cut
+at 1.0 like any model without them, so a with/without-hydrogens comparison
+should pass `--mask-level calibrate` to keep one mask rule for both arms.
+Not measured: the fixed level's dependence on the field's absolute scale,
+which calibration absorbed, for models with many partially occupied atoms.
+
+The time saved is the 62 thresholds of the search and gemmi's reference-grid
+mask: on these sets mask and gemmi time fell from 6.3 / 6.1 / 30.9 s to 1.2 /
+2.5 / 10.6 s, 7-10% of the torch total on one CPU at 4 threads. On the
+1,000-entry GPU run the threshold step was 27% of torch time. `--mask-level
+calibrate` restores the old behaviour for every model, and a number sets the
+level by hand. auto also calibrates whenever the sphere field is built off
+the settings 1.0 was measured with (`--sphere-offset`, `--sphere-edge`,
+`--sphere-radii element`, `--mask-blur`, `--taper-frac`), since each of those
+moves where the field crosses 1.0.
+
 ## What the density cutoff costs
 
 The R-factor above was measured at an atomic density cutoff of 0.01 e/A^3 --
