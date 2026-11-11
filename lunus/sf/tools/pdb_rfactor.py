@@ -170,9 +170,11 @@ def main():
             argv.append("--aniso")
         if args.select != "all":
             argv += ["--select", args.select]
+        # always passed, so --binned-row 0 turns the row off now that the
+        # torch tool runs it by default; before the passthrough, so that an
+        # --also-scale-bins passed through still wins
+        argv += ["--also-scale-bins", str(args.binned_row)]
         argv += passthrough
-        if args.binned_row:
-            argv += ["--also-scale-bins", str(args.binned_row)]
         print("\ntorch: fit_solvent_rfactor.py %s\n" % " ".join(argv[2:]))
         torch_args = fit_solvent_rfactor.build_parser().parse_args(argv)
         r = fit_solvent_rfactor.run(torch_args)

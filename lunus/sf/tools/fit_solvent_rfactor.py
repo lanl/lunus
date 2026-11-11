@@ -97,6 +97,22 @@ too large (7FPV at 3 A: occupancy 0.19, R-free 0.1895, against 0.26 and
 0.1634 on 0.7 A voxels). Beyond ~2.1 A run --mask gemmi with --max-voxel 0.7;
 the run warns when the voxels are no finer than the shrink radius.
 
+--write-mtz PATH writes the scaled model as synthetic data: FP = |k_total
+(F_protein + k_mask F_mask)| on the Fobs scale, SIGFP the observed sigmas,
+FreeR_flag the free set as read, in the CCP4 convention (test set 0, work
+bins 1..N-1: deposited CCP4 bins kept, status letters and 0/1 columns
+rewritten, the same reflections free) and
+PHIC the model's phase, on exactly the reflections the fit used, with the fit
+in the MTZ history. The model is the binned row's (--also-scale-bins, log
+bins by default since 2026-11-11), or the main fit's when that row does not
+run. --mtz-complete adds FMODEL/PHIFMODEL on every reflection to d_min, the
+unmeasured ones scaled with their nearest fitted reflection's bin, and
+extends FreeR_flag to the reflections the file never flagged at the observed
+fraction (extend_free_flags; 20 or fewer all go to the work set); a file
+without a test set gets no FreeR_flag column at all; FP/SIGFP stay on the
+measured reflections, because iotbx refuses an FP whose SIGFP is missing.
+--mtz-components and --mtz-observed add F_protein/F_mask and FOBS/SIGFOBS.
+
 --mask-source spheres|atoms|density is what the threshold is cut from. The
 default since 2026-11-10 is SPHERES: every atom a flat-top soft sphere of
 half its OPLS united-atom Lennard-Jones sigma (lunus.sf.mask_spheres), with
@@ -182,6 +198,8 @@ import argparse
 import contextlib
 import io
 import math
+import os
+import random
 import sys
 import time
 import warnings
@@ -310,17 +328,61 @@ def read_observations(path, d_min=None, crystal_symmetry=None, log=sys.stdout,
 
     flags = [a for a in arrays if block(a) == first and is_flag_array(a)]
     free_mask = np.zeros(F.size(), dtype=bool)
+    as_read = None
     if flags:
         raw = flags[0]
-        if isinstance(raw.data(), flex.std_string):
+        status = isinstance(raw.data(), flex.std_string)
+        if status:
+            observed = flex.bool([v != "x" for v in raw.data()])
             free = raw.customized_copy(
                 data=flex.bool([v == "f" for v in raw.data()]))
-            free = free.select(flex.bool([v != "x" for v in raw.data()]))
+            free = free.select(observed)
+            test_value = None
         else:
             test_value = get_r_free_flags_scores(
                 miller_arrays=[raw], test_flag_value=None).test_flag_values[0]
             free = raw.customized_copy(data=(raw.data() == test_value))
+            as_read = raw
         free = free.merge_equivalents().array().average_bijvoet_mates()
+        # The flags are WRITTEN in one convention, CCP4's: test set 0, work
+        # bins 1..N-1, which CCP4 programs (FREE 0 by default) and iotbx's
+        # scorer read alike. Deposited CCP4 bins with 0 the test set are
+        # kept as they are; anything else -- status letters, a 0/1 column
+        # with 1 free (which CCP4 reads INVERTED), any other test value --
+        # is rewritten from the free set read above, so the same reflections
+        # stay free. Which reflections are free is unchanged either way.
+        deposited_ccp4 = (not status and test_value == 0
+                          and flex.max(raw.data()) >= 4)    # r_free_utils.looks_like_ccp4_flags
+        if deposited_ccp4:
+            # Kept exactly when equivalents agree, which they do in deposited
+            # mmCIF (I+ and I- on one row) and in CCP4 freerflag output (one
+            # flag per unique hkl). Where two equivalents carry different
+            # WORK bins (3 and 7 on two Friedel mates), the exact merge
+            # refuses; replacing them with one fixed bin would pile every
+            # such reflection into it, so the bins are redrawn from the free
+            # set below instead. A test/work mismatch has already raised in
+            # the merge of free above, so the free set is never in question.
+            from libtbx.utils import Sorry
+            try:
+                as_read = as_read.merge_equivalents().array()
+                as_read = as_read.as_non_anomalous_array().merge_equivalents().array()
+            except (RuntimeError, Sorry):    # Sorry for a Friedel mismatch
+                deposited_ccp4 = False
+        if not deposited_ccp4:
+            # The work bins are drawn at random, seeded, with Python's
+            # generator handed back as it was -- and drawn AFTER the merge:
+            # drawn per row, two Friedel mates on separate rows almost never
+            # agree, and merging them would send nearly every work
+            # reflection to bin 1.
+            from cctbx.r_free_utils import export_r_free_flags_for_ccp4
+            state = random.getstate()
+            random.seed(0)
+            try:
+                ccp4 = export_r_free_flags_for_ccp4(free.data(), True)
+            finally:
+                random.setstate(state)
+            as_read = free.customized_copy(data=ccp4)
+            test_value = 0
         F, free = F.common_sets(free)
         free_mask = np.array(free.data(), dtype=bool)
     else:
@@ -331,6 +393,21 @@ def read_observations(path, d_min=None, crystal_symmetry=None, log=sys.stdout,
         # For callers that silence log but still need to say what was
         # dropped (mmtbx_fit, for a run of that method alone).
         info["dropped_note"] = "\n".join(n for n in (zero_note, note) if n)
+        # The free set as integer CCP4 flags (the file's own bins where it
+        # deposited CCP4 bins, otherwise rewritten above), in F's order, with
+        # the test value (always 0); None without flags. --write-mtz writes
+        # these rather than the boolean mask.
+        # (common_set returns as_read's entries in F's order; F was cut from
+        # a common set with it, so every reflection of F has one)
+        # No test reflection among the fitted ones means no free set to
+        # write: a column of work values would read as all-free in CCP4.
+        # free_flags_file keeps every reflection the file flags, fitted or
+        # not, so that --mtz-complete draws flags only for reflections the
+        # file never flagged (French-Wilson rejections and dropped zeros
+        # keep the flags they were deposited with).
+        has_test = as_read is not None and bool(free_mask.any())
+        info["free_flags"] = (as_read.common_set(F), test_value) if has_test else None
+        info["free_flags_file"] = as_read if has_test else None
     return F, free_mask
 
 
@@ -1734,16 +1811,164 @@ def _fit_solvent_bins(Fo, Fp, Fm, s2, s, b, n_bins, log_k_bins, u_params, aniso,
     return km, lk
 
 
+def model_f_c(fit, F_protein, F_mask, inv_d2):
+    """F_c = F_protein + k_mask F_mask with the fit's solvent, before the
+    overall scale; F_protein alone for a fit without solvent."""
+    if fit["fit_solvent"] and F_mask is not None:
+        return F_protein + solvent_weight(fit, inv_d2).to(F_protein.dtype) * F_mask
+    return F_protein
+
+
+def model_log_k(fit):
+    """The fit's log overall scale, per reflection for a binned fit."""
+    if fit.get("log_k_bins") is not None:
+        return fit["log_k_bins"][fit["bins"]]
+    return fit["log_k"]
+
+
 def model_amplitudes(fit, F_protein, F_mask, inv_d2, s_cart):
     with torch.no_grad():
-        F_c = F_protein
-        if fit["fit_solvent"] and F_mask is not None:
-            F_c = F_c + solvent_weight(fit, inv_d2).to(F_protein.dtype) * F_mask
-        log_k = fit["log_k"]
-        if fit.get("log_k_bins") is not None:
-            log_k = fit["log_k_bins"][fit["bins"]]
-        return _scaled_amplitudes(F_c, inv_d2, s_cart, log_k,
-                                  fit["u_params"], fit["aniso"])
+        return _scaled_amplitudes(model_f_c(fit, F_protein, F_mask, inv_d2), inv_d2,
+                                  s_cart, model_log_k(fit), fit["u_params"], fit["aniso"])
+
+
+def model_scale(fit, inv_d2, s_cart):
+    """The overall scale model_amplitudes puts on F_c, per reflection: real
+    and positive, so F_model keeps F_c's phase."""
+    return _scaled_amplitudes(torch.ones_like(inv_d2), inv_d2, s_cart, model_log_k(fit),
+                              fit["u_params"], fit["aniso"])
+
+
+def model_structure_factors(fit, F_protein, F_mask, inv_d2, s_cart):
+    """Complex F_model = k_total (F_protein + k_mask F_mask) on the Fobs
+    scale: model_amplitudes is its modulus, and its phase is F_c's."""
+    with torch.no_grad():
+        F_c = model_f_c(fit, F_protein, F_mask, inv_d2)
+        return model_scale(fit, inv_d2, s_cart).to(F_c.dtype) * F_c
+
+
+def nearest_bins(d_new, d_fit, bins_fit):
+    """A scale bin for reflections the fit never saw: that of the fitted
+    reflection nearest in d. Inside the fitted range that is the bin whose
+    range holds it; beyond it, the first or last bin, so a complete set's
+    lowest- and highest-resolution reflections take the end bins' scales."""
+    if len(d_fit) == 1:
+        return np.full(len(d_new), bins_fit[0])
+    order = np.argsort(d_fit)
+    d_sorted, b_sorted = d_fit[order], bins_fit[order]
+    pos = np.clip(np.searchsorted(d_sorted, d_new), 1, len(d_sorted) - 1)
+    left, right = d_sorted[pos - 1], d_sorted[pos]
+    pick = np.where(np.abs(d_new - left) <= np.abs(right - d_new), pos - 1, pos)
+    return b_sorted[pick]
+
+
+def extend_free_flags(flags, test_value, complete_set):
+    """flags (an integer miller array, test set test_value) extended to every
+    reflection of complete_set it lacks, keeping every value it has.
+
+    Up to 20 new reflections all go to the work set, as cctbx does for a
+    set too small to draw from; more are drawn at the flags' own test
+    fraction (cctbx's generate_r_free_flags, lattice symmetry respected,
+    which draws from Python's generator; per reflection at a fraction of
+    0.5 or more, which it refuses).
+    A work reflection takes a work value of the file's own, at random: a
+    CCP4 bin 1..N-1, or the one work value of a 0/1 column. Not cctbx's
+    extend_flags(preserve_input_values=True), which writes a small
+    all-work draw on CCP4 flags as bin 0 -- the TEST set. Seeded; the
+    caller restores the generators."""
+    from cctbx.array_family import flex
+
+    missing = complete_set.lone_set(flags)
+    n = missing.indices().size()
+    if n == 0:
+        return flags, 0
+    values = list(flags.data())
+    work_values = sorted(set(values) - {test_value}) or [1 if test_value == 0 else 0]
+    fraction = values.count(test_value) / float(len(values))
+    if n <= 20:
+        is_test = [False] * n
+    elif fraction < 0.5:
+        is_test = list(missing.generate_r_free_flags(
+            fraction=fraction, max_free=None, use_lattice_symmetry=True).data())
+    else:
+        # cctbx refuses a fraction of 0.5 or more (Sorry); a set flagged
+        # that way is drawn reflection by reflection at its own fraction
+        is_test = [random.random() < fraction for _ in range(n)]
+    new = flex.int([test_value if t else random.choice(work_values) for t in is_test])
+    return flags.concatenate(missing.array(data=new)), n
+
+
+def complete_free_flags(free_flags, free_flags_file, complete_set):
+    """The flags to write with a complete set: every flag the file has
+    inside it (free_flags_file, or the fitted reflections' free_flags pair
+    without one), extended by extend_free_flags to the reflections it never
+    flagged. Returns (flags, number drawn). The draw is seeded so that the
+    same run writes the same file, with Python's generator -- the only one
+    it draws from -- handed back as it was."""
+    flags, test_value = free_flags
+    base = flags if free_flags_file is None else free_flags_file.common_set(complete_set)
+    state = random.getstate()
+    random.seed(0)
+    try:
+        return extend_free_flags(base, test_value, complete_set)
+    finally:
+        random.setstate(state)
+
+
+def write_model_mtz(path, F_obs_array, free_flags, F_model, history,
+                    complete=None, components=None, observed=False):
+    """The scaled model as synthetic data.
+
+    F_obs_array is the observations the fit used (indices, symmetry,
+    sigmas); F_model the complex model on those reflections, in that order.
+    Columns: FP and SIGFP (|F_model| with the observed sigmas), PHIC
+    (F_model's phase), FreeR_flag (free_flags, an integer miller array, or
+    None for none; with complete, already extended to it by
+    complete_free_flags). complete, a dict with the complete miller set
+    ('set') and the model on it ('F_model'), adds FMODEL/PHIFMODEL over
+    every reflection to d_min: FP/SIGFP stay on the observed reflections,
+    because iotbx refuses an FP whose SIGFP is missing. components, a dict of complex arrays
+    'F_protein' and 'F_mask' on the same reflections as the model written
+    (the complete set if given), adds FPROTEIN/PHIFPROTEIN and
+    FMASK/PHIFMASK, unscaled. observed adds FOBS/SIGFOBS. history is a list
+    of lines for the MTZ history."""
+    from cctbx import miller
+    from cctbx.array_family import flex
+
+    def bare(a):
+        # a miller set of a's indices: complete_set() returns a set, the
+        # observations an array, and the columns are built the same way on both
+        return miller.set(a, a.indices(), a.anomalous_flag())
+
+    def phases(a, values):
+        return bare(a).array(data=flex.double(np.degrees(np.angle(values)).tolist()))
+
+    def cplx(a, values):
+        return bare(a).array(
+            data=flex.complex_double(np.asarray(values, dtype=complex).tolist()))
+
+    F_model = np.asarray(F_model)
+    fp = F_obs_array.customized_copy(data=flex.double(np.abs(F_model).tolist()))
+    ds = fp.as_mtz_dataset(column_root_label="FP")
+    ds.add_miller_array(phases(F_obs_array, F_model), column_root_label="PHIC",
+                        column_types="P")
+    if free_flags is not None:
+        ds.add_miller_array(free_flags.set_observation_type(None),
+                            column_root_label="FreeR_flag")
+    target = F_obs_array if complete is None else complete["set"]
+    if complete is not None:
+        ds.add_miller_array(cplx(target, complete["F_model"]), column_root_label="FMODEL")
+    if components is not None:
+        ds.add_miller_array(cplx(target, components["F_protein"]),
+                            column_root_label="FPROTEIN")
+        ds.add_miller_array(cplx(target, components["F_mask"]), column_root_label="FMASK")
+    if observed:
+        ds.add_miller_array(F_obs_array, column_root_label="FOBS")
+    mtz = ds.mtz_object()
+    # MTZ history lines hold 80 characters; the tool's own lines are kept
+    # shorter, and only a long file name in the last one is cut
+    mtz.add_history(flex.std_string([line[:80] for line in history]))
+    mtz.write(file_name=path)
 
 
 # ----------------------------------------------------------------- diagnostics
@@ -1908,6 +2133,119 @@ def shell_table(d, F_obs, model_no_solvent, model_solvent, work, free,
                  100.0 * float(solvent_share[sel].mean())), file=log)
 
 
+def write_mtz_from_run(args, result, F_obs_array, free_flags, fit, binned_row,
+                       F_protein, F_mask, inv_d2, s_cart, density, mask,
+                       volume, orth, blur, free_flags_file=None):
+    """--write-mtz: the model of `fit` (the binned row's when binned_row,
+    else the main fit's) written by write_model_mtz, with the fit in the
+    history. The mask level and source come from result, the dtype and
+    device from inv_d2. Returns the path written."""
+    dtype, device = inv_d2.dtype, inv_d2.device
+    mask_level, mask_source = result["mask_level"], result["mask_source"]
+    from lunus.sf.solvent_torch import f_solvent
+    from lunus.sf.structure_factor_torch import compute_fcalc, reciprocal_inv_d2
+
+    if binned_row:
+        which = "binned row (%s, solvent %s)" % (result["bin_scheme"],
+                                                 result["solvent_scheme binned"])
+        rw, rf = result["R-work binned"], result["R-free binned"]
+        k_sol, b_sol = result["k_sol binned"], result["b_sol binned"]
+    else:
+        reason = ("--scale-bins makes the main fit binned" if args.scale_bins
+                  else "the binned row is off (--also-scale-bins 0)")
+        which = "main fit (%s, solvent %s)" % (result["main_bin_scheme"] or "single scale",
+                                               result["solvent_scheme"])
+        rw, rf = result["R-work"], result["R-free"]
+        k_sol, b_sol = result["k_sol"], result["b_sol"]
+        print("\n--write-mtz: writing the main fit's model, since %s" % reason)
+    F_model = model_structure_factors(fit, F_protein, F_mask, inv_d2, s_cart)
+
+    complete = components = None
+    comp_obs = {"F_protein": F_protein, "F_mask": F_mask}
+    if args.mtz_complete:
+        full = F_obs_array.complete_set(d_min=F_obs_array.d_min())
+        hkl_all = torch.tensor(np.array(full.indices()), dtype=torch.long, device=device)
+        inv_d2_all = reciprocal_inv_d2(orth, hkl_all).to(dtype)
+        s_all = hkl_all.to(dtype) @ torch.linalg.inv(orth)
+        with torch.no_grad():
+            Fp_all = compute_fcalc(density, volume, hkl_all, orth, blur=blur)
+            Fm_all = f_solvent(mask, volume, hkl_all, orth)
+        fit_all = dict(fit)
+        if fit.get("bins") is not None:
+            d_all = np.array(full.d_spacings().data())
+            fit_all["bins"] = torch.as_tensor(
+                nearest_bins(d_all, np.array(F_obs_array.d_spacings().data()),
+                             fit["bins"].cpu().numpy()),
+                dtype=fit["bins"].dtype, device=fit["bins"].device)
+        Fmod_all = model_structure_factors(fit_all, Fp_all, Fm_all, inv_d2_all, s_all)
+        # the measured reflections keep exactly the values written as FP
+        from cctbx import miller
+        pairs = miller.match_indices(full.indices(), F_obs_array.indices()).pairs()
+        i_all = torch.as_tensor(np.array(pairs.column(0), dtype=np.int64), device=device)
+        i_obs = torch.as_tensor(np.array(pairs.column(1), dtype=np.int64), device=device)
+        for big, small in ((Fmod_all, F_model), (Fp_all, F_protein), (Fm_all, F_mask)):
+            big[i_all] = small[i_obs].to(big.dtype)
+        complete = {"set": full, "F_model": Fmod_all.cpu().numpy()}
+        comp_obs = {"F_protein": Fp_all, "F_mask": Fm_all}
+    if args.mtz_components:
+        components = {k: v.detach().cpu().numpy() for k, v in comp_obs.items()}
+
+    kb = (torch.exp(fit["log_k_bins"]).tolist() if fit.get("log_k_bins") is not None
+          else [float(torch.exp(fit["log_k"]))])
+    km = fit["k_mask_bins"].tolist() if fit.get("k_mask_bins") is not None else None
+    level = ("%g sphere overlaps" % mask_level if mask_level is not None
+             else "gemmi mask" if math.isnan(result["mask_cutoff"])
+             else "calibrated, cutoff %.4g" % result["mask_cutoff"])
+
+    def wrap(label, values, fmt="%.5g"):
+        lines, line = [], label
+        for v in values:
+            item = " " + fmt % v
+            if len(line) + len(item) > 78:
+                # MTZ readers strip leading blanks, so a continuation names
+                # its list rather than relying on indentation
+                lines.append(line)
+                line = label.split(" (")[0].split(" per ")[0] + " (cont.):"
+            line += item
+        return lines + [line]
+
+    history = ["lunus.sf fit_solvent_rfactor --write-mtz: scaled model, synthetic data",
+               "model %s" % which,
+               "FP = |k_total (F_protein + k_mask F_mask)| on the Fobs scale; PHIC its phase",
+               "R-work %.4f  R-free %.4f  (%d work, %d free)"
+               % (rw, rf, result["n_work"], result["n_free"]),
+               "k_sol %.4f  b_sol %.2f%s"
+               % (k_sol, b_sol, "" if km is None
+                  else "  (nearest exponential; the model is k_mask)")]
+    history += wrap("scale B (A^2, %s):" % ("cartesian B11 B22 B33 B12 B13 B23"
+                                            if fit["aniso"] else "isotropic"),
+                    [float(u) for u in fit["u_params"]], fmt="%.3f")
+    history += ["mask: %s source, %s; protein blur %.2f A^2"
+               % (mask_source, level, result["protein_blur"])]
+    history += wrap("k_total per bin, low to high res:" if len(kb) > 1
+                    else "k_total (single scale):", kb)
+    if km is not None:
+        history += wrap("k_mask per bin, low to high res:", km)
+    flags, n_new = (None if free_flags is None else free_flags[0]), 0
+    if complete is not None:
+        if free_flags is not None:
+            flags, n_new = complete_free_flags(free_flags, free_flags_file, complete["set"])
+        history.append("FMODEL/PHIFMODEL: complete set to %.3f A, %d reflections"
+                       % (F_obs_array.d_min(), complete["set"].size()))
+        if n_new:
+            history.append("FreeR_flag drawn for %d reflections the file never flagged"
+                           % n_new)
+    history.append("from %s and %s" % (args.pdb.split("/")[-1], args.cif.split("/")[-1]))
+    write_model_mtz(args.write_mtz, F_obs_array, flags,
+                    F_model.cpu().numpy(), history, complete=complete,
+                    components=components, observed=args.mtz_observed)
+    print("\nwrote %s: %s model on %d measured reflections%s"
+          % (args.write_mtz, which, F_obs_array.size(),
+             "" if complete is None
+             else ", FMODEL on %d to %.2f A" % (complete["set"].size(), F_obs_array.d_min())))
+    return args.write_mtz
+
+
 def build_parser():
     try:
         from lunus.sf.solvent_torch import SOURCE_B_DEFAULT
@@ -2024,14 +2362,38 @@ def build_parser():
                         "own logarithmic bins; N uses N equal-count bins (how "
                         "binned numbers before 2026-11-09 were measured, "
                         "with N = 20). Default 0, off")
-    p.add_argument("--also-scale-bins", type=scale_bins_arg, default=0,
+    p.add_argument("--also-scale-bins", type=scale_bins_arg, default="log",
                    metavar="log|N",
                    help="after the main fit, fit again with scale bins ('log' "
                         "or N, as --scale-bins) and "
                         "report that R alongside it, leaving the main fit and "
                         "everything printed from it unchanged. This is how "
                         "pdb_rfactor.py shows how much of a gap to mmtbx is "
-                        "the scaling model. Default 0, off")
+                        "the scaling model, and the model --write-mtz writes. "
+                        "Default log (mmtbx's bins) since 2026-11-11, as "
+                        "pdb_rfactor already ran it; 0 turns it off")
+    p.add_argument("--write-mtz", default=None, metavar="PATH",
+                   help="write the scaled model as synthetic data: FP (the "
+                        "model's amplitude on the Fobs scale), SIGFP (the "
+                        "observed sigmas), FreeR_flag (the free set as read, in "
+                        "the CCP4 convention: test 0, work bins 1..N-1) and "
+                        "PHIC (the model's phase), on the reflections the fit "
+                        "used, with the fit in the MTZ history. The model is "
+                        "the binned row's (--also-scale-bins); without that "
+                        "row, the main fit's")
+    p.add_argument("--mtz-complete", action="store_true",
+                   help="with --write-mtz, also write FMODEL/PHIFMODEL on "
+                        "every reflection to d_min, with the fitted scales "
+                        "carried to the unmeasured ones (the nearest fitted "
+                        "reflection's bin) and FreeR_flag extended to them at "
+                        "the observed fraction; FP/SIGFP stay on the measured "
+                        "reflections")
+    p.add_argument("--mtz-components", action="store_true",
+                   help="with --write-mtz, also write the unscaled F_protein "
+                        "and F_mask (FPROTEIN/PHIFPROTEIN, FMASK/PHIFMASK)")
+    p.add_argument("--mtz-observed", action="store_true",
+                   help="with --write-mtz, also write the observations the "
+                        "fit used (FOBS/SIGFOBS)")
     p.add_argument("--solvent-bins", default="auto", choices=["auto", "on", "off"],
                    help="with scale bins, fit one solvent scale per bin "
                         "(mmtbx's k_mask) instead of the single exponential "
@@ -2086,6 +2448,21 @@ def run(args):
         raise ValueError("--target-occupancy is a calibration target, and "
                          "--mask-level %g calibrates nothing; pass one or the "
                          "other" % args.mask_level)
+    mtz_extras = [name for name, on in (("--mtz-complete", args.mtz_complete),
+                                        ("--mtz-components", args.mtz_components),
+                                        ("--mtz-observed", args.mtz_observed)) if on]
+    if mtz_extras and not args.write_mtz:
+        raise ValueError("%s add columns to the file --write-mtz PATH writes; "
+                         "pass --write-mtz too" % " and ".join(mtz_extras))
+    if args.write_mtz:
+        # checked before the fit, not after it
+        if os.path.isdir(args.write_mtz):
+            raise ValueError("--write-mtz %s is a folder; name the file to write"
+                             % args.write_mtz)
+        folder = os.path.dirname(os.path.abspath(args.write_mtz))
+        if not os.path.isdir(folder) or not os.access(folder, os.W_OK):
+            raise ValueError("--write-mtz %s: %s is not a writable folder"
+                             % (args.write_mtz, folder))
     if args.mask_blur is None:
         # the sphere field's 0.5 A edge is all the smoothing it wants
         args.mask_blur = 0.0 if args.mask_source == "spheres" else MASK_BLUR_DEFAULT
@@ -2108,10 +2485,11 @@ def run(args):
     # bound at import, so the model summary and the dropped-reflection notes
     # land where everything else run() prints does (print_timing below, and
     # fit_scales's sink, for the same reason).
+    obs_info = {}
     with timed(timing, "read observations"):
         F_obs_array, free_np = read_observations(
             args.cif, d_min=args.d_min, crystal_symmetry=xrs.crystal_symmetry(),
-            log=sys.stdout)
+            log=sys.stdout, info=obs_info)
     d_np = np.array(F_obs_array.d_spacings().data())
     hkl_np = np.array(F_obs_array.indices())
     fobs_np = np.array(F_obs_array.data())
@@ -2469,10 +2847,12 @@ def run(args):
         print("  %-8s no solvent %.4f   with solvent %.4f   change %+.4f (%+.1f%%)"
               % (name, r0, r1, r1 - r0, 100.0 * (r1 - r0) / r0))
 
+    fitb = None
     if args.also_scale_bins and not args.scale_bins:
         # Reuses F_protein and F_mask, so this costs a scale fit, not a
-        # structure-factor calculation. Reported, never used for anything
-        # below: the single-scale fit stays the measure of the model.
+        # structure-factor calculation. Reported, and the model --write-mtz
+        # writes, but never used for anything else below: the single-scale
+        # fit stays the measure of the model.
         bins_b = assign_scale_bins(args.also_scale_bins, inv_d2, d_np)
         n = int(bins_b.max()) + 1
         # fit_scales's own log defaults to the stdout bound at import, which
@@ -2542,6 +2922,15 @@ def run(args):
         print("  %6.1f - %-7.1f %7d  %6.4f / %6.4f  %+8.4f %7.1f%%"
               % (min(hi, d_np.max()), lo, int(sel.sum()), r0, r1, r1 - r0,
                  100.0 * float(solvent_share[sel].mean())))
+
+    # after the tables, so that a failed write does not lose them
+    if args.write_mtz:
+        with timed(timing, "write mtz", device):
+            write_mtz_from_run(args, result, F_obs_array, obs_info.get("free_flags"),
+                               fit1 if fitb is None else fitb, fitb is not None,
+                               F_protein, F_mask, inv_d2, s_cart,
+                               density, mask, volume, orth, blur,
+                               free_flags_file=obs_info.get("free_flags_file"))
 
     if args.reference:
         with timed(timing, "mmtbx reference"):
