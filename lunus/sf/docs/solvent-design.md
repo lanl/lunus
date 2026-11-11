@@ -838,6 +838,47 @@ nothing at high resolution may move: median gap +0.0010 → -0.0005, better on
 gain at every resolution and the first change that puts the median SW40
 entry ahead of mmtbx.
 
+## Soft spheres of the Lennard-Jones radius
+
+The atom-presence field still drew its boundary at a density LEVEL, which
+depends on how crowded the neighbourhood is, and gave every element the same
+width. The next source (`lunus/sf/mask_spheres.py`, the R-factor tool's
+default since 2026-11-10) puts each atom down as a flat-top sphere of radius
+sigma/2, sigma its OPLS united-atom Lennard-Jones diameter (Jorgensen and
+Tirado-Rives 1988, as Tinker's `params/oplsua.prm` distributes it), with a
+0.5 Å Fermi edge and no further smoothing. The united-atom types carry their
+hydrogens implicitly, which is how a model without hydrogens gets a methyl
+carbon (3.905-3.91 Å) larger than a carbonyl carbon (3.75) or a ring carbon
+(3.55); ligands, ions and unknown names fall back to gemmi's van der Waals
+radius on the same scale. The sphere is five Gaussians fitted once per
+radius (`SPHERE_FIT_TABLE`, precomputed for every radius the table and the
+fallback produce), so the placement and its gradients are the density's and
+the setup costs nothing.
+
+Binned R-free gap to mmtbx, medians, same entries as above:
+
+| set | atom-presence field | spheres | better on | element radii instead |
+|---|---|---|---|---|
+| 20 entries, 2.6-3.0 Å | +0.0046 | −0.0003 | 19/20 | +0.0015 |
+| 20 entries, 1.8-2.6 Å | +0.0017 | −0.0017 | 19/20 | |
+| SW40, 39 entries | −0.0005 | −0.0018 | 38/39 | |
+
+gemmi's geometric mask reaches −0.0015 on the first set, so the spheres sit
+at the ceiling. The united-atom radii beat element radii on 18 of 20
+low-resolution entries (median 0.0022). What else was measured on the low-
+resolution set: the usual 100 Å² smoothing on top of the spheres (+0.013,
+the edge and the smoothing stack), 25 Å² (+0.0025), radius offsets of −0.2,
++0.2 and +0.4 Å (−0.0013, +0.0005, +0.0030) and a 0.4 Å edge (−0.0013).
+Those sweeps used a first radius table written from memory (alpha and
+aromatic carbons, Arg CZ and water off by up to 1.5 Å in sigma); on the
+published table the offset was re-checked (−0.2 / 0 / +0.2 Å: −0.0007 /
+−0.0003 / +0.0000), so the default sits in a flat optimum, and the table
+above was re-measured after two later fixes (charged atoms such as O1- had
+fallen back to the generic element; one hydrogen anywhere had switched the
+whole model to explicit-hydrogen radii, now decided per residue). In the library: `SolventModel(spheres=True)` (mask_blur then
+defaults to 0) with `mask_spheres.sphere_kernels` as the pipeline's
+`mask_kernels`; opt-in.
+
 ## What the density cutoff costs
 
 The R-factor above was measured at an atomic density cutoff of 0.01 e/A^3 --

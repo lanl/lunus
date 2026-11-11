@@ -198,10 +198,11 @@ def test_log_binned_row_through_run_on_7fpv_at_3a():
     # on the d_min/4 and 0.7 A-capped grids that were the default for a few
     # hours each; 0.1680 / 0.1921 back on the d_min/3 grid with the target on
     # the 0.7 A reference grid; 0.1628 / 0.1845 with the mask cut from the
-    # atom-presence field (--mask-source density --target-spacing same
-    # --rate 1.5 reproduces the second pair). mmtbx: 0.1561 / 0.1811.
-    assert abs(r["R-work binned"] - 0.1628) < 5e-4
-    assert abs(r["R-free binned"] - 0.1845) < 1e-3
+    # atom-presence field; 0.1591 / 0.1797 from soft spheres, the default
+    # (--mask-source density --target-spacing same --rate 1.5 reproduces the
+    # second pair). mmtbx: 0.1561 / 0.1811.
+    assert abs(r["R-work binned"] - 0.1591) < 5e-4
+    assert abs(r["R-free binned"] - 0.1797) < 1e-3
 
 
 def test_main_fit_with_log_bins_through_run_on_7fpv_at_3a():
@@ -220,18 +221,18 @@ def test_main_fit_with_log_bins_through_run_on_7fpv_at_3a():
     assert "overall scale per resolution bin: 6 log bins" in out.getvalue()
     assert "fitted per resolution bin (6 bins)" in out.getvalue()
     # The main fit with bins also scales the solvent per bin by default
-    # (measured 2026-11-10 with the mask cut from the atom-presence field:
-    # 0.1635 / 0.1875), and the exponential is one flag away (0.1628 /
-    # 0.1845). With the mask cut from the density these were 0.1689 /
-    # 0.1935 and 0.1680 / 0.1921.
+    # (measured 2026-11-10 with the mask cut from soft spheres: 0.1596 /
+    # 0.1820), and the exponential is one flag away (0.1591 / 0.1797). From
+    # the atom-presence field these were 0.1635 / 0.1875 and 0.1628 /
+    # 0.1845; from the density 0.1689 / 0.1935 and 0.1680 / 0.1921.
     assert r["solvent_scheme"] == "per bin"
     assert "solvent scale is one value per bin" in out.getvalue()
-    assert abs(r["R-work"] - 0.1635) < 5e-4 and abs(r["R-free"] - 0.1875) < 1e-3
+    assert abs(r["R-work"] - 0.1596) < 5e-4 and abs(r["R-free"] - 0.1820) < 1e-3
     args.solvent_bins = "off"
     with contextlib.redirect_stdout(io.StringIO()):
         r2 = fit_solvent_rfactor.run(args)
     assert r2["solvent_scheme"] == "exponential"
-    assert abs(r2["R-work"] - 0.1628) < 5e-4 and abs(r2["R-free"] - 0.1845) < 1e-3
+    assert abs(r2["R-work"] - 0.1591) < 5e-4 and abs(r2["R-free"] - 0.1797) < 1e-3
 
 
 def test_main_forwards_the_default_binned_row(monkeypatch, capsys):
@@ -290,12 +291,12 @@ def test_binned_row_defaults_to_per_bin_solvent_on_7fpv_at_3a():
     assert r["solvent_scheme"] == "exponential"
     assert "binned row: 6 log bins, solvent per bin" in text
     assert "solvent scale per bin (low to high resolution):" in text
-    # Measured 2026-11-10 with the mask cut from the atom-presence field;
-    # the exponential gives 0.1628 / 0.1845 (mask cut from the density:
-    # 0.1689 / 0.1935, single 0.1682).
-    assert abs(r["R-work binned"] - 0.1635) < 5e-4
-    assert abs(r["R-free binned"] - 0.1875) < 1e-3
-    assert abs(r["R-work"] - 0.1633) < 5e-4    # single-scale row: not moved by the binned row
+    # Measured 2026-11-10 with the mask cut from soft spheres; the
+    # exponential gives 0.1591 / 0.1797 (atom-presence field: 0.1635 /
+    # 0.1875, single 0.1633; density: 0.1689 / 0.1935, single 0.1682).
+    assert abs(r["R-work binned"] - 0.1596) < 5e-4
+    assert abs(r["R-free binned"] - 0.1820) < 1e-3
+    assert abs(r["R-work"] - 0.1596) < 5e-4    # single-scale row: not moved by the binned row
     assert 0.0 <= r["b_sol binned"] <= 150.0 and 0.0 <= r["k_sol binned"] <= 0.6
     # per-phase timing: every phase this run goes through is present, none
     # negative, the phases do not exceed the total, and the table is printed
@@ -671,7 +672,7 @@ def test_protein_blur_fixes_sharp_atoms_on_the_default_grid(tmp_path):
 
     def fit(*extra):
         args = fit_solvent_rfactor.build_parser().parse_args(
-            [pdb, mtz, "--shells", "2"] + list(extra))
+            [pdb, mtz, "--shells", "2", "--mask-source", "atoms"] + list(extra))
         with contextlib.redirect_stdout(io.StringIO()) as out:
             r = fit_solvent_rfactor.run(args)
         return r, out.getvalue()
@@ -750,7 +751,7 @@ def test_protein_blur_leaves_the_threshold_mask_as_shipped(tmp_path):
         # on the d_min/3 grid, where B = 20 atoms still earn a blur of ~20
         # A^2, pinned so the margin below does not depend on the grid rule
         args = fit_solvent_rfactor.build_parser().parse_args(
-            [pdb, mtz, "--shells", "2", "--rate", "1.5"] + list(extra))
+            [pdb, mtz, "--shells", "2", "--rate", "1.5", "--mask-source", "atoms"] + list(extra))
         with contextlib.redirect_stdout(io.StringIO()):
             return fit_solvent_rfactor.run(args)
 
@@ -1063,6 +1064,8 @@ def test_mask_source_is_the_atom_presence_field(tmp_path):
     pdb, mtz = sharp_toy(tmp_path, aniso=True)      # B 2-20, C/N/O/S
 
     def fit(*extra):
+        if "--mask-source" not in extra:
+            extra = ("--mask-source", "atoms") + tuple(extra)
         args = fit_solvent_rfactor.build_parser().parse_args(
             [pdb, mtz, "--shells", "2"] + list(extra))
         with contextlib.redirect_stdout(io.StringIO()) as out:
@@ -1102,6 +1105,8 @@ def test_mask_source_is_the_atom_presence_field(tmp_path):
     open(pdb_c, "w").write(relabelled + "\n")
 
     def fit_c(*extra):
+        if "--mask-source" not in extra:
+            extra = ("--mask-source", "atoms") + tuple(extra)
         args = fit_solvent_rfactor.build_parser().parse_args(
             [pdb_c, mtz, "--shells", "2"] + list(extra))
         with contextlib.redirect_stdout(io.StringIO()):
@@ -1114,3 +1119,59 @@ def test_mask_source_is_the_atom_presence_field(tmp_path):
     # what is left is the IT92 shape difference between S and C, a fraction
     # of the electron-count effect (measured 0.08 against 0.20 here)
     assert rel_atoms < 0.5 * rel_dens, (rel_atoms, rel_dens)
+
+
+@requires_cctbx
+def test_default_mask_source_is_soft_spheres(tmp_path):
+    """The tool's default mask is cut from soft spheres of half each atom's
+    Lennard-Jones sigma, with no extra smoothing; it meets the target
+    occupancy, F_protein is unchanged, and it differs from the atoms and
+    density sources."""
+    import contextlib
+    import io
+
+    import fit_solvent_rfactor
+
+    pdb, mtz = sharp_toy(tmp_path, aniso=True)
+
+    def fit(*extra):
+        args = fit_solvent_rfactor.build_parser().parse_args(
+            [pdb, mtz, "--shells", "2"] + list(extra))
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            r = fit_solvent_rfactor.run(args)
+        return args, r, out.getvalue()
+
+    args, r, text = fit()
+    assert args.mask_source == "spheres", (
+        "default mask source is %r, not spheres" % args.mask_source)
+    assert args.mask_blur == 0.0 and r["mask_source"] == "spheres" and r["sphere_edge"] == 0.5
+    assert "mask source: soft spheres" in text
+    assert abs(r["mask_occupancy"] - r["target_occupancy"]) < 3e-3
+    _, ra, _ = fit("--mask-source", "atoms")
+    _, rd, _ = fit("--mask-source", "density")
+    assert r["R-work no solvent"] == ra["R-work no solvent"] == rd["R-work no solvent"]
+    assert r["R-work"] != ra["R-work"] and r["R-work"] != rd["R-work"]
+
+
+def test_sphere_source_united_atom_radii_on_7fpv_without_hydrogens():
+    """7FPV carries explicit hydrogens on every residue, so its other pins
+    run the explicit-H radii. With the hydrogens selected away the spheres
+    take the united-atom types (Ala and Val/Leu methyls at 1.955 A, alpha
+    carbons at 1.90, ring carbons at 1.775, Arg CZ at 1.125); pinned 2026-11-10."""
+    import contextlib
+    import io
+
+    import fit_solvent_rfactor
+
+    args = fit_solvent_rfactor.build_parser().parse_args(
+        [os.path.join(COMPARE, "7FPV.pdb"), os.path.join(COMPARE, "7FPV-sf.cif"),
+         "--d-min", "3.0", "--aniso", "--also-scale-bins", "log", "--shells", "3",
+         "--solvent-bins", "off", "--select", "not element H"])
+    with contextlib.redirect_stdout(io.StringIO()) as out:
+        r = fit_solvent_rfactor.run(args)
+    text = out.getvalue()
+    assert r["mask_source"] == "spheres"
+    for radius in ("1.90 A", "1.95 A", "1.77 A", "1.12 A"):
+        assert radius in text.split("mask source: soft spheres")[1].split("\n")[0], radius
+    assert abs(r["R-work binned"] - 0.1618) < 5e-4
+    assert abs(r["R-free binned"] - 0.1874) < 1e-3
