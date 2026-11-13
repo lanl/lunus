@@ -44,11 +44,18 @@ literal zero is not available.
              sweep) and with L-BFGS. Answers "does it cost steps, or
              convergence?". L-BFGS is the one to watch: quasi-Newton
              methods assume a smooth gradient and stall on a kinked one,
-             where Adam averages over the noise.
+             where Adam averages over the noise. A run short of its
+             iterations is not necessarily a stall: torch also stops at
+             max_eval loss evaluations (5/4 of the iterations unless
+             --max-eval says otherwise), and a kinked gradient costs
+             evaluations before it costs convergence. Each run's line
+             says which ended it.
 
   schedule   The two-stage refinement the first sweep suggested. On 7FPV
-             with the self-consistent target the taper was decisive at a
-             1e-2 cutoff (L-BFGS stalled without it) and immaterial at
+             with the self-consistent target the taper mattered at a
+             1e-2 cutoff (without it L-BFGS took 2.4 times the loss
+             evaluations and ended at four times the loss; first read as
+             a stall, that run had ended on max_eval) and was immaterial at
              1e-4, because the density jump at the boundary IS the cutoff
              value. But an evaluation at 1e-2 costs about a quarter of one
              at 1e-4 (mean radius 1.93 against 3.14 A, work ~ r^3), and the

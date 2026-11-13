@@ -108,17 +108,29 @@ boundary is the cutoff value itself.**
 
 | cutoff | width | walk: rms jump in dL/dt | L-BFGS, 200 it., exact target | at 0.001 Å step: max \|fd−auto\|/\|auto\| |
 |---|---|---|---|---|
-| 1e-2 | hard | 0.33 | **stalled at 122**, 5.8e-4 | 10 |
+| 1e-2 | hard | 0.33 | **out of evaluations at 122**, 5.8e-4; 3.0e-4 uncapped | 10 |
 | 1e-2 | 0.01–0.1 | 0.009 | ran out, 2.3–2.7e-4 | 0.1–0.01 |
 | 1e-2 | 0.3 | 0.009 | ran out, 4.5e-4 | 1e-4 |
 | 1e-4 | hard | 0.010 | ran out, **5.3e-5** | 0.19 |
 | 1e-4 | 0.01–0.3 | 0.009 | ran out, 5.7e-5 | 0.005 |
 
 - **At 1e-2** the hard cutoff's gradient disagrees with the loss's actual
-  slope along a collective walk by 23% rms, and L-BFGS fails its line search
-  before the budget is spent. Any taper from 0.01 Å up removes that: the
-  roughness falls 35-fold to the walk's own resolution and L-BFGS runs to
-  completion at a tenth of the loss. Adam does not care either way; its loss
+  slope along a collective walk by 23% rms, and L-BFGS pays for it in its
+  line searches. The run ended at iteration 122 on torch's default cap on
+  loss evaluations (`max_eval`, 5/4 of the iterations: 250 here, 254 used),
+  which this section first reported as a failed line search. It was not
+  one. **Re-run 2026-11-13 with `--max-eval 3000`** (CPU,
+  `taper_exact_hard_maxeval.json`) the hard cutoff completes its 200
+  iterations in 478 evaluations and ends at 3.0e-4; the 0.1 Å taper,
+  re-run alongside with the taper beginning at the threshold, takes 208
+  and ends at 1.7e-4, as it did on CUDA in the re-run of 2026-10-31. Any
+  taper from 0.01 Å up removes the roughness, which falls 35-fold to the
+  walk's own resolution, and L-BFGS then spends about one evaluation per
+  iteration where the hard cutoff spends 2.4. Against the model's own
+  amplitudes the same re-run (`taper_self_hard_maxeval.json`) gives 488
+  evaluations and 2.3e-4, against 5.3–6.4e-5 for the tapers. So at 1e-2
+  the hard cutoff costs evaluations and some of the final loss, not the
+  run. Adam does not care either way; its loss
   trajectories are identical across widths, which is the usual first-order
   indifference to a kinked gradient, and why a result obtained only with
   Adam says nothing about the taper.
@@ -139,7 +151,7 @@ boundary is the cutoff value itself.**
   at 0.1 and 1.23e-4 at 0.3 Å, against 2.49 / 2.30 / 2.73 / 4.46e-4 before,
   because a taper that begins at the threshold keeps part of the tail a
   hard cutoff drops, and a wider one keeps more of it. The hard cutoff is
-  the same run either way (5.9e-4, stall at 118), and roughness and
+  the same run either way (5.9e-4, out of evaluations at iteration 118), and roughness and
   fidelity are unchanged to the second digit, so where the taper begins
   affects the forward model only, as it should.
   A 1e-5 final cutoff bought nothing over 1e-4 in any run.
@@ -185,9 +197,9 @@ iterations, CPU checks on 2026-10-31):
 | free atoms | hard cutoff | taper 0.1 Å |
 |---|---|---|
 | every deposited atom (3,341; 1,527 are H, ∼350 water) | 0.250 Å | 0.283 Å |
-| heavy protein atoms (1,523), alternates included | 0.088 Å, stopped early (lowest 0.083) | 0.094 Å, drifting from 0.083 |
+| heavy protein atoms (1,523), alternates included | 0.088 Å, drifting from 0.083 | 0.094 Å, drifting from 0.083 |
 | heavy protein atoms, alternates B/C/D excluded (1,270) | **0.019 Å** | **0.017 Å** |
-| heavy protein atoms with every B set to 55 Å² | 0.135 Å, stopped early (lowest 0.130) | 0.173 Å, drifting from 0.129 |
+| heavy protein atoms with every B set to 55 Å² | 0.138 Å, drifting from 0.130 | 0.173 Å, drifting from 0.129 |
 
 The three heavy-atom rows were re-measured on CUDA on 2026-11-03
 (`lbfgs_7fpv_heavy_fixed.json`, `lbfgs_7fpv_heavy_b55_fixed.json`, and the
@@ -198,6 +210,15 @@ atoms: the 1,523-atom model held about 194 hydrogens and some water in
 place of heavy protein atoms (388 of 1,523 atoms wrong), and the 1,270-atom
 model held 109 B/C/D conformers in place of A atoms. They read 0.147 /
 0.158, 0.040 / 0.041 and 0.194 / 0.345 Å.
+
+The two hard-cutoff entries with alternates in were measured again on
+2026-11-13 (CPU, `--max-eval 3000`, `lbfgs_7fpv_heavy_maxeval.json` and
+`lbfgs_7fpv_heavy_b55_maxeval.json`). On CUDA they had ended at iteration
+275 and 222 of 300, at 0.088 and 0.135 Å, on torch's default cap of 375
+loss evaluations, and were reported here as stopping early. With
+evaluations to spare both run all 300 iterations (593 and 569
+evaluations) and drift like their tapered counterparts, which the re-run
+reproduces to the digits shown.
 
 1. **Hydrogens out.** The amplitudes barely constrain a hydrogen, so free
    hydrogens drift and, at 46% of the atoms, dominate the rmsd. They do
@@ -227,24 +248,32 @@ model held 109 B/C/D conformers in place of A atoms. They read 0.147 /
 With the single-conformer heavy-atom model (1,270 atoms, `--occ-one`
 restoring the 220 kept A conformers to full occupancy), 11,011 reflections
 against 3,810 coordinates, 2.9 per parameter, the box's ratio
-(`lbfgs_7fpv_single_fixed.json`, 2026-11-03):
+(`lbfgs_7fpv_single_maxeval.json`, CPU, `--max-eval 3000`, 2026-11-13):
 
-| cutoff | width | final rmsd (Å) | final loss | iterations of 300 |
-|---|---|---|---|---|
-| 1e-2 | hard | 0.020 | 5.9e-5 | 155, stopped early |
-| 1e-2 | 0.1 | 0.009 | 1.4e-5 | 300 |
-| 1e-3 | hard | 0.009 | 1.2e-5 | 164, stopped early |
-| 1e-3 | 0.1 | 0.017 | 3.9e-5 | 253, stopped early |
-| 1e-4 | hard | 0.019 | 5.5e-5 | 174, stopped early |
-| 1e-4 | 0.1 | 0.017 | 3.9e-5 | 300 |
+| cutoff | width | final rmsd (Å) | final loss | iterations of 300 | loss evaluations |
+|---|---|---|---|---|---|
+| 1e-2 | hard | 0.018 | 1.9e-5 | 300 | 1,123 |
+| 1e-2 | 0.1 | 0.009 | 1.4e-5 | 300 | 460 |
+| 1e-3 | hard | 0.010 | 1.2e-5 | 300 | 914 |
+| 1e-3 | 0.1 | 0.017 | 3.9e-5 | 300 | 388 |
+| 1e-4 | hard | 0.019 | 5.5e-5 | 300 | 809 |
+| 1e-4 | 0.1 | 0.017 | 3.9e-5 | 300 | 326 |
 
-Every run reaches 0.009 to 0.020 Å, with or without the taper, at every
-cutoff. Four runs stop early, the three hard-cutoff runs and the taper at
-1e-3, at iteration 155 to 253. Three of those had stopped moving first
-(by less than 0.001 Å over their last 40 records): the stop is the
-optimizer finding no descent direction near the minimum, not a failure to
-reach it. The exception is the hard cutoff at 1e-2, still improving when it
-stopped at 0.020 Å, the coarsest cutoff without the taper.
+Every run reaches 0.009 to 0.019 Å, with or without the taper, at every
+cutoff, and every run completes its 300 iterations: no line search fails.
+What the hard cutoff costs here is evaluations, 2.4 to 2.5 times the
+taper's at each cutoff, which is the line search working across the kinks.
+
+This table replaces the CUDA run of 2026-11-03
+(`lbfgs_7fpv_single_fixed.json`), made with torch's default cap of 375
+loss evaluations (`max_eval`, 5/4 of the iterations). Four of its runs
+ended on that cap, the three hard-cutoff runs and the taper at 1e-3, at
+iteration 155 to 253 with 376 to 381 evaluations, and were reported here
+as stopping early because the optimizer found no descent direction near
+the minimum. They were out of evaluations; `study_taper.py` could not
+then tell the two apart and now reports which it was. The two CUDA runs
+that were not capped agree with the table to the digits shown, and the
+capped ones had reached 0.009 to 0.020 Å.
 
 These numbers replace a run of 2026-10-31 (`lbfgs_7fpv_single.json`) whose
 `--select` was applied in the wrong atom order, so its "single-conformer"
@@ -257,11 +286,14 @@ the alternates (`lbfgs_7fpv_1p2*.json`), are superseded.
 which is the conclusion the study is for, judged by the rmsd of the
 refined coordinates from the true structure. On the 1,270-atom
 single-conformer 7FPV model, L-BFGS recovers the structure as well
-without the taper as with it at every cutoff tested, 1e-4 to 1e-2. On
+without the taper as with it at every cutoff tested, 1e-4 to 1e-2, at
+about two and a half times the loss evaluations. On
 the 39,040-atom box it does so at 1e-4 (0.019 against 0.018 Å) and does
 not at 1e-3 (0.149 Å) or 1e-2 (0.307 Å, the starting distance, after 52
 iterations), stopping on a failed line search while still far from the
-minimum, while every tapered run reaches 0.014 to 0.018 Å; 0.03 and 0.1 Å
+minimum (89 and 299 evaluations, well short of the cap of 375, so these
+two are not the cap exits corrected above), while every tapered run
+reaches 0.014 to 0.018 Å; 0.03 and 0.1 Å
 behave the same. So whether the taper matters depends on the system: it
 did not on the small one at any cutoff, and on the large one it decided
 the outcome at 1e-3 and 1e-2. That is the direction expected, since the
