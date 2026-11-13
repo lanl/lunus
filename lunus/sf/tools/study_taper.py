@@ -384,14 +384,49 @@ def run_adam(s, k, frac_start, disp_cart, target, lr, steps, reach, log):
                 steps_to_reach=hit)
 
 
+ITERATION_BUDGET = "iteration budget"
+EVALUATION_CAP = "evaluation cap"
+FAILED_LINE_SEARCH = "failed line search"
+
+
+def default_max_eval(steps):
+    """torch.optim.LBFGS's own default for max_eval, which it applies when
+    given None. Spelled out so that the cap is passed to torch explicitly."""
+    return steps * 5 // 4
+
+
+def lbfgs_stop_reason(n_iter, n_evals, steps, max_eval):
+    """Why one LBFGS.step() with the optimizer's two tolerances at zero
+    returned, from its iteration and evaluation counts. Tested in torch's
+    own order: it leaves its loop on the iteration budget first, then on the
+    evaluation cap, and with the tolerances off the only exits left are a
+    line search that made no step, a direction that is not a descent
+    direction, or an exactly zero gradient -- all reported as a failed line
+    search, the stall this stage exists to see. A run converged to round-off
+    ends that way too; read its final loss. A stall that falls on the very
+    iteration that also exhausts the iterations or the evaluations is
+    reported as that budget, as torch itself would leave on it: these counts
+    do not separate the two, and a cap exit is no evidence either way, since
+    the cap also cuts the last line search short. Raise max_eval to find out."""
+    if n_iter >= steps:
+        return ITERATION_BUDGET
+    if n_evals >= max_eval:
+        return EVALUATION_CAP
+    return FAILED_LINE_SEARCH
+
+
 def run_lbfgs(s, k, frac_start, disp_cart, target, steps, reach, log,
-              delta_init=None, label=None):
-    """One L-BFGS run of `steps` iterations. delta_init continues from an
-    earlier run's displacement (the schedule stage); the optimizer state is
-    always fresh. Returns (record, delta)."""
+              delta_init=None, label=None, max_eval=None):
+    """One L-BFGS run of at most `steps` iterations and `max_eval` loss
+    evaluations (default: torch's, steps * 5 // 4). delta_init continues
+    from an earlier run's displacement (the schedule stage); the optimizer
+    state is always fresh. Returns (record, delta)."""
+    if max_eval is None:
+        max_eval = default_max_eval(steps)
     delta = (torch.zeros_like(disp_cart) if delta_init is None
              else delta_init.detach().clone()).requires_grad_(True)
-    opt = torch.optim.LBFGS([delta], lr=1.0, max_iter=steps, history_size=20,
+    opt = torch.optim.LBFGS([delta], lr=1.0, max_iter=steps, max_eval=max_eval,
+                            history_size=20,
                             line_search_fn="strong_wolfe",
                             tolerance_grad=0.0, tolerance_change=0.0)
     evals = []
@@ -410,18 +445,21 @@ def run_lbfgs(s, k, frac_start, disp_cart, target, steps, reach, log,
         final_L = float(loss_fn(forward(s, k, displaced(s, frac_start, delta)), target))
     final_rmsd = rmsd_to_truth(delta.detach(), disp_cart)
     hit = next((i for i, e in enumerate(evals) if e[0] < reach * evals[0][0]), None)
-    # L-BFGS with max_iter=steps stops early only on a failed line search
-    # (or an exactly zero gradient, with the tolerances off), so iterations
-    # short of the budget are the stall count that this stage exists to see.
+    # Iterations short of the budget are not all stalls: a run also ends when
+    # its evaluations reach max_eval, which is a budget, not a failure. Only
+    # FAILED_LINE_SEARCH is the stall count that this stage exists to see.
+    reason = lbfgs_stop_reason(n_iter, n_evals, steps, max_eval)
     print("  %-28s L-BFGS  loss %.3e -> %.3e  rmsd %.3f -> %.3f A  "
-          "iterations %d of %d  evaluations %d  reached %gx start at eval %s%s"
+          "iterations %d of %d  evaluations %d of %d  "
+          "reached %gx start at eval %s  %s: %s"
           % (label or k["label"], evals[0][0], final_L, evals[0][1], final_rmsd,
-             n_iter, steps, n_evals, reach, hit,
-             "  STOPPED EARLY" if n_iter < steps else ""), file=log)
+             n_iter, steps, n_evals, max_eval, reach, hit,
+             "STOPPED EARLY" if n_iter < steps else "ended", reason), file=log)
     return dict(loss=[e[0] for e in evals], rmsd=[e[1] for e in evals],
                 final_loss=final_L, final_rmsd=final_rmsd, iterations=n_iter,
                 evaluations=n_evals, stopped_early=n_iter < steps,
-                evals_to_reach=hit), delta.detach()
+                evals_to_reach=hit, max_eval=max_eval,
+                stop_reason=reason), delta.detach()
 
 
 def sync(device):
@@ -433,9 +471,10 @@ def sync(device):
 
 # ------------------------------------------------------------------ schedule
 def stage_schedule(s, frac_start, disp_cart, exact_target, width, coarse,
-                   fine, coarse_steps, steps, reach, log):
+                   fine, coarse_steps, steps, reach, log, max_eval=None):
     """One-stage L-BFGS at `fine` against two-stage coarse-then-fine, same
-    total iteration budget, same target, timed."""
+    total iteration budget, same target, timed. max_eval, if given, caps
+    each of the three runs separately."""
     k_c = build_kernels(s, coarse, width)
     k_f = build_kernels(s, fine, width)
     with torch.no_grad():
@@ -455,17 +494,17 @@ def stage_schedule(s, frac_start, disp_cart, exact_target, width, coarse,
 
     (one, _), t_one = timed(lambda: run_lbfgs(
         s, k_f, frac_start, disp_cart, target, steps, reach, log,
-        label="one-stage %s" % tag))
+        label="one-stage %s" % tag, max_eval=max_eval))
 
     (st1, delta1), t_c = timed(lambda: run_lbfgs(
         s, k_c, frac_start, disp_cart, target, coarse_steps, reach, log,
-        label="stage 1 (coarse) %s" % tag))
+        label="stage 1 (coarse) %s" % tag, max_eval=max_eval))
     with torch.no_grad():                   # where the coarse optimum sits,
         L_switch = float(loss_fn(forward(   # seen by the fine model
             s, k_f, displaced(s, frac_start, delta1)), target))
     (st2, _), t_f = timed(lambda: run_lbfgs(
         s, k_f, frac_start, disp_cart, target, steps - coarse_steps, reach, log,
-        delta_init=delta1, label="stage 2 (fine) %s" % tag))
+        delta_init=delta1, label="stage 2 (fine) %s" % tag, max_eval=max_eval))
     print("  %-28s one-stage %.3e / %.3f A in %.1f s;  two-stage %.3e / %.3f A "
           "in %.1f s (%.1f + %.1f);  loss under the fine model at the switch %.3e"
           % (tag, one["final_loss"], one["final_rmsd"], t_one,
@@ -532,6 +571,11 @@ def build_parser():
     p.add_argument("--steps", type=int, default=200, help="per optimizer run")
     p.add_argument("--lrs", type=float, nargs="+", default=[0.003, 0.01, 0.03],
                    help="Adam learning rates, A per step")
+    p.add_argument("--max-eval", type=int, default=None,
+                   help="cap on loss evaluations in each L-BFGS run (default: "
+                        "torch's, 5/4 of the run's iterations). A run that "
+                        "ends on it is reported as such, not as a stall; "
+                        "raise it to let the iteration budget decide")
     p.add_argument("--no-lbfgs", action="store_true")
     p.add_argument("--no-adam", action="store_true",
                    help="optimize stage runs L-BFGS only")
@@ -567,6 +611,13 @@ def build_parser():
 def main():
     args = build_parser().parse_args()
     log = sys.stdout
+    if args.max_eval is not None and args.max_eval < 1:
+        # torch's line search is given max_eval minus the evaluations so far
+        # as its own limit, and with that below zero it raises an
+        # UnboundLocalError from inside _strong_wolfe.
+        raise SystemExit("--max-eval must be at least 1, got %d; there is no "
+                         "value meaning 'no cap', pass a large one instead"
+                         % args.max_eval)
     if args.deterministic:
         # cuBLAS is only deterministic with a fixed workspace, and it reads
         # this variable when its handle is created, i.e. at the first matmul,
@@ -641,7 +692,8 @@ def main():
                     for lr in args.lrs]
                 if not args.no_lbfgs:
                     run["lbfgs"], _ = run_lbfgs(s, k, frac_start, disp_cart,
-                                                target, args.steps, args.reach, log)
+                                                target, args.steps, args.reach, log,
+                                                max_eval=args.max_eval)
                 print("  optimize: %.0f s" % (time.time() - t0), file=log)
             results["runs"].append(run)
             with open(args.out, "w") as f:          # after every run, so a
@@ -655,7 +707,7 @@ def main():
                 results["schedule"].append(stage_schedule(
                     s, frac_start, disp_cart, exact_target, width,
                     args.schedule_coarse, fine, coarse_steps, args.steps,
-                    args.reach, log))
+                    args.reach, log, max_eval=args.max_eval))
                 with open(args.out, "w") as f:
                     json.dump(results, f, indent=1)
 
