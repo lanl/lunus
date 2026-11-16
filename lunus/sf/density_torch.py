@@ -157,7 +157,9 @@ def _sphere_offsets(du, dv, dw, radius_ang, safety_margin, orth_matrix, grid_dim
     the atom's sub-voxel remainder within its own cell. safety_margin covers
     exactly that, and HALF A VOXEL DIAGONAL is the tight bound, not a heuristic
     -- since base = round(pos * N), the atom sits within half a voxel of the
-    box center on every axis, so |c_rem| <= half the voxel diagonal. A dropped
+    box center on every axis, so |c_rem| <= half the voxel diagonal (the
+    LONGEST of its four body diagonals, which in an oblique cell is longer
+    than the orthogonal sqrt(sum of squared step lengths)). A dropped
     offset therefore has true distance >= |c_off| - |c_rem| > R, where the
     taper is exactly zero, so nothing that could contribute is ever excluded.
     (An earlier version used a full voxel diagonal, which is safe but keeps
@@ -186,15 +188,50 @@ def precompute_element_offsets(elem_radius_vox, elem_radius_ang, orth_matrix, gr
     Call this ONCE per structure/unit-cell (e.g. in setup code, alongside
     building elem_A/elem_lam), not per frame. Returns a list of ElementOffsets,
     one per element, for compute_density's elem_offsets arg.
+
+    THE BOX IS SIZED HERE, whatever elem_radius_vox says. An offset is kept
+    when its Cartesian distance from the box centre is at most radius +
+    margin (_sphere_offsets), and that sphere reaches k steps along grid
+    axis i only if k <= (radius + margin) |a*_i| N_i: what bounds the
+    step count is the spacing between the grid PLANES normal to the axis,
+    1 / (|a*_i| N_i), not the step length along it, |a_i| / N_i. The two
+    agree in an orthogonal cell; in an oblique one the plane spacing is
+    smaller (by sin beta for a monoclinic a and c), so a box of
+    ceil(radius / (|a_i| / N_i)) steps, which the callers pass, misses
+    offsets inside the kernel's reach -- 1,150 of 42,129 on 8VPW (C 2,
+    beta 115.9) and 4,932 of 109,295 on 2XLW (P 65 2 2), counted with the
+    shorter margin then in use (see below) -- and, having left the margin
+    out, can fall one step short even in an orthogonal cell with unequal
+    steps (none measured on 2I6H, P 21 21 21). elem_radius_vox is
+    therefore only a lower bound, and since |a_i| |a*_i| >= 1 it never
+    wins: each axis gets the larger of it and the count the geometry
+    needs, which keeps the same candidates as a box padded by 10 steps on
+    2I6H, 3I7M, 8VPW, 2XLW and 7AVG (compute_density then evaluates only
+    each atom's prefix of them, so the work per atom does not grow).
     """
     Nu, Nv, Nw = grid_shape
     grid_dims = torch.tensor([Nu, Nv, Nw], device=device, dtype=orth_matrix.dtype)
-    spacing_approx = torch.stack([
-        orth_matrix[:, 0].norm() / Nu,
-        orth_matrix[:, 1].norm() / Nv,
-        orth_matrix[:, 2].norm() / Nw,
-    ])
-    safety_margin = 0.5 * spacing_approx.norm()
+    # half the LONGEST body diagonal of a voxel: the atom's sub-voxel
+    # remainder is orth_matrix @ (s / N) with every |s_i| <= 1/2, so its
+    # length peaks at a corner. sqrt(sum of squared step lengths) is that
+    # only in an orthogonal cell; an oblique cell's longest diagonal is
+    # longer (0.586 against 0.515 A for 8VPW's cell at 0.6 A steps), and the
+    # shorter margin dropped voxels inside the taper.
+    corners = torch.tensor([[su, sv, sw] for su in (-0.5, 0.5)
+                            for sv in (-0.5, 0.5) for sw in (-0.5, 0.5)],
+                           dtype=orth_matrix.dtype, device=orth_matrix.device)
+    safety_margin = ((corners / grid_dims.to(orth_matrix.device)) @ orth_matrix.T
+                     ).norm(dim=1).max()
+    # |a*|, |b*|, |c*|: the rows of the inverse of the orthogonalisation
+    # matrix (whose columns are a, b, c) are the reciprocal axes
+    recip_len = torch.linalg.inv(orth_matrix).norm(dim=1)
+    radius_ang = torch.as_tensor(elem_radius_ang, dtype=orth_matrix.dtype,
+                                 device=orth_matrix.device).reshape(-1, 1)
+    steps_needed = torch.ceil((radius_ang + safety_margin) * recip_len[None, :]
+                              * grid_dims[None, :]).to(torch.long)
+    elem_radius_vox = torch.maximum(
+        torch.as_tensor(elem_radius_vox, device=steps_needed.device).to(torch.long),
+        steps_needed)
 
     # compute_density's separable distance skips the minimum-image wrap, which is
     # only valid while a local box stays well inside the cell. Check it here
