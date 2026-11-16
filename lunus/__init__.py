@@ -15,6 +15,24 @@ from __future__ import division
 
 _ext_import_error = None
 
+# THE DLOPEN FLAGS ARE RESTORED HERE, not left to boost_adaptbx. Its
+# import_ext sets RTLD_GLOBAL for the extension's load and restores the
+# previous flags only when the import SUCCEEDS; an ImportError leaves the
+# whole process loading every later shared library with RTLD_GLOBAL. Where
+# cctbx is installed but lunus_ext is not built -- the pixi environment, or a
+# pip install alongside a conda cctbx, which is where lunus.sf runs -- that is
+# every `import lunus` (this venv's pip cctbx-base included). (Without cctbx
+# at all, `import boost_adaptbx` fails before the flags are touched.)
+# torch.compile then breaks, silently first: each inductor CPU kernel library
+# exports a function named `kernel` and calls it through the PLT, so with
+# global symbol binding EVERY kernel library loaded after the first calls the
+# first one's `kernel`, whatever function or shape it was compiled for. A
+# second compiled function gives wrong numbers with no error at all;
+# compute_density, which compiles two cores and recompiles the scatter for new
+# chunk shapes, produced wrong densities and then segfaulted
+# (test_torch_pipeline.py, 2026-11-15).
+import sys as _sys
+_dlopenflags = _sys.getdlopenflags() if hasattr(_sys, "getdlopenflags") else None
 try:
     import boost_adaptbx.boost.python as bp
     ext = bp.import_ext("lunus_ext")
@@ -22,6 +40,10 @@ try:
 except ImportError as e:
     ext = None
     _ext_import_error = e
+finally:
+    if _dlopenflags is not None:
+        _sys.setdlopenflags(_dlopenflags)
+    del _sys, _dlopenflags
 
 __all__ = ["md"]
 
