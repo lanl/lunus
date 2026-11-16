@@ -176,7 +176,7 @@ repo so those numbers stay reproducible. Both `iotbx.pdb` and `mdtraj` read
 - **Tune `structure_factors_batch()` for speed within a memory budget.**
   `use_checkpoint` is currently all-or-nothing: retain every member's density
   intermediates (fastest, memory linear in N) or recompute all of them
-  (memory flat in N, ~2.4x slower). It was built to make large N *possible*,
+  (memory flat in N, 1.8-2.6x slower). It was built to make large N *possible*,
   not fast, so it takes the memory-minimising extreme whenever N does not fit.
 
   The optimum is in between: retain as many members as the device can hold and
@@ -188,7 +188,8 @@ repo so those numbers stay reproducible. Both `iotbx.pdb` and `mdtraj` read
   making the caller choose between two extremes.
 
   Worth measuring first: the per-member cost is dominated by the density calculation, and the
-  2.4x recompute penalty was measured at one N on one device, so calibrate
+  recompute penalty (2.6x at N=8, 1.8x at N=16; docs/performance.md) was
+  measured once each on one CPU configuration, so calibrate
   against real timings rather than assuming it holds generally.
 - **Fuse the batched density calculation into a single kernel.** `structure_factors_batch()`
   currently shares setup across members and loops the density calculation; fusing the N

@@ -73,7 +73,12 @@ hard cutoff's and only the tail below the threshold is attenuated. Before
 hard cutoff's; that was an error in how the method worked, and the record
 of what it cost is kept below. Nothing above the threshold is attenuated
 now, so the width does not affect forward accuracy, only the
-candidate-voxel count (+9% at 1e-4, +13% at 1e-2, measured on 7FPV). It is an accuracy measure, not a requirement for
+candidate-voxel count: the 0.1 Å taper evaluates +7.8% more atom-voxel pairs
+than a hard cutoff at threshold 1e-4, +9.6% at 1e-3 and +12.5% at 1e-2
+(compute_density's `pairs_ideal`, measured by a saved script on 7FPV at
+2.0 Å with hydrogens dropped, 1,814 atoms, isotropic ADPs, grid
+54×72×150; rerun 2026-11-15, replacing an unscripted +9% / +13% that
+probably counted the hydrogens). It is an accuracy measure, not a requirement for
 differentiability. The one component of the standard method whose gradient
 with respect to the coordinates is genuinely useless is a geometric solvent
 mask: it is piecewise constant in the atom positions, so its derivative is

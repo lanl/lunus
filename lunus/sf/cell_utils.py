@@ -68,23 +68,31 @@ def recommended_blur(b_min, grid_shape, orth_matrix_np, safety=1.0,
     not.
 
     IT IS NOT OPTIONAL AT LOW B, and the size of the error is the argument.
-    Measured against exact direct summation, 7FPV, 0.633 A grid, d_min 2.0:
+    Measured against exact direct summation (cctbx) by a saved script, rerun
+    2026-11-15: 7FPV at d_min 2.0 with hydrogens dropped, 1,814 atoms, every
+    atom at the one B of the row, grid 54x72x150 (0.63-0.66 A voxels),
+    threshold 1e-4 with the 0.1 A taper; R on amplitudes after one scale:
 
         B_iso    blur=0     blur=20    blur=80
-          2      0.186       0.0004     0.0006
-         10      0.0078      0.0002     0.0007
-         30      0.0002      0.0002     0.0012
+          2      0.186       0.0003     0.0028
+         10      0.0080      0.0002     0.0033
+         30      0.0002      0.0003     0.0054
 
     R = 0.186 at B = 2 with no blur, which is 37x the pipeline's whole
     disagreement with gemmi. But BLUR IS NOT FREE EITHER: the un-blur
     multiplies by exp(+blur*s^2/4), which at d_min 2 A and blur 80 is a factor
     of 148 applied to whatever error is present, and the B = 30 row shows it
-    costing 5x. So this returns a blur that reaches a target and no more.
+    costing 34x (on the unrounded R; the rounded entries above give 27x). So
+    this returns a blur that reaches a target and no more.
 
     The target is set by sampling: the real-space Gaussian has
     sigma = sqrt(B / 8 pi^2), and it needs to be resolved by the voxel, giving
     B_target = C h^2 with h the LARGEST voxel dimension, since the coarsest
     direction is what limits. safety scales it for anyone wanting more margin.
+
+    (The table above was rerun under the current threshold and taper; the
+    calibration of C below, and the floor values it quotes, were measured
+    before them and have not been rerun.)
 
     VALIDATED, and with a stated range. C was originally fitted to one curve on
     one structure at one spacing. It has since been measured against exact
@@ -108,7 +116,8 @@ def recommended_blur(b_min, grid_shape, orth_matrix_np, safety=1.0,
 
     So 57 is right for the regime this pipeline actually runs in and wrong
     below it. Raising it to 78 is NOT the fix: it would over-blur by 1.4x
-    everywhere normal, and over-blurring is what costs 5x at high B. Below
+    everywhere normal, and over-blurring is what costs accuracy at high B
+    (the 34x above is blur 80 against none, not a 1.4x over-blur). Below
     rate 1.5 the achievable floor degrades anyway (R 0.00025-0.00029 against
     0.00022-0.00024), so no blur recovers it -- the grid is too coarse and
     that is the thing to fix. Pass d_min to be warned when you are there.

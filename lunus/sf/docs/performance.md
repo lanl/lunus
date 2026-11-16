@@ -688,15 +688,21 @@ immediately; guidance cannot, because every member's graph has to stay live
 until the loss is backward-ed.
 
 `structure_factors_batch(..., use_checkpoint=True)` recomputes each member's
-density during backward instead of retaining it. Measured on a 3000-atom system
-at a 90³ grid, peak RSS above baseline:
+density during backward instead of retaining it. Measured by a saved script
+(rerun 2026-11-15) on 7FPV at 2.0 Å with hydrogens dropped, 1,814 atoms, grid
+54×72×150, threshold 1e-4 with the 0.1 Å taper, CPU float64 on 4 threads,
+forward and backward over N configurations, one fresh process per condition,
+peak resident memory above the post-setup baseline:
 
 | N | retained | checkpointed |
 |---|---|---|
-| 8 | 839 MB | **361 MB** |
-| 16 | 1604 MB | **371 MB** |
+| 8 | 3,637 MB | **1,446 MB** |
+| 16 | 7,529 MB | **1,501 MB** |
 
-Flat in N rather than linear, for about 2.4x the wall time. Gradients are
+Flat in N rather than linear, for 2.6x (N = 8) and 1.8x (N = 16) the wall
+time. (An earlier,
+unscripted measurement on "a 3000-atom system at a 90³ grid" gave
+839 / 1,604 MB against 361 / 371 MB; same pattern, different system.) Gradients are
 **bit-identical** either way — `tests/test_batch.py` asserts exact equality,
 not approximate — so this is a pure time-for-memory trade with no numerical
 consequence.
@@ -722,8 +728,9 @@ at N=16 on a device with room for 8, half the penalty at the same peak. A
 to pick an extreme.
 
 Calibrate against measurement rather than arithmetic when doing this. The
-per-member cost is dominated by the density calculation, so the 2.4x recompute penalty
-measured at one N on one device should not be assumed to hold generally.
+per-member cost is dominated by the density calculation, yet the recompute penalty
+measured above is 2.6x at N = 8 and 1.8x at N = 16 on one CPU configuration, one
+run each, so it should not be assumed to hold generally.
 
 ## Compiling under MPI
 

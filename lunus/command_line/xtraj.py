@@ -1497,16 +1497,18 @@ if __name__=="__main__":
 
       # THE FFT-ARTIFACT BLUR. Placing a sharp atom onto a finite grid
       # samples it badly; placing a spread one and removing the spread in
-      # reciprocal space does not. Measured against exact direct summation at
-      # 0.633 A spacing, B_iso = 2 with no blur gives R = 0.186 -- 37x this
-      # pipeline's entire disagreement with gemmi -- and blur = 20 gives
-      # 0.0004. Per-atom B from a topology file routinely goes that low, which
+      # reciprocal space does not. Measured against exact direct summation
+      # (7FPV at 2.0 A, hydrogens dropped, 0.63-0.66 A voxels, threshold 1e-4
+      # with the 0.1 A taper; cell_utils.recommended_blur has the table),
+      # B_iso = 2 with no blur gives R = 0.186 -- 37x this pipeline's entire
+      # disagreement with gemmi -- and blur = 20 gives 0.0003. Per-atom B from
+      # a topology file routinely goes that low, which
       # is exactly the case this branch handles.
       #
       # "auto" asks for the smallest blur that reaches adequate sampling and
       # no more, because the un-blur multiplies by exp(+blur*s^2/4) and
-      # amplifies whatever error is present: at B_iso = 30 an 80 A^2 blur is 5x
-      # WORSE than none. It returns 0 whenever the model's own B already
+      # amplifies whatever error is present: at B_iso = 30 an 80 A^2 blur is
+      # 34x WORSE than none. It returns 0 whenever the model's own B already
       # clears the bar, so well-sampled configurations are untouched.
       torch_blur_value = (
         recommended_blur(float(torch_b_per_atom_setup.min()), torch_grid_shape,

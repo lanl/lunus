@@ -247,13 +247,17 @@ def structure_factors_batch(
     the difference between "runs" and "out of memory": the density calculation holds
     (atoms x voxels) working buffers whose size dwarfs the density grid, and
     without checkpointing they are retained for all N simultaneously.
-    Measured on a 3000-atom / 90^3 case, peak RSS above baseline:
+    Measured by a saved script (rerun 2026-11-15) on 7FPV at 2.0 A with
+    hydrogens dropped, 1,814 atoms, grid 54x72x150, threshold 1e-4 with the
+    0.1 A taper, CPU float64 on 4 threads, one run per condition, peak
+    resident memory above baseline:
 
         N     retained      checkpointed
-        8      839 MB          361 MB
-        16    1604 MB          371 MB
+        8     3,637 MB        1,446 MB
+        16    7,529 MB        1,501 MB
 
-    i.e. flat in N rather than linear, for ~2.4x the time. Gradients are
+    i.e. flat in N rather than linear, for 2.6x (N = 8) and 1.8x (N = 16)
+    the time. Gradients are
     bit-identical either way (verified in tests/test_batch.py), so this is a
     pure time-for-memory trade with no numerical consequence.
 

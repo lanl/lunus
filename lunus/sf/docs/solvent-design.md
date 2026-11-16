@@ -1036,14 +1036,21 @@ a density back.
 
 ### How much blur, and why not "always the same amount"
 
-Measured against **exact direct summation** (cctbx, no grid), 7FPV, 0.633 Å
-voxels, `d_min` 2.0, R over all reflections:
+Measured against **exact direct summation** (cctbx, no grid) by a saved
+script, rerun 2026-11-15: 7FPV at `d_min` 2.0 with hydrogens dropped, 1,814
+atoms, every atom at the one B of the row, 10,992 reflections, grid
+54×72×150 (voxels 0.63-0.66 Å), density threshold 1e-4 with the 0.1 Å taper;
+R on amplitudes over all reflections, after one overall scale:
 
 | B_iso | blur 0 | 10 | 20 | 40 | 80 |
 |---|---|---|---|---|---|
-| **2** | **0.186** | 0.0045 | 0.0004 | 0.0002 | 0.0006 |
-| 10 | 0.0078 | 0.0005 | 0.0002 | 0.0002 | 0.0007 |
-| 30 | 0.0002 | 0.0002 | 0.0002 | 0.0003 | **0.0012** |
+| **2** | **0.186** | 0.0046 | 0.0003 | 0.0003 | 0.0028 |
+| 10 | 0.0080 | 0.0004 | 0.0002 | 0.0004 | 0.0033 |
+| 30 | 0.0002 | 0.0002 | 0.0003 | 0.0008 | **0.0054** |
+
+(The earlier, unscripted version of this table, which predates the current
+threshold and taper, had the same R = 0.186 at B = 2 with no blur but a much
+milder blur-80 column: 0.0006 / 0.0007 / 0.0012.)
 
 The top-left number is the case that matters: **R = 0.186 at B = 2 with no
 blur**, which is 37× this pipeline's entire disagreement with gemmi, and
@@ -1053,7 +1060,8 @@ per-atom B from a topology file routinely goes that low. Without the trick,
 The bottom-right number is why "always blur generously" is also wrong. The
 un-blur multiplies by `exp(+blur·s²/4)` — at `d_min` 2 Å and blur 80 that is a
 factor of 148 — applied to whatever error is present, so at B = 30 an 80 Å²
-blur is **5× worse than none**.
+blur is **34× worse than none** on the unrounded R (27× from the rounded
+table entries; 36× without the scale).
 
 `cell_utils.recommended_blur(b_min, grid_shape, orth_matrix)` returns the
 smallest blur that reaches the floor and no more. The target comes from
