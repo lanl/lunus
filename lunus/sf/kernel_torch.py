@@ -88,6 +88,8 @@ def build_element_kernels_torch(
         A_list.append(k["A"])
         lam_list.append(k["lam"])
         outer = k["radius"] + taper_width        # window on [R, R + w]
+        # a lower bound only: precompute_element_offsets sizes the box from
+        # the plane spacing, which is smaller than this in an oblique cell
         radius_vox_list.append(np.ceil(outer / spacing).astype(np.int64))
         radius_ang_list.append(outer)
 
@@ -152,6 +154,8 @@ def build_atom_kernels_aniso_torch(
     for el in element_symbols:
         el_mask = elements_per_atom == el
         r = float(radius_np[el_mask].max()) if el_mask.any() else 0.0
+        # a lower bound only: precompute_element_offsets sizes the box from
+        # the plane spacing, which is smaller than this in an oblique cell
         radius_vox_list.append(np.ceil(r / spacing).astype(np.int64))
         max_radius.append(r)
 
@@ -224,6 +228,8 @@ def build_atom_kernels_torch(
     for el in element_symbols:
         el_mask = elements_per_atom == el
         max_radius_el = float(radius_np[el_mask].max()) if el_mask.any() else 0.0
+        # a lower bound only: precompute_element_offsets sizes the box from
+        # the plane spacing, which is smaller than this in an oblique cell
         radius_vox_list.append(np.ceil(max_radius_el / spacing).astype(np.int64))
         # per-element max radius is only used to size the offset candidate
         # box below -- the actual taper radius stays per-atom (atom_radius_ang)

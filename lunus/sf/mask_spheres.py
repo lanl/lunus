@@ -367,6 +367,8 @@ def sphere_kernels(radii, grid_shape, orth_matrix_np, width=EDGE_WIDTH_DEFAULT,
     reach = radii + 5.0 * width
     spacing = np.linalg.norm(np.asarray(orth_matrix_np), axis=0) / np.asarray(grid_shape, dtype=float)
     r_max = float(reach.max()) + taper_width
+    # the step counts below are a lower bound only: precompute_element_offsets
+    # sizes the box from the plane spacing, smaller than this in an oblique cell
     offsets = precompute_element_offsets(
         torch.tensor(np.ceil(r_max / spacing).astype(np.int64)[None, :], device=device),
         torch.tensor([r_max], device=device, dtype=dtype),
