@@ -80,8 +80,12 @@ Every operation here is a standard differentiable PyTorch primitive
 validated in test_torch.py's autograd-vs-analytic gradient check.
 """
 
+import contextlib
+import ctypes
 import math
 import os
+import sys
+import threading
 import warnings
 
 import torch
@@ -446,6 +450,132 @@ def _warn_compile_fallback(fn, exc):
         RuntimeWarning, stacklevel=3)
 
 
+_RTLD_GLOBAL_WARNED = False
+_DLOPEN_LOCK = threading.Lock()
+_DLOPEN_DEPTH = 0           # compiled cores currently inside the window
+_DLOPEN_SAVED = None        # the caller's flags, when the window cleared them
+
+
+@contextlib.contextmanager
+def _kernels_load_locally():
+    """Clear RTLD_GLOBAL from the dlopen flags while a compiled core runs.
+
+    Inductor loads each CPU kernel library lazily, on the first call of a
+    compiled function and on every recompile, and every one of those
+    libraries exports a function named `kernel` that it calls through the
+    PLT. Loaded with RTLD_GLOBAL, every kernel library after the first binds
+    that call to the FIRST library's `kernel`: wrong results with no error
+    (a second compiled function was off by 4.3 on values of order 1), then,
+    in the scatter's out-of-range writes, a segfault. lunus's own import no
+    longer leaves the flag set (lunus/__init__.py), but anything else in the
+    process can -- cctbx's boost_adaptbx import_ext leaves it set whenever an
+    extension fails to import -- so the compiled cores clear it for the
+    duration of the call, and put it back afterwards. The flags are process
+    state: a Boost extension imported on another thread inside this window
+    would load without RTLD_GLOBAL, which cctbx's import_ext does not rely on
+    since it sets the flag itself immediately before each load. Compiled
+    cores running on several threads at once share one window, counted, so
+    the first to finish cannot put RTLD_GLOBAL back under the others.
+
+    Cleared for CUDA calls too: they normally load no CPU kernel library,
+    but a graph that does would otherwise load it globally, and clearing the
+    flag costs nothing.
+
+    Loading locally is not enough on its own: the dynamic linker resolves a
+    locally loaded library's symbols in the GLOBAL scope first, so a `kernel`
+    that some other torch.compile code already loaded globally still captures
+    every kernel library loaded here (measured: a segfault in the first
+    compiled call). _cpu_kernel_captured checks for that case separately, with
+    _kernel_symbol_is_global().
+    """
+    global _RTLD_GLOBAL_WARNED, _DLOPEN_DEPTH, _DLOPEN_SAVED
+    if not hasattr(sys, "getdlopenflags"):
+        yield
+        return
+    with _DLOPEN_LOCK:
+        if _DLOPEN_DEPTH == 0:
+            flags = sys.getdlopenflags()
+            _DLOPEN_SAVED = flags if flags & os.RTLD_GLOBAL else None
+            if _DLOPEN_SAVED is not None:
+                if not _RTLD_GLOBAL_WARNED:
+                    _RTLD_GLOBAL_WARNED = True
+                    warnings.warn(
+                        "RTLD_GLOBAL is set in this process's dlopen flags "
+                        "(typically left by a failed cctbx boost_adaptbx "
+                        "import_ext); lunus clears it while its compiled "
+                        "density cores run, since torch.compile CPU kernels "
+                        "loaded globally call each other's code. Other "
+                        "torch.compile code in this process is not protected, "
+                        "and once it has loaded a kernel globally lunus uses "
+                        "its eager cores on the CPU.",
+                        RuntimeWarning, stacklevel=4)
+                sys.setdlopenflags(flags & ~os.RTLD_GLOBAL)
+        _DLOPEN_DEPTH += 1
+    try:
+        yield
+    finally:
+        with _DLOPEN_LOCK:
+            _DLOPEN_DEPTH -= 1
+            if _DLOPEN_DEPTH == 0 and _DLOPEN_SAVED is not None:
+                sys.setdlopenflags(_DLOPEN_SAVED)
+                _DLOPEN_SAVED = None
+
+
+_GLOBAL_SCOPE = None        # dlopen(NULL), opened once
+
+
+def _kernel_symbol_is_global():
+    """True when a symbol named `kernel` is already in the global scope.
+
+    That is the state _kernels_load_locally cannot repair: every inductor
+    kernel library loaded from then on, locally or not, binds its `kernel`
+    call to that one. dlopen(NULL) searches exactly the global scope, as it
+    stands at each lookup, so the handle is opened once and reused.
+    """
+    global _GLOBAL_SCOPE
+    if not hasattr(sys, "getdlopenflags"):
+        return False
+    try:
+        if _GLOBAL_SCOPE is None:
+            _GLOBAL_SCOPE = ctypes.CDLL(None)
+        return hasattr(_GLOBAL_SCOPE, "kernel")
+    except (OSError, TypeError):
+        return False
+
+
+_CPU_KERNEL_CAPTURED = False
+
+
+def _cpu_kernel_captured(args):
+    """True when this call must run the eager core instead of the compiled one.
+
+    Decided per call, from the device of the first tensor argument, because
+    only CPU kernels are exposed: inductor's CPU kernel libraries are the
+    ones exporting `kernel`, CUDA cores load none, so a CUDA call is run
+    compiled whatever is in the global scope. On CPU, a `kernel` already in
+    the global scope (_kernel_symbol_is_global) means every kernel library
+    loaded from now on would call it, so CPU calls run the eager core, with
+    one warning, for the rest of the process (it cannot be unloaded).
+    """
+    global _CPU_KERNEL_CAPTURED
+    first = next((a for a in args if isinstance(a, torch.Tensor)), None)
+    if first is None or first.device.type != "cpu":
+        return False
+    if not _CPU_KERNEL_CAPTURED and _kernel_symbol_is_global():
+        _CPU_KERNEL_CAPTURED = True
+        warnings.warn(
+            "a torch.compile CPU kernel has already been loaded with "
+            "RTLD_GLOBAL in this process (typically after a failed cctbx "
+            "boost_adaptbx import_ext left that flag set), so every compiled "
+            "CPU kernel loaded from now on would call its code instead of its "
+            "own. lunus is using its eager density cores on the CPU for the "
+            "rest of this process (CUDA is unaffected); results are "
+            "unaffected, speed is not. Clear RTLD_GLOBAL with "
+            "sys.setdlopenflags before any torch.compile code runs to keep the "
+            "compiled cores.", RuntimeWarning, stacklevel=3)
+    return _CPU_KERNEL_CAPTURED
+
+
 def _resolve_compiled(fn, enable):
     """
     Returns fn, torch.compile'd when asked for and available.
@@ -497,7 +627,15 @@ def _resolve_compiled(fn, enable):
 
     compiled = _COMPILED[fn]
     if fn in _COMPILE_PROVEN:
-        return compiled
+        # still under _kernels_load_locally: a proven function loads new kernel
+        # libraries whenever it recompiles (a new dtype, or a shape the dynamic
+        # graph does not cover), and those must not load globally either
+        def proven(*args, **kwargs):
+            if _cpu_kernel_captured(args):
+                return fn(*args, **kwargs)
+            with _kernels_load_locally():
+                return compiled(*args, **kwargs)
+        return proven
 
     def guarded(*args, **kwargs):
         global _COMPILE_FAILED
@@ -505,14 +643,17 @@ def _resolve_compiled(fn, enable):
         # single compute_density invocation calls this once per CHUNK, and the
         # other core's failure (or an earlier chunk's) must stop the retries
         # immediately rather than re-attempting a known-broken compile.
-        if _COMPILE_FAILED:
+        if _COMPILE_FAILED or _cpu_kernel_captured(args):
             return fn(*args, **kwargs)
-        try:
-            out = compiled(*args, **kwargs)
-        except Exception as exc:
-            _COMPILE_FAILED = True
-            _warn_compile_fallback(fn, exc)
-            return fn(*args, **kwargs)
+        # the window opens outside the try, so only the compiled call itself
+        # can be taken for a compile failure
+        with _kernels_load_locally():
+            try:
+                out = compiled(*args, **kwargs)
+            except Exception as exc:
+                _COMPILE_FAILED = True
+                _warn_compile_fallback(fn, exc)
+                return fn(*args, **kwargs)
         _COMPILE_PROVEN.add(fn)
         return out
 
