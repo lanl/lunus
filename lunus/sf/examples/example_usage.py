@@ -72,7 +72,8 @@ def main():
     # use_checkpoint=True recomputes each member's density during backward
     # instead of retaining it. Memory then stays flat as n_configs grows,
     # which is what makes a large ensemble feasible at production grid sizes;
-    # the cost is roughly 2.4x the time, and gradients are bit-identical.
+    # the cost is roughly 2x the time (1.8-2.6x measured, docs/performance.md),
+    # and gradients are bit-identical.
     # See docs/design.md.
     F_configs = structure_factors_batch(
         frac_coords, element_choices, occ,
