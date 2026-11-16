@@ -441,6 +441,121 @@ def test_coarse_scan_matches_the_loop_on_7fpv(monkeypatch):
     assert abs(fast[3] - slow[3]) < 1e-9 * max(1.0, abs(slow[3]))
 
 
+@pytest.mark.parametrize("dt", [torch.float64, torch.float32])
+def test_coarse_scan_real_form_survives_cancelling_amplitudes(dt):
+    """coarse_scan forms |F_p + c F_m| from |F_p|^2, Re(F_p F_m*) and |F_m|^2.
+    Where the solvent term cancels the protein exactly at a grid node, the
+    expanded sum can round below zero; it is clamped, and the scan must
+    still pick the node the complex loop picks, with no nan. A tenth of the
+    reflections here cancel at the true k_sol 0.35, b_sol 40."""
+    F_obs, Fp, Fm, s2, s, work, bins = _synthetic(seed=3)
+    w = 0.35 * torch.exp(-0.25 * 40.0 * s2)
+    cancel = torch.arange(len(s2)) % 10 == 0
+    Fm = torch.where(cancel, -Fp / w.to(Fp.dtype), Fm)
+    F_obs = fsr._f_calc(Fp, Fm, s2, torch.tensor(0.35, dtype=s2.dtype),
+                        torch.tensor(40.0, dtype=s2.dtype)).abs() * torch.exp(-0.25 * 5.0 * s2)
+    cdt = torch.complex128 if dt == torch.float64 else torch.complex64
+    Fo, Fp, Fm, s2 = F_obs[work].to(dt), Fp[work].to(cdt), Fm[work].to(cdt), s2[work].to(dt)
+    grids = fsr.scan_grids(True, s2)
+    fast = fsr.coarse_scan(Fo, Fp, Fm, s2, *grids)
+    slow = fsr.coarse_scan_reference(Fo, Fp, Fm, s2, *grids)
+    assert fast[:3] == slow[:3], (fast, slow)
+    assert fast[:2] == (pytest.approx(0.35), pytest.approx(40.0))
+    assert all(v == v for v in fast)                  # no nan from a negative sqrt
+
+
+def _single_then_binned(data, aniso, solvent_bins, init):
+    """run()'s order: the single-scale fit with solvent, then the binned
+    row, started from the first (init=True) or from scratch."""
+    F_obs, Fp, Fm, s2, s, work, bins = data
+    log = open(os.devnull, "w")
+    single = fsr.fit_scales(F_obs, Fp, Fm, s2, s, work, aniso, log=log)
+    binned = fsr.fit_scales(F_obs, Fp, Fm, s2, s, work, aniso, bins=bins,
+                            solvent_bins=solvent_bins, log=log,
+                            init=single if init else None)
+    return single, binned
+
+
+@pytest.mark.parametrize("aniso", [False, True])
+@pytest.mark.parametrize("cliff, solvent_bins", [(False, False), (True, True)])
+def test_binned_fit_from_init_is_the_binned_fit_from_scratch(aniso, cliff, solvent_bins,
+                                                             monkeypatch):
+    """fit_scales(init=single) skips the coarse scan and the single-scale
+    LBFGS, which on the same inputs would end where `single` did, so the
+    binned fit is the same to the bit: bin scales, anisotropy, k_sol/b_sol
+    and, with solvent_bins, the per-bin solvent curve. The single-scale fit
+    handed in is not changed by it."""
+    data = _synthetic_cliff()[:7] if cliff else _synthetic()
+    single, scratch = _single_then_binned(data, aniso, solvent_bins, init=False)
+    kept = {k: (v.clone() if torch.is_tensor(v) else v) for k, v in single.items()}
+    kept["u_params"] = [p.clone() for p in single["u_params"]]
+
+    def no_scan(*a, **kw):
+        raise AssertionError("init= must skip the coarse scan")
+    F_obs, Fp, Fm, s2, s, work, bins = data
+    monkeypatch.setattr(fsr, "coarse_scan", no_scan)
+    started = fsr.fit_scales(F_obs, Fp, Fm, s2, s, work, aniso, bins=bins,
+                             solvent_bins=solvent_bins, log=open(os.devnull, "w"),
+                             init=single)
+    for k in ("log_k", "log_k_bins", "k_sol", "b_sol", "k_mask_bins"):
+        if scratch[k] is None:
+            assert started[k] is None, k
+        else:
+            assert torch.equal(started[k], scratch[k]), k
+    assert all(torch.equal(a, b) for a, b in zip(started["u_params"], scratch["u_params"]))
+    assert (started["k_mask_bins"] is not None) == solvent_bins
+    for k in ("log_k", "k_sol", "b_sol"):
+        assert torch.equal(single[k], kept[k]), k
+    assert all(torch.equal(a, b) for a, b in zip(single["u_params"], kept["u_params"]))
+
+
+def test_init_must_be_a_single_scale_fit_of_the_same_kind():
+    F_obs, Fp, Fm, s2, s, work, bins = _synthetic(n=2000)
+    log = open(os.devnull, "w")
+    single, binned = _single_then_binned((F_obs, Fp, Fm, s2, s, work, bins),
+                                         aniso=False, solvent_bins=False, init=True)
+    for bad, kw in ((binned, {}), (single, {"aniso": True}),
+                    (single, {"fit_solvent": False})):
+        args = dict(aniso=False, bins=bins, log=log, init=bad)
+        args.update(kw)
+        with pytest.raises(ValueError, match="init"):
+            fsr.fit_scales(F_obs, Fp, Fm, s2, s, work, **args)
+
+
+def test_per_bin_solver_returns_each_bins_bounded_minimum(monkeypatch):
+    """_fit_solvent_bins' bounded solve, with the curve rule switched off so
+    its output is the solve's own: every bin's solvent scale is the minimum
+    over [0, SOLVENT_BIN_MAX] of that bin's residual at the closed-form
+    scale, checked against a 0.0005 grid computed here independently."""
+    monkeypatch.setattr(fsr, "solvent_curve_rule", lambda k, d, **kw: k.clamp(min=0.0))
+    F_obs, Fp, Fm, s2, s, work, bins, d = _synthetic_cliff(seed=4, bump=0.3)
+    monkeypatch.setattr(fsr, "solvent_cut_index", lambda k, d, **kw: len(k))
+    expo = fsr.fit_scales(F_obs, Fp, Fm, s2, s, work, aniso=True, bins=bins,
+                          log=open(os.devnull, "w"))
+    n_bins = int(bins.max()) + 1
+    d_min_bins = [float(1.0 / torch.sqrt(s2[bins == i].max())) for i in range(n_bins)]
+    s2_bins = [float(s2[bins == i].mean()) for i in range(n_bins)]
+    Fo, Fpw, Fmw, s2w, sw, bw = F_obs[work], Fp[work], Fm[work], s2[work], s[work], bins[work]
+    km, lk = fsr._fit_solvent_bins(Fo, Fpw, Fmw, s2w, sw, bw, n_bins, expo["log_k_bins"],
+                                   expo["u_params"], True, expo["k_sol"], expo["b_sol"],
+                                   d_min_bins, s2_bins)
+    zero = torch.zeros((), dtype=s2.dtype)
+    A = fsr._scaled_amplitudes(torch.ones_like(Fpw), s2w, sw, zero, expo["u_params"], True)
+    grid = torch.linspace(0.0, fsr.SOLVENT_BIN_MAX, 2001, dtype=s2.dtype)
+
+    def resid(k, sel):                    # k: (m,) -> (m,) residuals in the bin
+        g = A[sel][None, :] * (Fpw[sel][None, :] + k[:, None] * Fmw[sel][None, :]).abs()
+        fo = Fo[sel][None, :]
+        return (fo * fo).sum(1) - (fo * g).sum(1) ** 2 / (g * g).sum(1)
+    assert ((km >= 0) & (km <= fsr.SOLVENT_BIN_MAX)).all()
+    assert len(set(round(float(k), 3) for k in km)) > 3      # bins really differ
+    for i in range(n_bins):
+        sel = bw == i
+        best_on_grid = float(resid(grid, sel).min())
+        at_km = float(resid(km[i:i + 1], sel)[0])
+        assert at_km <= best_on_grid * (1 + 1e-12), (i, float(km[i]), at_km, best_on_grid)
+
+
 def test_timed_accumulates_and_can_be_switched_off():
     """The phase timer adds up repeated blocks, leaves other phases alone,
     records a phase even when the block raises, and does nothing with None;

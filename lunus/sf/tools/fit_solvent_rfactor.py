@@ -1443,7 +1443,24 @@ def coarse_scan(Fo, Fp, Fm, s2, k_grid, bs_grid, b_grid):
     (measured on the torchref1000 pilot, 2026-11-10); here it is 41 passes
     of a few batched operations and one synchronisation at the end. The
     minimum is taken in the loop's own order (k_sol outermost, B_overall
-    innermost) so a tie resolves to the same node."""
+    innermost) so a tie resolves to the same node.
+
+    With a mask, the amplitudes come from three real arrays formed once,
+
+        |F_p + c F_m|^2 = |F_p|^2 + 2c Re(F_p F_m*) + c^2 |F_m|^2,
+
+    rather than a complex (n_k, n) table and its modulus per b_sol. The same
+    function, rounded differently, so the node can differ from the complex
+    form's only where two nodes tie to rounding; on the 140 SW40 and TR1000
+    entries of the 2026-11-15 validation (float64) it picked the same node
+    every time and every printed row was unchanged. The returned log_k is
+    rounded differently too (last bit), and LBFGS carries that into the fit:
+    in float64 the fitted scales move by ~1e-8, far below what is printed;
+    in float32 (--dtype float32) the optimizer amplifies it and printed R,
+    k_sol and b_sol can differ from earlier runs. Where the solvent term
+    cancels the protein the expanded sum can round below zero, hence the
+    clamp. On the 140 entries the single-scale fit with solvent took a
+    median 0.75 (SW40) and 0.82 (TR1000) of its earlier time."""
     with torch.no_grad():
         n_k, n_bs, n_b = len(k_grid), len(bs_grid), len(b_grid)
         E = torch.exp(-0.25 * b_grid[:, None] * s2[None, :])        # (n_b, n)
@@ -1451,15 +1468,25 @@ def coarse_scan(Fo, Fp, Fm, s2, k_grid, bs_grid, b_grid):
         Fo_sq = (Fo * Fo).sum()
         num = torch.empty(n_k, n_bs, n_b, dtype=s2.dtype, device=s2.device)
         den = torch.empty_like(num)
-        Fm_row = None if Fm is None else Fm[None, :]
-        for j in range(n_bs):
-            # _f_calc broadcasts: (n_k, 1) k_sol against (1, n) reflections
-            # gives the (n_k, n) table; without a mask it is the (1, n) row,
-            # which the assignments below broadcast over n_k (then 1).
-            mag = torch.abs(_f_calc(Fp[None, :], Fm_row, s2[None, :],
-                                    k_grid[:, None], bs_grid[j]))
-            num[:, j, :] = (mag * Fo[None, :]) @ E.T                 # (n_k, n_b)
-            den[:, j, :] = (mag * mag) @ E2.T
+        if Fm is None:
+            # one (1, n) row, which the assignments broadcast over every
+            # (k_sol, b_sol) node of the grid
+            mag = torch.abs(Fp)[None, :]
+            num[:] = ((mag * Fo[None, :]) @ E.T)[:, None, :]
+            den[:] = ((mag * mag) @ E2.T)[:, None, :]
+        else:
+            P = Fp.real * Fp.real + Fp.imag * Fp.imag                # |F_p|^2
+            Q = Fp.real * Fm.real + Fp.imag * Fm.imag                # Re(F_p F_m*)
+            M = Fm.real * Fm.real + Fm.imag * Fm.imag                # |F_m|^2
+            for j in range(n_bs):
+                # (n_k, 1) k_sol against the (1, n) solvent weight: c is the
+                # (n_k, n) table of k_sol exp(-b_sol s^2/4), as in _f_calc
+                c = k_grid[:, None] * torch.exp(-0.25 * bs_grid[j] * s2)[None, :]
+                # clamped: rounding can take a near-cancelling sum below 0
+                mag2 = (P[None, :] + 2.0 * c * Q[None, :]
+                        + c * c * M[None, :]).clamp(min=0.0)
+                num[:, j, :] = (torch.sqrt(mag2) * Fo[None, :]) @ E.T  # (n_k, n_b)
+                den[:, j, :] = mag2 @ E2.T
         k = torch.clamp(num / den, min=1e-12)
         # sum (Fo - k g)^2 at the clamped k, exactly as the loop evaluated it
         resid = Fo_sq - 2.0 * k * num + k * k * den
@@ -1491,7 +1518,8 @@ def coarse_scan_reference(Fo, Fp, Fm, s2, k_grid, bs_grid, b_grid):
 
 
 def fit_scales(F_obs, F_protein, F_mask, inv_d2, s_cart, work, aniso,
-               fit_solvent=True, bins=None, solvent_bins=False, log=sys.stdout):
+               fit_solvent=True, bins=None, solvent_bins=False, log=sys.stdout,
+               init=None):
     """
     Least squares on amplitudes over the work set. Returns a parameter dict.
 
@@ -1504,6 +1532,17 @@ def fit_scales(F_obs, F_protein, F_mask, inv_d2, s_cart, work, aniso,
          (coarse_scan: batched, one synchronisation; the two structure
          factor sets are computed once, before the scan).
       2. LBFGS on every parameter at once from the best node.
+
+      init: a single-scale fit (bins=None) that this function returned for
+         the same inputs, fit_solvent and aniso. Stages 1 and 2 are skipped
+         and the rest starts from its log_k, u_params, k_sol and b_sol, which
+         is exactly where they would have finished, since both stages are
+         deterministic on the same inputs. run() passes the single-scale fit
+         with solvent to the binned row this way, which otherwise repeats the
+         scan and the LBFGS on the same structure factors; with the scan's
+         real-array form (coarse_scan) and the per-bin solver's arrays
+         gathered once (_fit_solvent_bins), the binned row takes about a
+         third of its earlier time (SW40 and TR1000, 2026-11-15).
 
       3. Only with bins (resolution_bins or log_resolution_bins): the
          single overall scale becomes one scale per bin, refined by LBFGS
@@ -1546,43 +1585,58 @@ def fit_scales(F_obs, F_protein, F_mask, inv_d2, s_cart, work, aniso,
     Fm = None if F_mask is None else F_mask[work]
     s2 = inv_d2[work]
     s = s_cart[work]
-
-    k_sol0, b_sol0, b_ov0, log_k0 = coarse_scan(Fo, Fp, Fm, s2,
-                                                *scan_grids(fit_solvent, inv_d2))
-    print("  coarse scan: k_sol %.3f, b_sol %.1f, B_overall %.1f"
-          % (k_sol0, b_sol0, b_ov0), file=log)
-
     dtype, device = inv_d2.dtype, inv_d2.device
-    log_k = torch.tensor(log_k0, dtype=dtype, device=device, requires_grad=True)
-    k_sol = torch.tensor(k_sol0, dtype=dtype, device=device,
-                         requires_grad=fit_solvent)
-    b_sol = torch.tensor(b_sol0, dtype=dtype, device=device,
-                         requires_grad=fit_solvent)
-    if aniso:
-        # Initialised at the isotropic answer, B_cart = B*I, so the refinement
-        # starts where the isotropic fit finished and the off-diagonals start
-        # at exactly zero -- which is where orthorhombic symmetry requires them
-        # to stay. See the note this prints at the end.
-        u_params = [torch.tensor(b_ov0 if i == j else 0.0, dtype=dtype,
-                                 device=device, requires_grad=True)
-                    for i, j in UNIQUE_IJ]
+
+    if init is not None:
+        # Stages 1 and 2 were done by the fit handed in (see the docstring).
+        # Its values are copied, not shared, so this fit cannot move them.
+        if (init["bins"] is not None or bool(init["aniso"]) != bool(aniso)
+                or bool(init["fit_solvent"]) != bool(fit_solvent)):
+            raise ValueError("fit_scales: init must be a single-scale fit "
+                             "(bins=None) with the same aniso and fit_solvent")
+        log_k = init["log_k"].detach().clone().requires_grad_(True)
+        k_sol = init["k_sol"].detach().clone().requires_grad_(fit_solvent)
+        b_sol = init["b_sol"].detach().clone().requires_grad_(fit_solvent)
+        u_params = [p.detach().clone().requires_grad_(True)
+                    for p in init["u_params"]]
+        print("  started from the single-scale fit: k_sol %.3f, b_sol %.1f"
+              % (float(init["k_sol"]), float(init["b_sol"])), file=log)
     else:
-        u_params = [torch.tensor(b_ov0, dtype=dtype, device=device,
-                                 requires_grad=True)]
+        k_sol0, b_sol0, b_ov0, log_k0 = coarse_scan(Fo, Fp, Fm, s2,
+                                                    *scan_grids(fit_solvent, inv_d2))
+        print("  coarse scan: k_sol %.3f, b_sol %.1f, B_overall %.1f"
+              % (k_sol0, b_sol0, b_ov0), file=log)
 
-    params = [log_k] + u_params + ([k_sol, b_sol] if fit_solvent else [])
-    opt = torch.optim.LBFGS(params, max_iter=200, line_search_fn="strong_wolfe",
-                            tolerance_grad=1e-10, tolerance_change=1e-12)
+        log_k = torch.tensor(log_k0, dtype=dtype, device=device, requires_grad=True)
+        k_sol = torch.tensor(k_sol0, dtype=dtype, device=device,
+                             requires_grad=fit_solvent)
+        b_sol = torch.tensor(b_sol0, dtype=dtype, device=device,
+                             requires_grad=fit_solvent)
+        if aniso:
+            # Initialised at the isotropic answer, B_cart = B*I, so the refinement
+            # starts where the isotropic fit finished and the off-diagonals start
+            # at exactly zero -- which is where orthorhombic symmetry requires them
+            # to stay. See the note this prints at the end.
+            u_params = [torch.tensor(b_ov0 if i == j else 0.0, dtype=dtype,
+                                     device=device, requires_grad=True)
+                        for i, j in UNIQUE_IJ]
+        else:
+            u_params = [torch.tensor(b_ov0, dtype=dtype, device=device,
+                                     requires_grad=True)]
 
-    def closure():
-        opt.zero_grad()
-        F_c = _f_calc(Fp, Fm, s2, k_sol, b_sol)
-        model = _scaled_amplitudes(F_c, s2, s, log_k, u_params, aniso)
-        loss = ((Fo - model) ** 2).sum()
-        loss.backward()
-        return loss
+        params = [log_k] + u_params + ([k_sol, b_sol] if fit_solvent else [])
+        opt = torch.optim.LBFGS(params, max_iter=200, line_search_fn="strong_wolfe",
+                                tolerance_grad=1e-10, tolerance_change=1e-12)
 
-    opt.step(closure)
+        def closure():
+            opt.zero_grad()
+            F_c = _f_calc(Fp, Fm, s2, k_sol, b_sol)
+            model = _scaled_amplitudes(F_c, s2, s, log_k, u_params, aniso)
+            loss = ((Fo - model) ** 2).sum()
+            loss.backward()
+            return loss
+
+        opt.step(closure)
 
     log_k_bins = None
     if bins is not None:
@@ -1597,7 +1651,7 @@ def fit_scales(F_obs, F_protein, F_mask, inv_d2, s_cart, work, aniso,
         log_k_bins = torch.full((n_bins,), float(log_k.detach()), dtype=dtype,
                                 device=device, requires_grad=True)
         n_diag = 3 if aniso else 1
-        b_iso0 = sum(float(p) for p in u_params[:n_diag]) / n_diag
+        b_iso0 = sum(float(p.detach()) for p in u_params[:n_diag]) / n_diag
 
         def held(u):
             shift = sum(u[:n_diag]) / n_diag - b_iso0
@@ -1738,10 +1792,18 @@ def _fit_solvent_bins(Fo, Fp, Fm, s2, s, b, n_bins, log_k_bins, u_params, aniso,
         A = _scaled_amplitudes(torch.ones_like(Fp), s2, s,
                                torch.zeros((), dtype=dtype, device=device), u, aniso)
 
-    def bin_residual(k, sel):
-        # residual sum of squares at the closed-form scale, for a tensor of k
-        g = A[sel][None, :] * (Fp[sel][None, :] + k[:, None].to(Fp.dtype) * Fm[sel][None, :]).abs()
-        fo = Fo[sel][None, :]
+        # Each bin's reflections gathered once: the golden-section search
+        # evaluates a bin ~40 times per pass, and gathering by boolean mask on
+        # every evaluation was a large part of the solver's time. The same
+        # arithmetic on the same values, so the result is unchanged.
+        parts = [(A[sel], Fp[sel], Fm[sel], Fo[sel]) for sel in in_bin]
+
+    def bin_residual(k, i):
+        # residual sum of squares at the closed-form scale in bin i, for a
+        # tensor of k
+        Ai, Fpi, Fmi, Foi = parts[i]
+        g = Ai[None, :] * (Fpi[None, :] + k[:, None].to(Fpi.dtype) * Fmi[None, :]).abs()
+        fo = Foi[None, :]
         num = (fo * g).sum(1)
         den = (g * g).sum(1).clamp(min=1e-300)
         return (fo * fo).sum(1) - num * num / den
@@ -1751,32 +1813,32 @@ def _fit_solvent_bins(Fo, Fp, Fm, s2, s, b, n_bins, log_k_bins, u_params, aniso,
         k_max = float(SOLVENT_BIN_MAX)
         grid = torch.arange(0.0, k_max + 1e-9, 0.01, dtype=dtype, device=device)
         with torch.no_grad():
-            for i, sel in enumerate(in_bin):
+            for i in range(n_bins):
                 if not bool(active[i]):
                     continue
-                if not bool(sel.any()):
+                if len(parts[i][0]) == 0:
                     # no work reflections: keep the starting value (the
                     # exponential's at the bin centre), as the unbounded
                     # solve did; a 0 here would fire the curve rule's cut
                     km_out[i] = km_start[i].clamp(0.0, k_max)
                     continue
-                r = bin_residual(grid, sel)
+                r = bin_residual(grid, i)
                 j0 = int(torch.argmin(r))
                 lo, hi = float(grid[max(j0 - 1, 0)]), float(grid[min(j0 + 1, len(grid) - 1)])
                 gr = 0.5 * (5 ** 0.5 - 1)
                 a, c = lo, hi
                 x1, x2 = c - gr * (c - a), a + gr * (c - a)
                 f1, f2 = (float(v) for v in bin_residual(
-                    torch.tensor([x1, x2], dtype=dtype, device=device), sel))
+                    torch.tensor([x1, x2], dtype=dtype, device=device), i))
                 for _ in range(40):
                     if f1 <= f2:
                         c, x2, f2 = x2, x1, f1
                         x1 = c - gr * (c - a)
-                        f1 = float(bin_residual(torch.tensor([x1], dtype=dtype, device=device), sel)[0])
+                        f1 = float(bin_residual(torch.tensor([x1], dtype=dtype, device=device), i)[0])
                     else:
                         a, x1, f1 = x1, x2, f2
                         x2 = a + gr * (c - a)
-                        f2 = float(bin_residual(torch.tensor([x2], dtype=dtype, device=device), sel)[0])
+                        f2 = float(bin_residual(torch.tensor([x2], dtype=dtype, device=device), i)[0])
                 best = min((float(r[j0]), float(grid[j0])), (f1, x1), (f2, x2))
                 km_out[i] = best[1]
         return km_out, lk_start
@@ -2857,13 +2919,16 @@ def run(args):
         n = int(bins_b.max()) + 1
         # fit_scales's own log defaults to the stdout bound at import, which
         # redirect_stdout does not reach; hand it a sink explicitly so the
-        # curve is printed once, below, and not twice.
+        # curve is printed once, below, and not twice. fit1 is a single-scale
+        # fit here (this row runs only without --scale-bins) on the same
+        # structure factors, so the binned fit starts where its own coarse
+        # scan and single-scale LBFGS would have finished (fit_scales, init).
         with contextlib.redirect_stdout(io.StringIO()), \
                 timed(timing, "fit, binned row", device):
             fitb = fit_scales(F_obs, F_protein, F_mask, inv_d2, s_cart, work,
                               args.aniso, fit_solvent=True, bins=bins_b,
                               solvent_bins=per_bin_solvent(args.also_scale_bins),
-                              log=io.StringIO())
+                              log=io.StringIO(), init=fit1)
         mb = model_amplitudes(fitb, F_protein, F_mask, inv_d2, s_cart)
         result.update({"scale_bins": n,
                        "bin_scheme": describe_bins(args.also_scale_bins,
