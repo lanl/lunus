@@ -33,14 +33,18 @@ because mmtbx scales anisotropically too; the comparison is unfair otherwise,
 and not by a little -- with anisotropic ADPs and an ISOTROPIC overall B, 7FPV
 comes out at 0.2060 rather than 0.1312. --iso-scale turns it off.
 
-mmtbx also fits its overall scale per resolution bin, which the torch fit does
-not: a binned scale absorbs resolution-dependent errors, including the ones in
-a structure-factor model that this comparison exists to expose. So the torch
-row stays single-scale, and a second row beside it (--binned-row) is fitted
-the way mmtbx is, from the same structure factors and, by default, on mmtbx's
-own logarithmic resolution bins ('log'; an integer N gives N equal-count bins
-instead). The distance between the two rows is the part of the gap that is
-scaling. On the 40 sampleworks entries, with 20 equal-count bins (the default
+mmtbx also fits its overall scale per resolution bin. A binned scale absorbs
+resolution-dependent errors, including the ones in a structure-factor model
+that this comparison exists to expose, so the table always shows both: the
+"torch" row with a single overall scale, and beside it (--binned-row) the
+"torch, N scale bins" row fitted the way mmtbx is, from the same structure
+factors and, by default, on mmtbx's own logarithmic resolution bins ('log'; an
+integer N gives N equal-count bins instead). Since 2026-11-17 the binned fit
+is the torch tool's main fit (the method write-up's scaling) and the
+single-scale fit is made alongside; the rows, their labels, order and numbers
+are what they were. --single-scale makes the single scale the main fit again.
+The distance between the two rows is the part of the gap that is scaling. On
+the 40 sampleworks entries, with 20 equal-count bins (the default
 before 2026-11-09; --binned-row 20 reproduces it), the single-scale row is a
 median 0.005 above mmtbx in R-work and the binned row 0.002; what remains is
 mostly the solvent mask. On data whose falloff is not Gaussian the difference
@@ -132,12 +136,21 @@ def build_parser():
                         "stay comparable either way")
     p.add_argument("--binned-row", type=fit_solvent_rfactor.scale_bins_arg,
                    default="log", metavar="log|N",
-                   help="add a torch row fitted with one scale per resolution "
-                        "bin, as mmtbx scales, beside the single-scale one; it "
-                        "shows how much of a gap to mmtbx is the scaling "
-                        "model. 'log' uses mmtbx's own logarithmic bins, N "
-                        "uses N equal-count bins (20 was the default before "
-                        "2026-11-09), 0 omits the row (default: log)")
+                   help="the torch row fitted with one scale per resolution "
+                        "bin, as mmtbx scales, printed beside the single-scale "
+                        "one; it shows how much of a gap to mmtbx is the "
+                        "scaling model. Since 2026-11-17 it is the torch fit's "
+                        "MAIN fit (--scale-bins), with the single-scale fit "
+                        "made alongside; the rows printed are unchanged. 'log' "
+                        "uses mmtbx's own logarithmic bins, N uses N "
+                        "equal-count bins (20 was the default before "
+                        "2026-11-09), 0 omits the row and makes the single "
+                        "scale the main fit (default: log)")
+    p.add_argument("--single-scale", action="store_true",
+                   help="make the torch tool's main fit single-scale, as "
+                        "before 2026-11-17 (--scale-bins 0), with the binned "
+                        "row as an extra fit (--also-scale-bins); every row "
+                        "prints as it does by default")
     p.add_argument("--select", default="all", metavar="SEL",
                    help="an iotbx atom selection applied to the model for "
                         "BOTH methods, e.g. \"not element H\" to drop "
@@ -170,23 +183,53 @@ def main():
             argv.append("--aniso")
         if args.select != "all":
             argv += ["--select", args.select]
-        # always passed, so --binned-row 0 turns the row off now that the
-        # torch tool runs it by default; before the passthrough, so that an
-        # --also-scale-bins passed through still wins
-        argv += ["--also-scale-bins", str(args.binned_row)]
+        # The binned row is the torch tool's main fit by default (2026-11-17)
+        # and the single-scale fit is made alongside it; --single-scale, or
+        # --binned-row 0, makes the single scale the main fit, with the
+        # binned row as the extra fit (or none). A --scale-bins passed
+        # through wins, and then nothing is added here. An --also-scale-bins
+        # passed through still wins too, as it always has: with no
+        # --single-scale nothing is added, and the torch tool reads it the old
+        # way (a single-scale main fit with that row;
+        # fit_solvent_rfactor.resolve_scale_bins). What the passthrough sets
+        # is read from the torch tool's own parser, so abbreviated and '='
+        # forms count, and nothing is added that the tool would then report
+        # as ignored.
+        given = fit_solvent_rfactor.build_parser().parse_args(argv + passthrough)
+        if given.scale_bins is None:
+            if args.single_scale or not args.binned_row:
+                argv += ["--scale-bins", "0"]
+                if given.also_scale_bins is None:
+                    argv += ["--also-scale-bins", str(args.binned_row)]
+            elif given.also_scale_bins is None:
+                argv += ["--scale-bins", str(args.binned_row)]
+        elif not given.scale_bins and given.also_scale_bins is None:
+            # a single-scale main fit passed through (--scale-bins 0,
+            # --single-scale): --binned-row still chooses the extra row, as
+            # it always did
+            argv += ["--also-scale-bins", str(args.binned_row)]
         argv += passthrough
         print("\ntorch: fit_solvent_rfactor.py %s\n" % " ".join(argv[2:]))
         torch_args = fit_solvent_rfactor.build_parser().parse_args(argv)
         r = fit_solvent_rfactor.run(torch_args)
         r_torch = r
-        # A --scale-bins passed through makes the main fit itself binned; say
-        # so in its label, and run() then skips the extra row as redundant.
-        # Row labels keep the "torch, N scale bins" form log parsers match;
-        # the bin scheme is printed beside the table instead.
+        # The rows keep the labels and order log parsers match (the
+        # TorchRef kit's torch_rwork, torch_binned_rwork, ...): "torch, no
+        # solvent" and "torch" are the single-scale fits, "torch, N scale
+        # bins" the binned one, whichever of them the tool made its main fit.
+        # With a binned main fit the single-scale fits come from the "single"
+        # keys run() reports alongside it; the bin scheme is printed beside
+        # the table.
+        single = "R-work single" in r
+        rows.append(("torch, no solvent",
+                     r["R-work no solvent single" if single else "R-work no solvent"],
+                     r["R-free no solvent single" if single else "R-free no solvent"],
+                     float("nan"), float("nan")))
+        if single:
+            rows.append(("torch", r["R-work single"], r["R-free single"],
+                         r["k_sol single"], r["b_sol single"]))
         main = ("torch, %d scale bins" % r["main_scale_bins"]
                 if r["main_scale_bins"] else "torch")
-        rows.append(("torch, no solvent", r["R-work no solvent"],
-                     r["R-free no solvent"], float("nan"), float("nan")))
         rows.append((main, r["R-work"], r["R-free"], r["k_sol"],
                      r["b_sol"]))
         if "R-work binned" in r:
