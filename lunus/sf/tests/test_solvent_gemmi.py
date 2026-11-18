@@ -325,7 +325,7 @@ def test_mask_blur_moves_the_mask_toward_the_geometric_one():
     geometric = np.array(g, copy=False)
 
     def agreement(blur):
-        model = SolventModel(cutoff=1.0, taper_width=0.5, mask_blur=blur,
+        model = SolventModel(mask_source="density", cutoff=1.0, taper_width=0.5, mask_blur=blur,
                              check_occupancy=False)
         # Calibrated to gemmi's OWN occupancy, so this compares shape and not
         # how much of the cell each model calls solvent.

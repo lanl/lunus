@@ -211,8 +211,8 @@ def test_detached_mask_carries_no_gradient():
             sys["cell_volume"], sys["hkl"], sys["orth"])
 
     assert rho.requires_grad
-    _, mask_detached, _ = SolventModel(detach_mask=True, **common).apply(*args)
-    _, mask_live, _ = SolventModel(detach_mask=False, **common).apply(*args)
+    _, mask_detached, _ = SolventModel(mask_source="density", detach_mask=True, **common).apply(*args)
+    _, mask_live, _ = SolventModel(mask_source="density", detach_mask=False, **common).apply(*args)
     assert not mask_detached.requires_grad
     assert mask_live.requires_grad
 
@@ -242,12 +242,12 @@ def test_detach_mask_removes_the_solvent_path_from_the_gradient():
         return frac.grad.clone()
 
     g_none = grad(solvent=None)
-    g_detached = grad(solvent=SolventModel(detach_mask=True, **common))
-    g_live = grad(solvent=SolventModel(detach_mask=False, **common))
+    g_detached = grad(solvent=SolventModel(mask_source="density", detach_mask=True, **common))
+    g_live = grad(solvent=SolventModel(mask_source="density", detach_mask=False, **common))
 
     # The solvent term does change the VALUE either way...
     F_none = _sf(sys, solvent=None)
-    F_det = _sf(sys, solvent=SolventModel(detach_mask=True, **common))
+    F_det = _sf(sys, solvent=SolventModel(mask_source="density", detach_mask=True, **common))
     assert not torch.allclose(F_none, F_det)
     # ...but detached it is a constant, so the coordinate gradient is untouched.
     assert torch.allclose(g_none, g_detached, rtol=1e-10, atol=1e-12)
@@ -271,7 +271,7 @@ def test_per_configuration_masks_reach_diffuse_and_a_shared_one_does_not():
 
     rho = _density(sys)
     cutoff = 0.1 * float(rho.max())
-    model = SolventModel(cutoff=cutoff, taper_width=0.25 * cutoff,
+    model = SolventModel(mask_source="density", cutoff=cutoff, taper_width=0.25 * cutoff,
                          k_sol=0.35, check_occupancy=False)
 
     def batch_sf(**kw):
@@ -316,7 +316,7 @@ def test_checkpointing_gives_the_same_answer_with_solvent():
     batch = sys["frac"].unsqueeze(0).repeat(2, 1, 1)
     rho = _density(sys)
     cutoff = 0.1 * float(rho.max())
-    model = SolventModel(cutoff=cutoff, taper_width=0.25 * cutoff,
+    model = SolventModel(mask_source="density", cutoff=cutoff, taper_width=0.25 * cutoff,
                          check_occupancy=False)
 
     def run(use_checkpoint):
@@ -333,7 +333,7 @@ def test_checkpointing_gives_the_same_answer_with_solvent():
 
 def test_taper_width_must_be_positive():
     with pytest.raises(ValueError, match="taper_width"):
-        SolventModel(cutoff=0.1, taper_width=0.0)
+        SolventModel(mask_source="density", cutoff=0.1, taper_width=0.0)
 
 
 # --------------------------------------------------------------------------
@@ -406,7 +406,7 @@ def test_solvent_diffuse_signal_dominates_grid_alignment_noise():
         grid, common["orth_matrix"], taper_w, compile_core=False,
     )
     cutoff = 0.01 * float(rho.max())
-    model = SolventModel(cutoff=cutoff, taper_width=0.5 * cutoff)
+    model = SolventModel(mask_source="density", cutoff=cutoff, taper_width=0.5 * cutoff)
 
     voxel = CELL[0] / grid[0]
     d_none = diffuse(batch, None)
@@ -446,7 +446,7 @@ def test_empty_mask_warns_rather_than_silently_doing_nothing():
     F_mask ~ 0, no error, and a solvent term that contributes nothing. The
     check exists so that arrives as a warning instead of as a conclusion."""
     sys = _system()
-    model = SolventModel(cutoff=0.5, taper_width=0.25)
+    model = SolventModel(mask_source="density", cutoff=0.5, taper_width=0.25)
     F_p = _sf(sys, solvent=None)
 
     with pytest.warns(SolventMaskWarning, match="essentially empty"):
@@ -460,7 +460,7 @@ def test_saturated_mask_warns_too():
     sys = _system()
     rho = _density(sys)
     huge = 10.0 * float(rho.max())
-    model = SolventModel(cutoff=huge, taper_width=0.5 * huge)
+    model = SolventModel(mask_source="density", cutoff=huge, taper_width=0.5 * huge)
 
     with pytest.warns(SolventMaskWarning, match="almost the whole cell"):
         _run_with(sys, model)
@@ -474,7 +474,7 @@ def test_a_sensible_mask_does_not_warn_and_records_its_diagnostics():
     sys = _system(n_atoms=200)
     rho = _density(sys)
     cutoff = 0.1 * float(rho.max())
-    model = SolventModel(cutoff=cutoff, taper_width=0.5 * cutoff)
+    model = SolventModel(mask_source="density", cutoff=cutoff, taper_width=0.5 * cutoff)
 
     with warnings.catch_warnings():
         warnings.simplefilter("error", SolventMaskWarning)
@@ -489,7 +489,7 @@ def test_the_check_runs_once_not_per_configuration():
     """It reads scalars back from the device, which synchronises. Once per
     model, not once per frame -- and one warning, not N."""
     sys = _system()
-    model = SolventModel(cutoff=0.5, taper_width=0.25)
+    model = SolventModel(mask_source="density", cutoff=0.5, taper_width=0.25)
     F_p = _sf(sys, solvent=None)
     args = (_flooded(sys), F_p, sys["cell_volume"], sys["hkl"], sys["orth"])
 
@@ -502,7 +502,7 @@ def test_the_check_runs_once_not_per_configuration():
 
 def test_the_check_can_be_turned_off():
     sys = _system()
-    model = SolventModel(cutoff=0.5, taper_width=0.25, check_occupancy=False)
+    model = SolventModel(mask_source="density", cutoff=0.5, taper_width=0.25, check_occupancy=False)
     F_p = _sf(sys, solvent=None)
     with warnings.catch_warnings():
         warnings.simplefilter("error", SolventMaskWarning)
@@ -566,7 +566,7 @@ def test_float32_matches_float64_below_the_pipelines_own_noise(cut_frac):
             s["elem_offsets"], s["atom_radius_ang"], s["grid_shape"],
             s["orth"], s["taper_width"], compile_core=False)
         cutoff = cut_frac * float(rho.max())
-        model = SolventModel(cutoff=cutoff, taper_width=0.5 * cutoff,
+        model = SolventModel(mask_source="density", cutoff=cutoff, taper_width=0.5 * cutoff,
                              check_occupancy=False)
         F = structure_factors_one_config(
             s["frac"], s["element_idx"], s["occ"], s["atom_A"], s["atom_lam"],
@@ -634,7 +634,7 @@ def test_mask_blur_zero_reproduces_the_bare_threshold():
     sys = _system()
     rho = _density(sys)
     cutoff = 0.1 * float(rho.max())
-    model = SolventModel(cutoff=cutoff, taper_width=0.5 * cutoff,
+    model = SolventModel(mask_source="density", cutoff=cutoff, taper_width=0.5 * cutoff,
                          mask_blur=0.0, check_occupancy=False)
 
     assert torch.equal(model.build_mask(rho, sys["orth"]),
@@ -645,7 +645,7 @@ def test_mask_blur_rejects_a_negative_b():
     """A negative B sharpens, which amplifies the boundary roughness the blur
     exists to remove -- the opposite of the intent, and silent."""
     with pytest.raises(ValueError, match="mask_blur"):
-        SolventModel(cutoff=0.1, taper_width=0.05, mask_blur=-1.0)
+        SolventModel(mask_source="density", cutoff=0.1, taper_width=0.05, mask_blur=-1.0)
 
 
 def test_mask_blur_smooths_the_mask_boundary_on_a_dense_model():
@@ -692,7 +692,7 @@ def test_mask_blur_smooths_the_mask_boundary_on_a_dense_model():
     d = 1.0 / torch.sqrt(reciprocal_inv_d2(orth, hkl))
 
     def content(blur, sel):
-        model = SolventModel(cutoff=1.0, taper_width=0.5, mask_blur=blur,
+        model = SolventModel(mask_source="density", cutoff=1.0, taper_width=0.5, mask_blur=blur,
                              check_occupancy=False)
         model.calibrate(rho, orth, target)
         mask = model.build_mask(rho, orth)
@@ -726,7 +726,7 @@ def test_calibration_must_see_the_grid_the_mask_is_built_from():
     sys = _system(n_atoms=40, seed=5)
     rho = _density(sys)
     target = 0.9
-    model = SolventModel(cutoff=1.0, taper_width=0.5, mask_blur=100.0,
+    model = SolventModel(mask_source="density", cutoff=1.0, taper_width=0.5, mask_blur=100.0,
                          check_occupancy=False)
 
     model.calibrate(rho, sys["orth"], target)
@@ -736,7 +736,7 @@ def test_calibration_must_see_the_grid_the_mask_is_built_from():
     # The naive version: calibrate on the unblurred density, threshold the
     # blurred one. Same target, different answer.
     naive_cutoff = calibrate_cutoff(rho, target)
-    naive = SolventModel(cutoff=naive_cutoff, taper_width=0.5 * naive_cutoff,
+    naive = SolventModel(mask_source="density", cutoff=naive_cutoff, taper_width=0.5 * naive_cutoff,
                          mask_blur=100.0, check_occupancy=False)
     missed = float(mask_occupancy(naive.build_mask(rho, sys["orth"])))
     assert abs(missed - target) > 0.05
@@ -765,7 +765,7 @@ def test_mask_blur_is_a_length_and_so_survives_a_change_of_grid():
         rho = compute_density(frac, idx, torch.ones(frac.shape[0], dtype=DTYPE),
                             A[idx], lam[idx], offsets, radius[idx], grid,
                             orth, taper_w, compile_core=False)
-        model = SolventModel(cutoff=cutoff, taper_width=0.5 * cutoff,
+        model = SolventModel(mask_source="density", cutoff=cutoff, taper_width=0.5 * cutoff,
                              mask_blur=blur, check_occupancy=False)
         return float(mask_occupancy(model.build_mask(rho, orth)))
 
@@ -870,7 +870,7 @@ def test_detach_mask_hides_most_of_the_occupancy_gradient():
 
     rho = compute_density(frac[0], idx, occ0[0], A[idx], lam[idx], offsets,
                         radius[idx], grid, orth, taper_w, compile_core=False)
-    reference = SolventModel(cutoff=1.0, taper_width=0.5, mask_blur=0.0,
+    reference = SolventModel(mask_source="density", cutoff=1.0, taper_width=0.5, mask_blur=0.0,
                              check_occupancy=False)
     reference.calibrate(rho, orth, 0.5)
     assert shell_voxels(reference.build_mask(rho, orth)) > 1000
@@ -878,7 +878,7 @@ def test_detach_mask_hides_most_of_the_occupancy_gradient():
     grads = {}
     for detach in (True, False):
         o = occ0.clone().requires_grad_(True)
-        model = SolventModel(cutoff=reference.cutoff,
+        model = SolventModel(mask_source="density", cutoff=reference.cutoff,
                              taper_width=reference.taper_width, mask_blur=0.0,
                              detach_mask=detach, check_occupancy=False)
         structure_factors_batch(frac, idx, o, solvent=model,
@@ -910,7 +910,7 @@ def test_mask_blur_is_a_total_and_absorbs_the_pipeline_blur():
     """
     sys = _system(n_atoms=40, seed=2)
     rho_unblurred = _density(sys)
-    model = SolventModel(cutoff=0.05, taper_width=0.025, mask_blur=100.0,
+    model = SolventModel(mask_source="density", cutoff=0.05, taper_width=0.025, mask_blur=100.0,
                          check_occupancy=False)
 
     full = model.mask_source(rho_unblurred, sys["orth"], pipeline_blur=0.0)
@@ -930,7 +930,7 @@ def test_a_pipeline_blur_beyond_mask_blur_warns_rather_than_sharpening():
     only honest response is to say so."""
     sys = _system(n_atoms=40, seed=2)
     rho = _density(sys)
-    model = SolventModel(cutoff=0.05, taper_width=0.025, mask_blur=20.0,
+    model = SolventModel(mask_source="density", cutoff=0.05, taper_width=0.025, mask_blur=20.0,
                          check_occupancy=False)
     with pytest.warns(SolventMaskWarning, match="already exceeds mask_blur"):
         model.mask_source(rho, sys["orth"], pipeline_blur=200.0)
@@ -1068,7 +1068,7 @@ def test_atom_presence_source_moves_the_mask_and_not_f_protein():
     vol = sys["cell_volume"]
     assert abs(float(source.sum()) * vol / source.numel() - len(mask_occ)) < 0.1 * len(mask_occ)   # the 0.01 cutoff truncates a little
 
-    plain = SolventModel(cutoff=1.0, taper_width=0.5, check_occupancy=False)
+    plain = SolventModel(mask_source="density", cutoff=1.0, taper_width=0.5, check_occupancy=False)
     plain.calibrate(density, sys["orth"], 0.6)
     atoms = SolventModel(cutoff=1.0, taper_width=0.5, check_occupancy=False, source_b=60.0)
     atoms.calibrate(density, sys["orth"], 0.6, source=source)

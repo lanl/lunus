@@ -5,12 +5,17 @@ Flat / mask-based bulk solvent (Jiang & Brunger 1994), differentiable.
                                              + k_sol * exp(-b_sol*s^2/4) * F_mask(h) ]
 
 where F_mask is the transform of a real-space solvent mask. The mask here is a
-DENSITY THRESHOLD -- solvent is wherever the model's density falls below a
-cutoff -- rather than the geometric (vdW radius + probe, then shrink) mask that
-Phenix and REFMAC build. That choice, and its consequences, are argued in
-docs/solvent-design.md; the short version is that compute_density() already
-produces exactly the grid a threshold needs, so F_mask costs one extra FFT and
-inherits the protein density's grid and symmetry conventions unchanged.
+THRESHOLD ON A FIELD placed like the density -- solvent is wherever the field
+falls below a cutoff -- rather than the geometric (vdW radius + probe, then
+shrink) mask that Phenix and REFMAC build. That choice, and its consequences,
+are argued in docs/solvent-design.md; the short version is that
+compute_density() already produces exactly the grid a threshold needs, so
+F_mask costs one extra FFT and inherits the protein density's grid and symmetry
+conventions unchanged. The field is, by default, soft spheres or an
+atom-presence field built from the atoms (SolventModel.set_atoms; the
+benchmark ranks them in that order), or the electron density itself on
+request (mask_source="density"); most of what follows was learned on the
+density and holds for every field.
 
 The model is EXPLICIT ORDERED WATERS PLUS A MASK FOR THE REMAINDER, the same
 division crystallographic refinement makes. A threshold mask suits that well:
@@ -76,6 +81,19 @@ B_SOL_DEFAULT = 46.0     # A^2
 # fit. mask_blur=0.0 restores the unsmoothed threshold, and changes results.
 MASK_BLUR_DEFAULT = 100.0    # A^2
 SOURCE_B_DEFAULT = 20.0      # A^2; see mask_source_weights() and SolventModel.source_b
+
+# The fixed level of the soft-sphere field: one sphere's plateau, in "sphere
+# overlaps". Measured, against calibration to gemmi's occupancy, ONLY for
+# united-atom spheres at the default offset and edge, with no extra smoothing,
+# on models without hydrogens -- fit_solvent_rfactor.mask_level_rule has the
+# numbers. Every other mask source and setting is calibrated or given.
+SPHERE_LEVEL_FIXED = 1.0
+# The atom-presence field's kernels are truncated where the atom's density
+# falls below this, e/A^3: the R-factor tool's --density-cutoff default, with
+# which the field was measured.
+SOURCE_DENSITY_CUTOFF = 1e-4
+
+MASK_SOURCES = ("auto", "spheres", "atoms", "density")
 
 # Occupancies outside this band are reported. The band is deliberately much
 # wider than the 0.3-0.7 a protein crystal actually shows: the point is to
@@ -437,9 +455,37 @@ class SolventModel:
     solvent=None everywhere means today's behaviour, bit for bit: the solvent
     code is not merely multiplied by zero, it does not run.
 
+    WHICH FIELD THE MASK IS CUT FROM is mask_source:
+
+      "auto"        (default) soft spheres when set_atoms was given the
+                    atoms' names (atom_names and residue_names), else the
+                    atom-presence field when it was given only their
+                    elements. Decided by set_atoms alone: kernels built by
+                    hand and passed as mask_kernels= go with an explicit
+                    "spheres" or "atoms". Knowing NOTHING about the atoms is
+                    an error, not a quiet fall back to the electron density,
+                    which measured worst of the three; pass
+                    mask_source="density" to ask for it.
+      "spheres"     the soft-sphere field (lunus.sf.mask_spheres); the same as
+                    spheres=True.
+      "atoms"       the atom-presence field at source_b (default
+                    SOURCE_B_DEFAULT); the same as source_b=B.
+      "density"     the electron density itself, thresholded in e/A^3.
+
+    Measured on the R-factor benchmark (binned R-free gap to mmtbx; see
+    docs/solvent-design.md), united-atom spheres beat the atom-presence field,
+    which beats the density, at every resolution tried.
+
     Fields:
-      cutoff        density below which a voxel is solvent, e/A^3
-      taper_width   width of the C^1 transition, e/A^3 (see solvent_mask)
+      cutoff        the level below which a voxel is solvent, in the units of
+                    the field it is cut from: e/A^3 for the density, sphere
+                    overlaps for the spheres, unit-Gaussian overlaps for the
+                    atom-presence field. None (default) is SPHERE_LEVEL_FIXED
+                    for spheres on a model without hydrogens -- the one case
+                    with a measured fixed level -- and an error everywhere else
+                    until calibrate() sets it.
+      taper_width   width of the C^1 transition, in the cutoff's units (see
+                    solvent_mask). None (default) is half the cutoff.
       k_sol         solvent electron density, e/A^3
       b_sol         solvent B-factor, A^2
       k_overall     overall scale
@@ -447,9 +493,10 @@ class SolventModel:
       mask_blur     B in A^2 smoothing the density before it is thresholded --
                     this model's probe radius, see the module docstring.
                     Defaults to MASK_BLUR_DEFAULT (sigma 1.13 A), or to 0.0
-                    with spheres=True; 0.0 on the density restores the
-                    unsmoothed threshold and does NOT reproduce
-                    conventional solvent scales on real data.
+                    for the sphere field (with "auto", decided when the field
+                    is); 0.0 on the density restores the unsmoothed threshold
+                    and does NOT reproduce conventional solvent scales on
+                    real data.
       detach_mask   build the mask from a detached copy of the density
                     (default FALSE). False is the consistent choice: the
                     forward pass rebuilds the mask from the current density
@@ -464,25 +511,28 @@ class SolventModel:
                     Phenix and REFMAC do per macro-cycle. That model is the
                     better long-term design and is not implementable here yet,
                     because nothing can pin a mask across calls.
-      spheres       False (default). True: the caller places a soft-sphere
-                    field for the mask (lunus.sf.mask_spheres: every atom a
-                    flat-top sphere of half its Lennard-Jones sigma, edge
-                    0.5 A) and hands it in as `source`; it is placed WITHOUT
+      spheres       False (default). True is mask_source="spheres" (the
+                    attribute records that request; with "auto" it stays
+                    False whatever resolved_source() decides, and assigning
+                    it, or source_b, after construction does not change the
+                    source -- choose it when constructing the model): a
+                    soft-sphere field for the mask (lunus.sf.mask_spheres:
+                    every atom a flat-top sphere of half its Lennard-Jones
+                    sigma, edge 0.5 A), from set_atoms, or placed by the caller
+                    and handed in as `source`; it is placed WITHOUT
                     the pipeline blur, so pipeline_blur is not subtracted
                     from mask_blur, and mask_blur defaults to 0 (its own edge
                     is all the smoothing it wants: 25 A^2 more cost 0.003).
                     On the R-factor benchmark it beat the atom-presence field
                     at every resolution; see docs/solvent-design.md. Exclusive
                     with source_b.
-      source_b      None (default): the mask is thresholded from the electron
-                    density itself. A number: the caller places a SECOND field
-                    for the mask, every atom a unit-weight Gaussian at this B
-                    (mask_source_weights, uniform-B kernels), and hands it in
-                    as `source`; see mask_source_weights for why and what it
-                    buys. SOURCE_B_DEFAULT is the measured value; the
-                    R-factor tool ships it, the library leaves it opt-in so
-                    that structure_factors_one_config needs no second kernel
-                    set unless asked.
+      source_b      None (default). A number is mask_source="atoms" at that
+                    B: a SECOND field for the mask, every atom a unit-weight
+                    Gaussian at this B (mask_source_weights, uniform-B
+                    kernels), from set_atoms or placed by the caller and
+                    handed in as `source`; see mask_source_weights for why and
+                    what it buys. The atom-presence field uses
+                    SOURCE_B_DEFAULT, the measured value, when this is None.
       check_occupancy
                     measure the mask ONCE, on the first configuration, and
                     warn if it is degenerate (default True). The check costs
@@ -491,26 +541,54 @@ class SolventModel:
 
     After the first apply(), last_occupancy and last_shell_voxels hold that
     measurement, for callers that would rather report it than be warned.
+
+    THE ATOMS, for the two atom-based fields, are told to the model once with
+    set_atoms(); structure_factors_one_config and _batch then place the mask's
+    field themselves, from kernels built on first use and cached, and
+    mask_field() places the same field for calibrate().
     """
 
     __slots__ = ("cutoff", "taper_width", "k_sol", "b_sol", "k_overall",
                  "u_aniso", "detach_mask", "check_occupancy",
-                 "density_scale", "mask_blur", "source_b", "spheres", "last_occupancy",
+                 "density_scale", "mask_blur", "source_b", "spheres", "source_kind",
+                 "atom_elements", "atom_radii", "last_occupancy",
                  "last_shell_voxels", "_inv_d2_grid", "_inv_d2_key",
-                 "_warned_blur")
+                 "_warned_blur", "_kernels", "_kernels_key", "_kernels_orth",
+                 "_n_hydrogens")
 
-    def __init__(self, cutoff, taper_width, k_sol=K_SOL_DEFAULT,
+    def __init__(self, cutoff=None, taper_width=None, k_sol=K_SOL_DEFAULT,
                  b_sol=B_SOL_DEFAULT, k_overall=1.0, u_aniso=None,
                  detach_mask=False, check_occupancy=True, density_scale=1.0,
-                 mask_blur=None, source_b=None, spheres=False):
-        if taper_width <= 0:
+                 mask_blur=None, source_b=None, spheres=False, mask_source="auto"):
+        if mask_source not in MASK_SOURCES:
+            raise ValueError("mask_source must be one of %s, got %r"
+                             % (", ".join(MASK_SOURCES), mask_source))
+        if spheres and source_b is not None:
+            raise ValueError("spheres and source_b are two different mask "
+                             "sources; set one")
+        if spheres:
+            if mask_source not in ("auto", "spheres"):
+                raise ValueError("spheres=True is mask_source='spheres', which "
+                                 "contradicts mask_source=%r" % (mask_source,))
+            mask_source = "spheres"
+        if source_b is not None:
+            if source_b <= 0:
+                raise ValueError("source_b must be > 0 A^2 or None")
+            if mask_source not in ("auto", "atoms"):
+                raise ValueError("source_b is mask_source='atoms', which "
+                                 "contradicts mask_source=%r" % (mask_source,))
+            mask_source = "atoms"
+        if taper_width is not None and taper_width <= 0:
             raise ValueError(
                 "taper_width must be > 0; a hard threshold has no usable "
                 "gradient (that is the whole reason for the taper)")
-        if mask_blur is None:
-            # the sphere field's own soft edge is all the smoothing it wants
-            mask_blur = 0.0 if spheres else MASK_BLUR_DEFAULT
-        if mask_blur < 0:
+        if cutoff is not None and cutoff <= 0:
+            raise ValueError("cutoff must be > 0, or None")
+        if mask_blur is None and mask_source != "auto":
+            # the sphere field's own soft edge is all the smoothing it wants;
+            # with "auto" this waits until the field is known (effective_mask_blur)
+            mask_blur = 0.0 if mask_source == "spheres" else MASK_BLUR_DEFAULT
+        if mask_blur is not None and mask_blur < 0:
             raise ValueError("mask_blur must be >= 0 A^2; a negative B "
                              "sharpens the density and amplifies exactly the "
                              "boundary roughness the blur exists to remove")
@@ -524,18 +602,296 @@ class SolventModel:
         self.check_occupancy = check_occupancy
         self.density_scale = density_scale
         self.mask_blur = mask_blur
-        if source_b is not None and source_b <= 0:
-            raise ValueError("source_b must be > 0 A^2 or None")
         self.source_b = source_b
-        if spheres and source_b is not None:
-            raise ValueError("spheres and source_b are two different mask "
-                             "sources; set one")
-        self.spheres = bool(spheres)
+        self.spheres = mask_source == "spheres"
+        # the requested source; "auto" is resolved per call (resolved_source)
+        self.source_kind = mask_source
+        self.atom_elements = None
+        self.atom_radii = None
         self.last_occupancy = None
         self.last_shell_voxels = None
         self._inv_d2_grid = None
         self._inv_d2_key = None
         self._warned_blur = False
+        self._kernels = None
+        self._kernels_key = None
+        self._kernels_orth = None
+        self._n_hydrogens = None
+
+    # ------------------------------------------------------------------
+    # the atoms, and what follows from them
+
+    def set_atoms(self, elements, atom_names=None, residue_names=None,
+                  residue_ids=None):
+        """Tell the model which atoms the mask is built from, once.
+
+        elements: one symbol per atom, in the order the coordinates will
+        come (any case, charges allowed: 'C', 'ZN', 'O1-'). With atom_names
+        and residue_names as well -- PDB names, any case and padding -- the
+        atoms become soft spheres of united-atom radius
+        (mask_spheres.sphere_radii_from_names), which is what
+        mask_source="auto" then uses; with elements only, the atom-presence
+        field. residue_ids (optional, anything hashable per atom, e.g. a
+        (chain, number, insertion code) tuple) lets the radii's hydrogen
+        rule work per residue; without it a single hydrogen anywhere makes
+        the whole model explicit-hydrogen (sphere_radii_from_names).
+
+        Plain sequences, so any structure library will do; from cctbx
+        scatterer labels, mask_spheres.names_from_cctbx_labels gives the
+        three name columns. The kernels are built on first use, for the grid,
+        cell, device and dtype of that call, and cached; calling set_atoms
+        again replaces the atoms and drops the cache. It is the only way in:
+        assigning atom_elements or atom_radii directly leaves the cache and
+        the hydrogen count describing the old atoms.
+
+        With the atom-presence field, structure_factors_one_config multiplies
+        the occupancies by the field's weights itself; a mask_occ= passed
+        alongside is taken as already weighted, as it always has been."""
+        from .mask_spheres import is_hydrogen, sphere_radii_from_names
+
+        elements = [str(e) for e in elements]
+        if (atom_names is None) != (residue_names is None):
+            raise ValueError("set_atoms needs atom_names AND residue_names for "
+                             "the sphere field (or neither, for the atom-presence "
+                             "field)")
+        radii = None
+        if atom_names is not None and self.source_kind != "atoms":
+            radii = sphere_radii_from_names(
+                elements, list(atom_names), list(residue_names),
+                None if residue_ids is None else list(residue_ids))
+        elif self.source_kind == "spheres":
+            raise ValueError("mask_source='spheres' needs the atoms' names: "
+                             "set_atoms(elements, atom_names, residue_names, "
+                             "residue_ids)")
+        if radii is None and self.source_kind != "density":
+            # the atom-presence field needs every element's IT92 coefficients;
+            # an unknown symbol fails here, not at the first structure-factor call
+            from .elements import it92_coefficients
+            from .mask_spheres import bare_element
+            try:
+                it92_coefficients(sorted({bare_element(e).capitalize() for e in elements}))
+            except KeyError as e:
+                raise ValueError("set_atoms: %s; the atom-presence field needs a "
+                                 "scattering factor for every element" % e)
+        self.atom_elements = elements
+        self.atom_radii = radii
+        # counted once here, not per configuration in threshold()
+        self._n_hydrogens = sum(is_hydrogen(e) for e in elements)
+        self._kernels = None
+        self._kernels_key = None
+        self._kernels_orth = None
+
+    def resolved_source(self, mask_kernels=None):
+        """The field this model's mask is cut from, "spheres", "atoms" or
+        "density". With "auto" that is decided by set_atoms ALONE -- names
+        give the spheres, elements only the atom-presence field -- and never
+        by the kernels a caller passes: hand-built mask_kernels= go with an
+        explicit mask_source="spheres" or "atoms" (spheres=True, source_b=B),
+        so that calibrate() and the structure-factor call cannot read one
+        field two ways. mask_kernels says only whether the caller supplies
+        the field's kernels, which an explicit source accepts instead of
+        set_atoms. Raises when the source needs atoms the model has not been
+        given."""
+        kind = self.source_kind
+        if kind == "density":
+            return kind
+        if kind == "spheres":
+            if mask_kernels is None and self.atom_radii is None:
+                raise ValueError(
+                    "mask_source='spheres' needs the atoms: call set_atoms("
+                    "elements, atom_names, residue_names, residue_ids), or pass "
+                    "the 6-tuple mask_spheres.sphere_kernels() returns as "
+                    "mask_kernels=")
+            return kind
+        if kind == "atoms":
+            if mask_kernels is None and self.atom_elements is None:
+                raise ValueError(
+                    "mask_source='atoms' needs the atoms: call set_atoms(elements), "
+                    "or pass mask_kernels= and mask_occ= (see "
+                    "solvent_torch.mask_source_weights)")
+            return kind
+        if self.atom_radii is not None:
+            return "spheres"
+        if self.atom_elements is not None:
+            return "atoms"
+        if mask_kernels is not None:
+            raise ValueError(
+                "SolventModel(mask_source='auto') takes its field from "
+                "set_atoms(), not from the kernels passed: with hand-built "
+                "mask_kernels=, say which field they are, mask_source='spheres' "
+                "or mask_source='atoms' (spheres=True or source_b=B), or call "
+                "set_atoms() instead.")
+        raise ValueError(
+            "SolventModel(mask_source='auto') builds its mask from the atoms, "
+            "and it has not been told what they are. Either call "
+            "set_atoms(elements, atom_names, residue_names, residue_ids) -- soft "
+            "spheres, the measured best -- or set_atoms(elements) for the "
+            "atom-presence field; or pass mask_source='density' to threshold "
+            "the electron density, with its cutoff in e/A^3, as SolventModel "
+            "did by default before 2026-11-18.")
+
+    def effective_source_b(self):
+        """The atom-presence field's B, A^2."""
+        return SOURCE_B_DEFAULT if self.source_b is None else self.source_b
+
+    def effective_mask_blur(self, kind):
+        """mask_blur, with its default for `kind` when it was left None."""
+        if self.mask_blur is not None:
+            return self.mask_blur
+        return 0.0 if kind == "spheres" else MASK_BLUR_DEFAULT
+
+    def threshold(self, kind):
+        """(cutoff, taper_width) for a mask cut from `kind`: as given, or as
+        calibrate() set them; with cutoff None, SPHERE_LEVEL_FIXED for the
+        sphere field of a model without hydrogens at the settings it was
+        measured with (no mask_blur, taper half the level), and an error
+        otherwise; with taper_width None, half the cutoff."""
+        if self.cutoff is not None:
+            taper = self.taper_width if self.taper_width is not None else 0.5 * self.cutoff
+            return self.cutoff, taper
+        if kind != "spheres":
+            raise ValueError(
+                "SolventModel(cutoff=None): the %s field has no fixed level -- "
+                "what it should be depends on the system, its B factors and "
+                "the grid. Give cutoff=%s, or call calibrate() with a target "
+                "solvent fraction."
+                % ({"atoms": "atom-presence", "density": "electron-density"}[kind],
+                   " in e/A^3" if kind == "density" else ""))
+        if self.atom_elements is None:
+            raise ValueError(
+                "SolventModel(cutoff=None) on the sphere field: the fixed level "
+                "%.1f holds only for a model without hydrogens, and without "
+                "set_atoms() the model cannot tell. Call set_atoms(), give "
+                "cutoff=, or calibrate()." % SPHERE_LEVEL_FIXED)
+        n_h = self._n_hydrogens
+        if n_h is None:                 # atom_elements assigned without set_atoms
+            from .mask_spheres import is_hydrogen
+            n_h = sum(is_hydrogen(e) for e in self.atom_elements)
+        if n_h:
+            raise ValueError(
+                "SolventModel(cutoff=None) on the sphere field: the model has %d "
+                "hydrogens, whose spheres pack the field deeper and move its "
+                "level (calibrated levels ran 1.12-1.46 on such models), so the "
+                "fixed level %.1f does not apply. Call calibrate() with a target "
+                "solvent fraction, or give cutoff=." % (n_h, SPHERE_LEVEL_FIXED))
+        if self.effective_mask_blur(kind) != 0.0:
+            raise ValueError(
+                "SolventModel(cutoff=None) on the sphere field: the fixed level "
+                "%.1f was measured with no extra smoothing, and mask_blur is "
+                "%g A^2. Calibrate, or give cutoff=."
+                % (SPHERE_LEVEL_FIXED, self.effective_mask_blur(kind)))
+        taper = 0.5 * SPHERE_LEVEL_FIXED
+        if self.taper_width is not None and self.taper_width != taper:
+            raise ValueError(
+                "SolventModel(cutoff=None) on the sphere field: the fixed level "
+                "%.1f was measured with taper_width %.2f, and %g moves where the "
+                "mask crosses it. Calibrate, or give cutoff=."
+                % (SPHERE_LEVEL_FIXED, taper, self.taper_width))
+        return SPHERE_LEVEL_FIXED, taper
+
+    def cached_mask_kernels(self, kind, grid_shape, orth_matrix, blur=0.0):
+        """(mask_kernels, weights) for `kind` from the set_atoms atoms, in the
+        form structure_factors_one_config's mask_kernels= takes -- a 6-tuple
+        whose last entry is the field's own element index -- and, for the
+        atom-presence field, the per-atom weights the occupancies are
+        multiplied by (None for the spheres). Built for this grid, cell,
+        device, dtype and (atom field only) pipeline blur, and cached until
+        any of those changes. orth_matrix is the torch tensor of the call."""
+        import numpy as np
+
+        if kind not in ("spheres", "atoms"):
+            raise ValueError("no mask kernels for the %r source" % (kind,))
+        cheap = (kind, tuple(int(g) for g in grid_shape), str(orth_matrix.device),
+                 orth_matrix.dtype, float(blur) if kind == "atoms" else 0.0,
+                 self.effective_source_b())
+        # the same, unmodified orth tensor as last time, ON A GPU: a hit without
+        # copying it to the host, which there is a synchronisation per
+        # configuration. Not on the CPU, where the byte comparison below is
+        # cheap and catches what the version counter misses (a tensor sharing
+        # a numpy array's memory, or .data changed in place). On a GPU the
+        # .data route still slips past; a cell is not rewritten that way in
+        # practice.
+        if (orth_matrix.device.type != "cpu"
+                and self._kernels_key is not None and self._kernels_key[0] == cheap
+                and self._kernels_orth is not None
+                and self._kernels_orth[0] is orth_matrix
+                and self._kernels_orth[1] == orth_matrix._version):
+            return self._kernels
+        orth_np = orth_matrix.detach().cpu().numpy()
+        key = (cheap, orth_np.tobytes())
+        if self._kernels_key == key:
+            self._kernels_orth = (orth_matrix, orth_matrix._version)
+            return self._kernels
+        dev, dt = orth_matrix.device, orth_matrix.dtype
+        if kind == "spheres":
+            from .mask_spheres import sphere_kernels
+            kernels = sphere_kernels(self.atom_radii, tuple(grid_shape),
+                                     orth_np.astype(float), device=dev, dtype=dt)
+            weights = None
+        else:
+            from .elements import it92_coefficients
+            from .kernel_torch import build_atom_kernels_torch
+            from .mask_spheres import bare_element
+            elements = [bare_element(e).capitalize() for e in self.atom_elements]
+            present = sorted(set(elements))
+            coeffs = it92_coefficients(present)
+            A, lam, offsets, radius, taper_w, e2i = build_atom_kernels_torch(
+                elements, present, coeffs,
+                np.full(len(elements), float(self.effective_source_b())), float(blur),
+                tuple(grid_shape), orth_np.astype(float), cutoff=SOURCE_DENSITY_CUTOFF,
+                device=dev, dtype=dt)
+            idx = torch.tensor([e2i[e] for e in elements], dtype=torch.long, device=dev)
+            kernels = (A, lam, offsets, radius, taper_w, idx)
+            weights = torch.as_tensor(mask_source_weights(elements, coeffs),
+                                      device=dev, dtype=dt)
+        self._kernels = (kernels, weights)
+        self._kernels_key = key
+        self._kernels_orth = (orth_matrix, orth_matrix._version)
+        return self._kernels
+
+    def _check_atom_count(self, n_atoms):
+        """Raise unless set_atoms was told n_atoms atoms: its kernels and
+        weights are per atom, in the coordinates' order."""
+        if self.atom_elements is not None and len(self.atom_elements) != n_atoms:
+            raise ValueError(
+                "set_atoms() was told %d atoms but the coordinates have %d; the "
+                "mask's kernels are per atom, in the coordinates' order"
+                % (len(self.atom_elements), n_atoms))
+
+    def mask_field(self, frac_coords, occ, grid_shape, orth_matrix, blur=0.0,
+                   grid_ops=None):
+        """The mask's field for one configuration, from the set_atoms atoms:
+        placed on the grid and symmetry-expanded as
+        structure_factors_one_config places it (uncompiled; a compiled call
+        agrees to roundoff). What calibrate() needs as
+        `source` when the mask is not cut from the density:
+
+            field = model.mask_field(frac, occ, grid, orth, blur, grid_ops)
+            model.calibrate(density, orth, target, pipeline_blur=blur,
+                            source=field)
+
+        blur is the pipeline's FFT-artifact blur, the same number passed as
+        blur= to the structure-factor call (the atom-presence field carries
+        it, the sphere field does not). Raises for the density source, which
+        has no field of its own. Not for a supercell= model, whose field the
+        structure-factor call places on the supercell's grid before folding;
+        calibrate such a model on a field placed the same way."""
+        from .density_torch import compute_density
+        from .symmetry_torch import symmetrize_sum
+
+        kind = self.resolved_source()
+        if kind == "density":
+            raise ValueError("the density source has no field of its own: "
+                             "calibrate on the density itself")
+        self._check_atom_count(frac_coords.shape[0])
+        kernels, weights = self.cached_mask_kernels(kind, grid_shape, orth_matrix, blur)
+        A, lam, offsets, radius, taper_w, idx = kernels
+        field = compute_density(frac_coords, idx, occ if weights is None else occ * weights,
+                                A, lam, offsets, radius, tuple(grid_shape), orth_matrix,
+                                taper_w, compile_core=False)
+        if grid_ops:
+            field = symmetrize_sum(field, grid_ops)
+        return field
 
     def _cached_inv_d2(self, density, orth_matrix):
         """The frequency grid for the blur, built once per (shape, device,
@@ -547,7 +903,32 @@ class SolventModel:
             self._inv_d2_key = key
         return self._inv_d2_grid
 
-    def mask_source(self, density, orth_matrix, pipeline_blur=0.0, source=None):
+    def field_kind(self, source):
+        """The source kind for a mask cut from `source` (None: the density),
+        the decision mask_source(), build_mask() and calibrate() share. With
+        "auto" and a field handed in, the atoms told to set_atoms say which
+        field it is, as they do for structure_factors_one_config."""
+        if source is not None and self.source_kind != "auto":
+            return self.source_kind
+        if source is None and self.source_kind in ("spheres", "atoms"):
+            raise ValueError(
+                "SolventModel.%s is set, so the mask expects its field as "
+                "`source`; structure_factors_one_config builds it from "
+                "set_atoms() or mask_kernels=, and mask_field() builds it for "
+                "calibrate() (see %s)"
+                % (("spheres", "mask_spheres.sphere_kernels")
+                   if self.source_kind == "spheres"
+                   else ("source_b", "mask_source_weights")))
+        kind = self.resolved_source()
+        if source is None and kind != "density":
+            raise ValueError(
+                "SolventModel's mask is cut from the %s field, which must be "
+                "handed in as `source`: mask_field() places it, for calibrate() "
+                "and build_mask()" % kind)
+        return kind
+
+    def mask_source(self, density, orth_matrix, pipeline_blur=0.0, source=None,
+                    _kind=None):
         """The grid the mask is thresholded from: `source` when given (the
         atom-presence field of source_b, placed by the caller), else the
         density; detached if detach_mask, and smoothed to a TOTAL of mask_blur.
@@ -574,20 +955,15 @@ class SolventModel:
         on 7FPV, that misses the requested occupancy by more than a third.
         calibrate() below does this correctly; anything hand-rolled must too.
         """
-        if source is None and (self.source_b is not None or self.spheres):
-            raise ValueError(
-                "SolventModel.%s is set, so the mask expects its field as "
-                "`source`; structure_factors_one_config builds it from "
-                "mask_kernels= (see %s)"
-                % (("spheres", "mask_spheres.sphere_kernels") if self.spheres
-                   else ("source_b", "mask_source_weights")))
+        kind = self.field_kind(source) if _kind is None else _kind
+        mask_blur = self.effective_mask_blur(kind)
         field = density if source is None else source
         rho = field.detach() if self.detach_mask else field
-        if self.spheres:
+        if kind == "spheres":
             pipeline_blur = 0.0             # the sphere field carries none
-        remaining = self.mask_blur - pipeline_blur
+        remaining = mask_blur - pipeline_blur
         if remaining <= 0.0:
-            if pipeline_blur > self.mask_blur and not self._warned_blur:
+            if pipeline_blur > mask_blur and not self._warned_blur:
                 self._warned_blur = True
                 warnings.warn(
                     "the pipeline blur (%.4g A^2) already exceeds mask_blur "
@@ -595,25 +971,29 @@ class SolventModel:
                     "nothing here can sharpen it back -- the blur is baked "
                     "into the density. Either lower the pipeline blur or "
                     "accept the wider effective probe."
-                    % (pipeline_blur, self.mask_blur),
+                    % (pipeline_blur, mask_blur),
                     SolventMaskWarning, stacklevel=3)
             return rho
         return blur_density(rho, orth_matrix, remaining,
                             self._cached_inv_d2(rho, orth_matrix))
 
-    def build_mask(self, density, orth_matrix, pipeline_blur=0.0, source=None):
+    def build_mask(self, density, orth_matrix, pipeline_blur=0.0, source=None,
+                   _kind=None):
         """density -> the solvent mask, including the one-time occupancy check.
 
         The single place a mask is built. structure_factor_torch's supercell
         path used to inline its own copy of this, which is how a mask_blur
         added in one place would have silently not applied in the other.
-        `source`, when given, is thresholded instead of the density (source_b).
+        `source`, when given, is thresholded instead of the density (the
+        sphere or atom-presence field; mask_field() places it).
         """
+        kind = self.field_kind(source) if _kind is None else _kind
+        cutoff, taper = self.threshold(kind)
         mask = solvent_mask(
-            self.mask_source(density, orth_matrix, pipeline_blur, source),
-            self.cutoff, self.taper_width)
+            self.mask_source(density, orth_matrix, pipeline_blur, source, _kind=kind),
+            cutoff, taper)
         if self.check_occupancy and self.last_occupancy is None:
-            self._check(mask)
+            self._check(mask, cutoff, kind)
         return mask
 
     def calibrate(self, density, orth_matrix, target_occupancy,
@@ -624,6 +1004,9 @@ class SolventModel:
         Returns the cutoff. Run once at setup, on a representative
         configuration -- the cutoff is a calibration and not a constant, but it
         is not so unstable that it needs redoing per frame.
+
+        For a mask not cut from the density, `source` is its field:
+        mask_field() places it from the set_atoms atoms.
         """
         grid = self.mask_source(density, orth_matrix, pipeline_blur, source)
         self.cutoff = calibrate_cutoff(grid, target_occupancy,
@@ -631,9 +1014,10 @@ class SolventModel:
         self.taper_width = taper_width_frac * self.cutoff
         return self.cutoff
 
-    def _check(self, mask):
+    def _check(self, mask, cutoff, kind):
         """Once per model. Reads back two scalars from the device, which is a
         synchronisation, so it is not done per configuration."""
+        units = "e/A^3" if kind == "density" else "in the %s field's units" % kind
         self.last_occupancy = float(mask_occupancy(mask))
         self.last_shell_voxels = shell_voxels(mask)
         occ = self.last_occupancy
@@ -645,22 +1029,22 @@ class SolventModel:
                 "term contributes NOTHING -- silently. This is what an "
                 "all-atom model with explicit bulk water does. Either exclude "
                 "the bulk solvent from the atom set, or lower cutoff (=%.4g, "
-                "in e/A^3)." % (occ, self.cutoff),
+                "%s)." % (occ, cutoff, units),
                 SolventMaskWarning, stacklevel=3)
         elif occ > OCCUPANCY_MAX:
             warnings.warn(
                 "solvent mask covers almost the whole cell (occupancy %.4f): "
                 "hardly anything is being called protein. Check cutoff "
-                "(=%.4g, in e/A^3): it is not transferable between B-factor "
+                "(=%.4g, %s): it is not transferable between B-factor "
                 "conventions, grids or systems, and must be calibrated for "
-                "this one." % (occ, self.cutoff),
+                "this one." % (occ, cutoff, units),
                 SolventMaskWarning, stacklevel=3)
 
     def apply(self, density, F_protein, cell_volume, hkl, orth_matrix,
-              density_scale=1.0, pipeline_blur=0.0, source=None):
+              density_scale=1.0, pipeline_blur=0.0, source=None, _kind=None):
         """
         density must ALREADY be symmetry-expanded -- see the module docstring;
-        so must `source`, the mask's field when source_b is set.
+        so must `source`, the mask's field when it is not the density.
 
         Returns (F_total, mask, F_mask): the mask so callers can report
         mask_occupancy() without recomputing it, and F_mask -- f_solvent of
@@ -668,7 +1052,7 @@ class SolventModel:
         factors -- so a caller that wants the solvent term on its own does not
         pay for a second FFT.
         """
-        mask = self.build_mask(density, orth_matrix, pipeline_blur, source)
+        mask = self.build_mask(density, orth_matrix, pipeline_blur, source, _kind=_kind)
         F_mask = f_solvent(mask, cell_volume, hkl, orth_matrix)
         inv_d2 = reciprocal_inv_d2(orth_matrix, hkl)
         F = f_total(
@@ -682,12 +1066,15 @@ class SolventModel:
         return F, mask, F_mask
 
     def __repr__(self):
-        return ("SolventModel(cutoff=%r, taper_width=%r, k_sol=%r, b_sol=%r, "
-                "k_overall=%r, u_aniso=%s, detach_mask=%r, source_b=%r, spheres=%r, "
-                "occupancy=%s)"
-                % (self.cutoff, self.taper_width, self.k_sol, self.b_sol,
-                   self.k_overall,
+        return ("SolventModel(mask_source=%r, cutoff=%r, taper_width=%r, k_sol=%r, "
+                "b_sol=%r, k_overall=%r, u_aniso=%s, detach_mask=%r, source_b=%r, "
+                "atoms=%s, occupancy=%s)"
+                % (self.source_kind, self.cutoff, self.taper_width, self.k_sol,
+                   self.b_sol, self.k_overall,
                    "None" if self.u_aniso is None else "set", self.detach_mask,
-                   self.source_b, self.spheres,
+                   self.source_b,
+                   "none" if self.atom_elements is None else "%d%s" % (
+                       len(self.atom_elements),
+                       " named" if self.atom_radii is not None else ""),
                    "unmeasured" if self.last_occupancy is None
                    else "%.4f" % self.last_occupancy))

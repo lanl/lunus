@@ -205,11 +205,11 @@ def main():
         "width/cutoff", "shell vox", "solvent sig", "translation", "refinement",
         "sig/noise"))
     for w_frac in (0.05, 0.1, 0.25, 0.5, 0.9):
-        model = SolventModel(cutoff=1.0, taper_width=0.5,
+        model = SolventModel(mask_source="density", cutoff=1.0, taper_width=0.5,
                              mask_blur=args.mask_blur)
         model.calibrate(rho0, s["orth"], target_occupancy,
                         taper_width_frac=w_frac)
-        model_fine = SolventModel(cutoff=1.0, taper_width=0.5,
+        model_fine = SolventModel(mask_source="density", cutoff=1.0, taper_width=0.5,
                                   mask_blur=args.mask_blur)
         model_fine.calibrate(rho_fine, s_fine["orth"], target_occupancy,
                              taper_width_frac=w_frac)

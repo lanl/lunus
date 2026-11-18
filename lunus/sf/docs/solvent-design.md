@@ -769,7 +769,9 @@ accidents.
 ### `mask_blur`, and why it is a constant when the cutoff is not
 
 **Implemented**: `SolventModel(mask_blur=...)`, defaulting to
-`MASK_BLUR_DEFAULT = 100 Å²`, applied to the density before `solvent_mask`.
+`MASK_BLUR_DEFAULT = 100 Å²` for the density and the atom-presence field
+(0 for the sphere field, whose edge is its own smoothing), applied before
+`solvent_mask`.
 `mask_blur=0.0` restores the unsmoothed threshold and every number measured
 before it existed. The shipped model is now the second row of the table above,
 not the first.
@@ -853,9 +855,9 @@ against +0.0046), as the radii of C, N, O and S differ by under 20%. The
 hydrogen question was carried by only two of the 20 entries, since the rest
 deposit none; on those two, leaving hydrogens out of the field hurt. That is
 the R-factor tool's default mask source now (`--mask-source atoms`, against
-`density`, every run before); in the library it is `SolventModel.source_b`
-with `mask_source_weights`, opt-in (default None) so that no caller gains a
-second kernel set unasked. The field is a second density
+`density`, every run before); in the library it is what `set_atoms(elements)`
+gives under the default source since 2026-11-18 (or `source_b=` with
+hand-built kernels and `mask_source_weights`). The field is a second density
 placement from the same coordinates with uniform-B kernels, which
 `structure_factors_one_config` takes as `mask_kernels=` and places alongside
 the density; F_protein is untouched. On 7FPV cut to 3 Å the binned R-free
@@ -902,9 +904,9 @@ published table the offset was re-checked (−0.2 / 0 / +0.2 Å: −0.0007 /
 −0.0003 / +0.0000), so the default sits in a flat optimum, and the table
 above was re-measured after two later fixes (charged atoms such as O1- had
 fallen back to the generic element; one hydrogen anywhere had switched the
-whole model to explicit-hydrogen radii, now decided per residue). In the library: `SolventModel(spheres=True)` (mask_blur then
-defaults to 0) with `mask_spheres.sphere_kernels` as the pipeline's
-`mask_kernels`; opt-in.
+whole model to explicit-hydrogen radii, now decided per residue). In the library: the default since 2026-11-18,
+whenever the model knows the atoms' names; see "In the library: the mask
+source follows the atoms" below.
 
 ### A fixed level instead of a calibration
 
@@ -959,6 +961,47 @@ the settings 1.0 was measured with (`--sphere-offset`, `--sphere-edge`,
 `--sphere-radii element`, `--mask-blur`, `--taper-frac`), since each of those
 moves where the field crosses 1.0.
 
+
+### In the library: the mask source follows the atoms
+
+Since 2026-11-18 `SolventModel` defaults to `mask_source="auto"`, which uses
+the best field the model can build from what it has been told about the
+atoms, in the order the measurements above rank them:
+
+| told | field | cutoff=None |
+|---|---|---|
+| `set_atoms(elements, atom_names, residue_names, residue_ids)` | soft spheres, united-atom radii | 1.0, taper 0.5, if the model has no hydrogens; otherwise an error until `calibrate()` |
+| `set_atoms(elements)` | atom-presence field, B = 20 Å² | an error until `calibrate()` |
+| nothing | an error naming both fixes | — |
+| `mask_source="density"` | the electron density, as before | an error: give the cutoff in e/Å³, or `calibrate()` |
+
+`set_atoms` takes plain per-atom sequences, so no structure library is
+needed: from a biotite `AtomArray` `aa` it is
+`set_atoms(aa.element, atom_names=aa.atom_name, residue_names=aa.res_name,
+residue_ids=list(zip(aa.chain_id, aa.res_id, aa.ins_code)))`, which gives
+the radii cctbx labels give bit for bit on every atom of 8VPW, 2YL0 and 7FPV,
+hydrogens included; from cctbx, `mask_spheres.names_from_cctbx_labels`
+splits the labels into the same columns. Without `residue_ids` the
+per-residue hydrogen rule above has nothing to group by, and one hydrogen
+anywhere makes the whole model explicit-hydrogen. The kernels are built on
+first use, for the grid, cell, device and dtype of the call, and cached;
+`structure_factors_one_config` and `_batch` use them whenever no
+`mask_kernels=` is passed, and an explicit `mask_kernels=` still wins.
+"auto" decides from `set_atoms` alone, never from the kernels passed, so
+that `calibrate()` and the structure-factor call cannot read one field two
+ways: kernels built by hand without `set_atoms` go with an explicit
+`mask_source="spheres"` or `"atoms"`, as `spheres=True` and `source_b=`
+always required. `mask_field()` places the field for `calibrate()`.
+
+Knowing nothing is an error rather than a fall back to the density, which
+measured worst of the three, so that no caller gets the weakest mask without
+asking for it: code written before 2026-11-18 that relied on the density
+default now raises until it says `mask_source="density"` or calls
+`set_atoms`. The fixed level is used only where it was measured: spheres from
+`set_atoms` (the default offset and edge), no `mask_blur`, the default taper,
+no hydrogens. Sphere kernels passed by hand may have been built with any
+settings, so `cutoff=None` raises with them, `set_atoms` or not. `spheres=True` and
+`source_b=B` remain, as `mask_source="spheres"` and `"atoms"` at B.
 ## What the density cutoff costs
 
 The R-factor above was measured at an atomic density cutoff of 0.01 e/A^3 --

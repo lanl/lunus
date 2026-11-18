@@ -504,7 +504,7 @@ def sf_one(s, **kw):
 
 def solvent_model(**kw):
     from lunus.sf.solvent_torch import SolventModel
-    return SolventModel(cutoff=0.05, taper_width=0.025, check_occupancy=False,
+    return SolventModel(mask_source="density", cutoff=0.05, taper_width=0.025, check_occupancy=False,
                         k_sol=0.4, b_sol=40.0, **kw)
 
 
