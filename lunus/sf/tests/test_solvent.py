@@ -211,8 +211,8 @@ def test_detached_mask_carries_no_gradient():
             sys["cell_volume"], sys["hkl"], sys["orth"])
 
     assert rho.requires_grad
-    _, mask_detached = SolventModel(detach_mask=True, **common).apply(*args)
-    _, mask_live = SolventModel(detach_mask=False, **common).apply(*args)
+    _, mask_detached, _ = SolventModel(detach_mask=True, **common).apply(*args)
+    _, mask_live, _ = SolventModel(detach_mask=False, **common).apply(*args)
     assert not mask_detached.requires_grad
     assert mask_live.requires_grad
 
@@ -1166,8 +1166,8 @@ def test_atom_presence_source_is_expanded_and_folded_like_the_density():
     F_p1 = _sf(sys, solvent=atoms, mask_kernels=kernels, mask_occ=mask_occ)
     assert not torch.allclose(F_sym, F_p1)
     # the same answer as handing the expanded field to apply() by hand
-    F_hand, _ = atoms.apply(density_sym, compute_fcalc(density_sym, sys["cell_volume"], sys["hkl"], sys["orth"]),
-                            sys["cell_volume"], sys["hkl"], sys["orth"], source=source_sym)
+    F_hand, _, _ = atoms.apply(density_sym, compute_fcalc(density_sym, sys["cell_volume"], sys["hkl"], sys["orth"]),
+                               sys["cell_volume"], sys["hkl"], sys["orth"], source=source_sym)
     assert torch.allclose(F_sym, F_hand)
 
     # supercell path: builds and runs, the mask in the supercell frame
@@ -1238,8 +1238,8 @@ def test_sphere_source_through_the_pipeline():
                          mask_blur=0.0, spheres=True)
     model.calibrate(_density(sys), sys["orth"], 0.9, source=source)
     F = _sf(sys, solvent=model, mask_kernels=kernels)
-    F_hand, mask = model.apply(_density(sys), _sf(sys), sys["cell_volume"], sys["hkl"],
-                               sys["orth"], source=source)
+    F_hand, mask, _ = model.apply(_density(sys), _sf(sys), sys["cell_volume"], sys["hkl"],
+                                  sys["orth"], source=source)
     assert torch.allclose(F, F_hand)
     assert abs(float(mask.mean()) - 0.9) < 3e-3
     # a pipeline blur does not leak into the sphere mask

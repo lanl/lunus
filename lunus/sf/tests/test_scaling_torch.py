@@ -528,6 +528,57 @@ def test_return_parts_reassemble_to_the_default_f_total(supercell):
     assert torch.allclose(rebuilt, default, rtol=1e-12, atol=1e-12)
 
 
+def test_return_parts_costs_one_mask_fft(monkeypatch):
+    """Single cell: F_mask in the parts is the one SolventModel.apply() built
+    F_total from, so asking for the parts adds no mask FFT. (It used to call
+    f_solvent a second time on the returned mask.) apply() hands back that
+    F_mask unscaled: f_solvent of its own mask."""
+    import lunus.sf.solvent_torch as solvent_torch
+    calls = []
+    real = solvent_torch.f_solvent
+
+    def counting(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(solvent_torch, "f_solvent", counting)
+    s = small_model()
+    model = solvent_model(density_scale=1.5)
+    sf_one(s, solvent=model)
+    assert len(calls) == 1
+    calls.clear()
+    parts = sf_one(s, solvent=model, return_parts=True)
+    assert len(calls) == 1
+    # and the batch: one mask FFT per configuration, checkpointed or not
+    from lunus.sf.structure_factor_torch import structure_factors_batch
+    frac = torch.stack([s["frac"], s["frac"] + 0.01])
+    rest = (s["element_idx"], s["occ"], s["atom_A"], s["atom_lam"],
+            s["elem_offsets"], s["atom_radius_ang"], s["grid_shape"], s["orth"],
+            s["cell_volume"], s["hkl"], s["taper_width"])
+    for ck in (False, True):
+        calls.clear()
+        with torch.no_grad():
+            structure_factors_batch(frac, *rest, compile_core=False, solvent=model,
+                                    use_checkpoint=ck, return_parts=True)
+        assert len(calls) == 2, (ck, len(calls))
+
+    F, mask, F_mask = model.apply(
+        *density_and_protein(s), s["cell_volume"], s["hkl"], s["orth"])
+    assert torch.equal(F_mask, real(mask, s["cell_volume"], s["hkl"], s["orth"]))
+    assert torch.equal(parts.F_mask, F_mask * model.density_scale)
+    assert torch.equal(parts.F_total, F)
+
+
+def density_and_protein(s):
+    from lunus.sf.density_torch import compute_density
+    from lunus.sf.structure_factor_torch import compute_fcalc
+    density = compute_density(
+        s["frac"], s["element_idx"], s["occ"], s["atom_A"], s["atom_lam"],
+        s["elem_offsets"], s["atom_radius_ang"], s["grid_shape"], s["orth"],
+        s["taper_width"], compile_core=False)
+    return density, compute_fcalc(density, s["cell_volume"], s["hkl"], s["orth"])
+
+
 def test_return_parts_needs_a_solvent_model():
     s = small_model()
     with pytest.raises(ValueError, match="return_parts"):

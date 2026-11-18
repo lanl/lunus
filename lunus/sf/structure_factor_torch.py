@@ -232,14 +232,14 @@ def structure_factors_one_config(
     # checkpointed region in structure_factors_batch -- otherwise the density
     # grid is retained for every configuration at once and the peak memory
     # checkpointing exists to control comes straight back.
-    F_total, mask = solvent.apply(density, F_protein, cell_volume, hkl,
-                                  orth_matrix, pipeline_blur=blur,
-                                  source=source)
+    F_total, _, F_mask = solvent.apply(density, F_protein, cell_volume, hkl,
+                                       orth_matrix, pipeline_blur=blur,
+                                       source=source)
     if return_parts:
-        # F_mask again from the mask apply() used: one more FFT, only when the
-        # parts are asked for, and F_total is apply()'s own, unchanged.
-        from .solvent_torch import f_solvent
-        F_mask = f_solvent(mask, cell_volume, hkl, orth_matrix)
+        # apply()'s own F_mask, the one F_total was built from: no second FFT.
+        # It comes back unscaled, and apply() was called without its
+        # density_scale argument, so solvent.density_scale is the whole of the
+        # scale F_total used; pass one above and it must be applied here too.
         return SolventParts(F_total, F_protein, F_mask * solvent.density_scale)
     return F_total
 

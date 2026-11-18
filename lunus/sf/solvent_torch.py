@@ -662,8 +662,11 @@ class SolventModel:
         density must ALREADY be symmetry-expanded -- see the module docstring;
         so must `source`, the mask's field when source_b is set.
 
-        Returns (F_total, mask), the mask being handed back so callers can
-        report mask_occupancy() without recomputing it.
+        Returns (F_total, mask, F_mask): the mask so callers can report
+        mask_occupancy() without recomputing it, and F_mask -- f_solvent of
+        that mask, the term F_total was built from, WITHOUT the density_scale
+        factors -- so a caller that wants the solvent term on its own does not
+        pay for a second FFT.
         """
         mask = self.build_mask(density, orth_matrix, pipeline_blur, source)
         F_mask = f_solvent(mask, cell_volume, hkl, orth_matrix)
@@ -676,7 +679,7 @@ class SolventModel:
             # the model's own (anything the caller cannot know).
             density_scale=self.density_scale * density_scale,
         )
-        return F, mask
+        return F, mask, F_mask
 
     def __repr__(self):
         return ("SolventModel(cutoff=%r, taper_width=%r, k_sol=%r, b_sol=%r, "
