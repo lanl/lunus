@@ -1,6 +1,7 @@
 # Design note: Bragg scaling for lunus.sf
 
-Status: **proposed; being implemented on branch `sf-scaling-module`.**
+Status: **implemented 2026-11-17** (`lunus/sf/scaling_torch.py`). The
+guidance defaults below still await the measurements in "Open questions".
 First written 2026-11-06 from the state of `tools/fit_solvent_rfactor.py`, the
 SW40 R-factor report and the sampleworks `diffuse_bragg` loss as of its commit
 `dc238d7`. Updated 2026-11-17 to the code as it then stood:
@@ -269,6 +270,8 @@ scan_grids(fit_solvent, like); coarse_scan(...); coarse_scan_reference(...)
 fit_scales(F_obs, F_protein, F_mask, inv_d2, s_cart, work, aniso,
            fit_solvent=True, bins=None, solvent_bins=False,
            log=sys.stdout, init=None) -> dict                         # unchanged
+refine_single_scale(start, F_obs, F_protein, F_mask, inv_d2, s_cart,
+                    work) -> dict                                     # new: the warm single-scale fit
 solvent_curve_rule(...); solvent_cut_index(...); mmtbx_moving_average(...)
 exponential_from_curve(k_bins, bins, inv_d2, d_cut=4.0)
 SOLVENT_BIN_MAX, SOLVENT_BIN_FORCE_CUT, UNIQUE_IJ
@@ -363,8 +366,10 @@ Notes on the signature:
   scaler can report its own cadence, so that the record is complete whichever
   way the mask was run.
 - **float64** is the default because the tool's numbers were measured in it.
-  float32 works (a test checks that the R differs by less than the printed
-  precision), but is a measurement to make, not a default to assume.
+  float32 lands close but not on every printed digit (measured 2026-11-17):
+  within 2e-4 in R on the tests' data. The per-bin solvent's high-resolution
+  bins, where F_mask carries almost nothing, are where it moves, and on 7FPV
+  the single-scale b_sol moved 31.1 to 30.0 in its flat valley.
 
 **The forward call** (`structure_factor_torch.py`):
 
@@ -437,8 +442,9 @@ CPU, and a warm or solvent refit a fraction of that.
   F_total, and the default return is bit-identical to before.
 - **f_total.** The module's single-scale exponential model equals `f_total`
   with U converted from B_cart.
-- **Shapes and placement.** CPU float32 and float64, and the float32 R differs
-  from float64 by less than the printed precision. CUDA when available.
+- **Shapes and placement.** CPU float32 and float64, the float32 R within
+  2e-4 of float64's (not every printed digit: see the float64 note under
+  API). CUDA when available.
 
 ## First refinement client: displacement refinement on SW40
 
