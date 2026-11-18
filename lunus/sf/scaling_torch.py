@@ -109,6 +109,7 @@ def resolution_bins(inv_d2, n_bins):
     return bins
 
 
+# Derived from cctbx; see lunus/sf/THIRD_PARTY_NOTICES for its license.
 def log_resolution_bins(d, n_lowest=100, min_per_bin=50, max_bins=30,
                         eps=1e-4, device="cpu"):
     """mmtbx's resolution bins: an index per reflection, 0 the lowest
@@ -221,6 +222,7 @@ def assign_scale_bins(spec, inv_d2, d):
     return None
 
 
+# Derived from cctbx; see lunus/sf/THIRD_PARTY_NOTICES for its license.
 def mmtbx_moving_average(x):
     """mmtbx.bulk_solvent.scaler.moving_average, ported: five passes of a
     three-point mean applied only at local extrema, ends padded by
