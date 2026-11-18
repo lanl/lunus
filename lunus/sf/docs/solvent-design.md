@@ -618,6 +618,33 @@ comparable.
 
 ## What the R-factor found
 
+**Which scale fit is the main one (2026-11-17).** `fit_solvent_rfactor.py`'s
+main fit is binned by default since 2026-11-17 (`--scale-bins log`, one
+overall scale per cctbx log bin with a solvent scale per bin, as mmtbx
+scales), which is the method write-up's scaling. Every number in this note
+before that date was measured with a single-scale main fit and, from
+2026-11-09, the binned fit as an extra row (`--also-scale-bins`). The tool
+still makes and reports both, and `pdb_rfactor.py` prints the same rows with
+the same labels and order ("torch" single-scale, "torch, N scale bins"
+binned): changing which one is the main fit moved no number (8VPW and 2YL0
+before and after, to the printed digits; the default `--write-mtz` file has
+the same columns and values, and only its history line now names the model
+"main fit" rather than "binned row"). What did change is the fit tool's own
+detail sections (fitted parameters, the no-solvent/with-solvent change, the
+shell tables), which now
+describe the binned fit; `--scale-bins 0` (`--single-scale`) restores the
+single-scale main fit and every line printed from it. Old command lines keep
+their meaning: `--also-scale-bins N` (or 0) given without `--scale-bins` still
+means a single-scale main fit with that row (or none), and the timing labels
+keep theirs ("fit, no solvent" and "fit, with solvent" the single-scale fits,
+"fit, binned row" the binned fit with solvent; a binned main fit's no-solvent
+fit is timed as "fit, binned no solvent"). One old command line prints more
+than it did: `pdb_rfactor.py ... -- --scale-bins N` with a binned N (log, or
+a number of bins) now shows the single-scale "torch, no solvent" and "torch"
+rows beside the binned main fit, where before the no-solvent row was the
+binned no-solvent fit and there was no "torch" row; with N = 0 it prints
+what it did.
+
 `tools/fit_solvent_rfactor.py`, on 7FPV: 74,301 amplitudes over 41.4–1.04 Å,
 3,716 free, against the deposited coordinates as one asymmetric unit
 (`expand_symmetry=True`, `density_scale=1`, deposited occupancies, isotropic

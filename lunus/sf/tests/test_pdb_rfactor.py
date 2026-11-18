@@ -69,23 +69,63 @@ def test_passthrough_reaches_the_torch_parser():
         (2.0, True, "gemmi", 4)
 
 
-def test_binned_row_is_extra_and_on_in_the_torch_tool_by_default():
-    """The binned fit (--also-scale-bins) is an extra row that leaves the
-    main fit single-scale. Since 2026-11-11 fit_solvent_rfactor runs it on
-    mmtbx's log bins by default, as pdb_rfactor already asked it to, because
-    it is the model --write-mtz writes; 0 turns it off."""
+def settle(*extra):
+    """--scale-bins, --also-scale-bins and the note, as run() settles them."""
     import fit_solvent_rfactor
 
-    parse = fit_solvent_rfactor.build_parser().parse_args
-    plain = parse(["m.pdb", "m-sf.cif"])
-    assert (plain.scale_bins, plain.also_scale_bins) == (0, "log")
-    off = parse(["m.pdb", "m-sf.cif", "--also-scale-bins", "0"])
-    assert (off.scale_bins, off.also_scale_bins) == (0, 0)
-    extra = parse(["m.pdb", "m-sf.cif", "--also-scale-bins", "20"])
-    assert (extra.scale_bins, extra.also_scale_bins) == (0, 20)
-    # 'log' (mmtbx's own bins) likewise leaves the main fit single-scale.
-    log_bins = parse(["m.pdb", "m-sf.cif", "--also-scale-bins", "log"])
-    assert (log_bins.scale_bins, log_bins.also_scale_bins) == (0, "log")
+    args = fit_solvent_rfactor.build_parser().parse_args(["m.pdb", "m-sf.cif"] + list(extra))
+    note = fit_solvent_rfactor.resolve_scale_bins(args)
+    return args.scale_bins, args.also_scale_bins, note
+
+
+def test_main_fit_is_binned_by_default_and_single_scale_restores_it():
+    """Since 2026-11-17 the torch tool's main fit is binned on mmtbx's log
+    bins (--scale-bins log), the method write-up's scaling. --scale-bins 0,
+    or its alias --single-scale, makes the single scale the main fit as
+    before, with the binned fit as the extra row (--also-scale-bins, log by
+    default, 0 off)."""
+    assert settle() == ("log", "log", None)
+    assert settle("--scale-bins", "0") == (0, "log", None)
+    assert settle("--single-scale") == (0, "log", None)
+    assert settle("--single-scale", "--also-scale-bins", "0") == (0, 0, None)
+    # an integer main binning: no note about an --also-scale-bins nobody gave
+    assert settle("--scale-bins", "20") == (20, "log", None)
+
+
+def test_old_also_scale_bins_command_lines_keep_their_meaning():
+    """Before 2026-11-17 the main fit was single-scale and --also-scale-bins
+    chose the binned row (0: none). Given without --scale-bins it still means
+    exactly that, so those command lines reproduce; given together with a
+    binned --scale-bins it is ignored, and a note says so."""
+    assert settle("--also-scale-bins", "0") == (0, 0, None)
+    assert settle("--also-scale-bins", "20") == (0, 20, None)
+    assert settle("--also-scale-bins", "log") == (0, "log", None)
+    main, also, note = settle("--scale-bins", "log", "--also-scale-bins", "20")
+    assert (main, also) == ("log", 20)
+    assert note is not None and "--also-scale-bins 20 ignored" in note
+    # 0 asked for no extra row and gets none: nothing is ignored
+    assert settle("--scale-bins", "log", "--also-scale-bins", "0") == ("log", 0, None)
+
+
+def test_resolve_scale_bins_settles_once():
+    """run() called twice on the same args: the second call must not read the
+    values the first filled in as given, and so print a note nobody earned."""
+    import fit_solvent_rfactor
+
+    args = fit_solvent_rfactor.build_parser().parse_args(["m.pdb", "m-sf.cif"])
+    assert fit_solvent_rfactor.resolve_scale_bins(args) is None
+    assert fit_solvent_rfactor.resolve_scale_bins(args) is None
+    assert (args.scale_bins, args.also_scale_bins) == ("log", "log")
+    # args changed between calls get the note their CURRENT values earn:
+    # given --also-scale-bins 20 beside a binned main fit, then made
+    # single-scale, the second call has nothing to say
+    args = fit_solvent_rfactor.build_parser().parse_args(
+        ["m.pdb", "m-sf.cif", "--scale-bins", "log", "--also-scale-bins", "20"])
+    assert "ignored" in fit_solvent_rfactor.resolve_scale_bins(args)
+    args.scale_bins = 0
+    assert fit_solvent_rfactor.resolve_scale_bins(args) is None
+    args.scale_bins = 20
+    assert "ignored" in fit_solvent_rfactor.resolve_scale_bins(args)
 
 
 def test_charged_scattering_types_get_coefficients():
@@ -186,8 +226,8 @@ def test_log_binned_row_through_run_on_7fpv_at_3a():
 
     args = fit_solvent_rfactor.build_parser().parse_args(
         [os.path.join(COMPARE, "7FPV.pdb"), os.path.join(COMPARE, "7FPV-sf.cif"),
-         "--d-min", "3.0", "--aniso", "--also-scale-bins", "log", "--shells", "3",
-         "--solvent-bins", "off"])
+         "--d-min", "3.0", "--aniso", "--scale-bins", "0", "--also-scale-bins", "log",
+         "--shells", "3", "--solvent-bins", "off"])
     with contextlib.redirect_stdout(io.StringIO()) as out:
         r = fit_solvent_rfactor.run(args)
     assert r["main_scale_bins"] == 0 and r["main_bin_scheme"] is None
@@ -239,39 +279,84 @@ def test_main_fit_with_log_bins_through_run_on_7fpv_at_3a():
 
 
 def test_main_forwards_the_default_binned_row(monkeypatch, capsys):
-    """pdb_rfactor's main() hands run() --also-scale-bins log by default and
-    an integer when given one, and prints the bin scheme under the table."""
+    """pdb_rfactor's main() makes the binned row the torch tool's main fit by
+    default (--scale-bins log, or the integer given to --binned-row); with
+    --single-scale or --binned-row 0 the single scale is the main fit and the
+    binned row the extra one. The rows print with the labels, in the order,
+    log parsers match: the single-scale "torch" rows from the "single" keys,
+    then the binned main fit."""
     import pdb_rfactor
 
     seen = []
 
     def fake_run(args):
-        seen.append(args.also_scale_bins)
-        return {"R-work no solvent": 0.3, "R-free no solvent": 0.3,
-                "R-work": 0.2, "R-free": 0.2, "k_sol": 0.35, "b_sol": 46.0,
+        note = pdb_rfactor.fit_solvent_rfactor.resolve_scale_bins(args)   # as run() does
+        assert note is None, note          # main() never adds a flag the tool then ignores
+        seen.append((args.scale_bins, args.also_scale_bins))
+        if args.scale_bins:
+            return {"R-work no solvent": 0.25, "R-free no solvent": 0.25,
+                    "R-work no solvent single": 0.3, "R-free no solvent single": 0.31,
+                    "R-work": 0.19, "R-free": 0.19, "k_sol": 0.33, "b_sol": 20.0,
+                    "R-work single": 0.2, "R-free single": 0.21,
+                    "k_sol single": 0.35, "b_sol single": 46.0,
+                    "n_work": 100, "n_free": 5, "n_atoms": 10,
+                    "main_scale_bins": 6, "main_bin_scheme": "6 log bins",
+                    "solvent_scheme": "per bin",
+                    "timing": {"total": 2.5, "density": 0.3}}
+        return {"R-work no solvent": 0.3, "R-free no solvent": 0.31,
+                "R-work": 0.2, "R-free": 0.21, "k_sol": 0.35, "b_sol": 46.0,
                 "n_work": 100, "n_free": 5, "n_atoms": 10,
                 "main_scale_bins": 0, "main_bin_scheme": None,
                 "solvent_scheme": "exponential",
                 "scale_bins": 6, "bin_scheme": "6 log bins",
                 "solvent_scheme binned": "per bin",
                 "R-work binned": 0.19, "R-free binned": 0.19,
-                "k_sol binned": 0.35, "b_sol binned": 46.0,
+                "k_sol binned": 0.33, "b_sol binned": 20.0,
                 "timing": {"total": 2.5, "density": 0.3}}
     monkeypatch.setattr(pdb_rfactor, "fetch_entry",
                         lambda *a, **k: ("m.pdb", "m-sf.cif"))
     monkeypatch.setattr(pdb_rfactor.fit_solvent_rfactor, "run", fake_run)
-    for extra, expected in (([], "log"), (["--binned-row", "20"], 20),
-                            (["--binned-row", "0"], 0)):
+    tables = []
+    for extra, expected in (([], ("log", "log")),
+                            (["--binned-row", "20"], (20, "log")),
+                            (["--binned-row", "0"], (0, 0)),
+                            (["--single-scale"], (0, "log")),
+                            # a passed-through --also-scale-bins wins, as it
+                            # always has: single-scale main fit, that row
+                            (["--", "--also-scale-bins", "20"], (0, 20)),
+                            # a single-scale main fit passed through: the
+                            # binned row is still --binned-row's
+                            (["--binned-row", "20", "--", "--scale-bins", "0"], (0, 20)),
+                            (["--binned-row", "0", "--", "--scale-bins", "0"], (0, 0)),
+                            (["--binned-row", "20", "--", "--single-scale"], (0, 20)),
+                            # a passed-through --scale-bins wins over
+                            # --single-scale / --binned-row 0, with no note
+                            (["--single-scale", "--", "--scale-bins", "20"], (20, "log")),
+                            (["--binned-row", "0", "--", "--scale-bins", "log"],
+                             ("log", "log")),
+                            # an abbreviated --also-scale-bins is seen too
+                            (["--", "--also-scale=6"], (0, 6))):
         monkeypatch.setattr(sys, "argv",
                             ["pdb_rfactor.py", "7FPV", "--method", "torch"] + extra)
         pdb_rfactor.main()
-        assert seen[-1] == expected
-    out = capsys.readouterr().out
-    assert "torch, 6 scale bins" in out and "scale bins: 6 log bins, solvent per bin" in out
-    # 2.5 is the stub's timing["total"], not a measurement: this checks that
-    # main() prints the total it is handed, in the format the torchref1000
-    # kit's parser matches, and with no mmtbx part when only torch ran.
-    assert "  timing: torch 2.5 s" in out
+        assert seen[-1] == expected, extra
+        out = capsys.readouterr().out
+        tables.append([line for line in out.splitlines() if line.startswith("  torch")])
+        if extra not in (["--binned-row", "0"], ["--", "--also-scale-bins", "20"]):
+            assert "scale bins: 6 log bins, solvent per bin" in out, extra
+        # 2.5 is the stub's timing["total"], not a measurement: main() prints
+        # the total it is handed, in the format the torchref1000 parser
+        # matches, with no mmtbx part when only torch ran.
+        assert "  timing: torch 2.5 s" in out
+    # binned main fit (default) and single-scale main fit (--single-scale):
+    # the same three rows, labels and order
+    expected_rows = [
+        "  torch, no solvent      0.3000   0.3100        -        -",
+        "  torch                  0.2000   0.2100    0.350     46.0",
+        "  torch, 6 scale bins    0.1900   0.1900    0.330     20.0"]
+    assert tables[0] == expected_rows
+    assert tables[3] == expected_rows
+
 
 
 def test_binned_row_defaults_to_per_bin_solvent_on_7fpv_at_3a():
@@ -285,7 +370,8 @@ def test_binned_row_defaults_to_per_bin_solvent_on_7fpv_at_3a():
 
     args = fit_solvent_rfactor.build_parser().parse_args(
         [os.path.join(COMPARE, "7FPV.pdb"), os.path.join(COMPARE, "7FPV-sf.cif"),
-         "--d-min", "3.0", "--aniso", "--also-scale-bins", "log", "--shells", "3"])
+         "--d-min", "3.0", "--aniso", "--scale-bins", "0", "--also-scale-bins", "log",
+         "--shells", "3"])
     with contextlib.redirect_stdout(io.StringIO()) as out:
         r = fit_solvent_rfactor.run(args)
     text = out.getvalue()
@@ -331,8 +417,10 @@ def test_equal_count_bins_keep_the_exponential_solvent_by_default():
             "--d-min", "3.0", "--aniso", "--shells", "3"]
     parse = fit_solvent_rfactor.build_parser().parse_args
     with contextlib.redirect_stdout(io.StringIO()):
-        auto = fit_solvent_rfactor.run(parse(base + ["--also-scale-bins", "6"]))
-        on = fit_solvent_rfactor.run(parse(base + ["--also-scale-bins", "6",
+        auto = fit_solvent_rfactor.run(parse(base + ["--scale-bins", "0",
+                                                     "--also-scale-bins", "6"]))
+        on = fit_solvent_rfactor.run(parse(base + ["--scale-bins", "0",
+                                                   "--also-scale-bins", "6",
                                                    "--solvent-bins", "on"]))
     assert auto["solvent_scheme binned"] == "exponential"
     assert on["solvent_scheme binned"] == "per bin"
@@ -688,7 +776,10 @@ def test_protein_blur_fixes_sharp_atoms_on_the_default_grid(tmp_path):
 
     def fit(*extra):
         args = fit_solvent_rfactor.build_parser().parse_args(
-            [pdb, mtz, "--shells", "2", "--mask-source", "atoms"] + list(extra))
+            # the single-scale fit: a binned scale would absorb part of the
+            # resolution-dependent aliasing error this test exists to see
+            [pdb, mtz, "--shells", "2", "--mask-source", "atoms", "--scale-bins", "0"]
+            + list(extra))
         with contextlib.redirect_stdout(io.StringIO()) as out:
             r = fit_solvent_rfactor.run(args)
         return r, out.getvalue()
@@ -733,8 +824,9 @@ def test_protein_blur_reaches_the_anisotropic_kernel(tmp_path):
     pdb, mtz = sharp_toy(tmp_path, aniso=True)
 
     def fit(*extra):
+        # single-scale, as in the test above: bins would absorb aliasing
         args = fit_solvent_rfactor.build_parser().parse_args(
-            [pdb, mtz, "--shells", "2"] + list(extra))
+            [pdb, mtz, "--shells", "2", "--scale-bins", "0"] + list(extra))
         with contextlib.redirect_stdout(io.StringIO()):
             return fit_solvent_rfactor.run(args)
 
@@ -1185,8 +1277,9 @@ def test_sphere_source_united_atom_radii_on_7fpv_without_hydrogens():
     def fit(*extra):
         args = fit_solvent_rfactor.build_parser().parse_args(
             [os.path.join(COMPARE, "7FPV.pdb"), os.path.join(COMPARE, "7FPV-sf.cif"),
-             "--d-min", "3.0", "--aniso", "--also-scale-bins", "log", "--shells", "3",
-             "--solvent-bins", "off", "--select", "not element H"] + list(extra))
+             "--d-min", "3.0", "--aniso", "--scale-bins", "0", "--also-scale-bins", "log",
+             "--shells", "3", "--solvent-bins", "off", "--select", "not element H"]
+            + list(extra))
         with contextlib.redirect_stdout(io.StringIO()) as out:
             r = fit_solvent_rfactor.run(args)
         return r, out.getvalue()
@@ -1472,7 +1565,8 @@ def test_write_mtz_round_trip_on_7fpv(tmp_path):
 
     import fit_solvent_rfactor
 
-    out, r, text = write_mtz_7fpv(tmp_path, "--mtz-components", "--mtz-observed")
+    out, r, text = write_mtz_7fpv(tmp_path, "--scale-bins", "0", "--mtz-components",
+                                  "--mtz-observed")
     assert "wrote %s: binned row" % out in text
     cols, history, _ = read_mtz_columns(out)
     assert set(cols) == {"H", "K", "L", "FP", "SIGFP", "PHIC", "FreeR_flag", "FPROTEIN",
@@ -1569,7 +1663,8 @@ def test_write_mtz_falls_back_to_the_main_fit(tmp_path):
     pdb, mtz_in = sharp_toy(tmp_path, sharp=False)
     out = tmp_path / "model.mtz"
     args = fit_solvent_rfactor.build_parser().parse_args(
-        [pdb, mtz_in, "--shells", "2", "--also-scale-bins", "0", "--write-mtz", str(out)])
+        [pdb, mtz_in, "--shells", "2", "--scale-bins", "0", "--also-scale-bins", "0",
+         "--write-mtz", str(out)])
     import warnings
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -1865,3 +1960,40 @@ def test_zero_one_flags_are_written_in_the_ccp4_convention(tmp_path):
     assert (free == deposited).all()                     # read as phenix reads it
     assert test_value == 0 and ((values == 0) == deposited).all()
     assert values[~deposited].min() >= 1 and values.max() >= 4    # CCP4 work bins
+
+
+
+def test_binned_default_reproduces_the_old_rows_and_mtz_on_7fpv(tmp_path):
+    """Changing which fit is the main one moved no number. On 7FPV cut to
+    3 A, the default run's main fit equals the binned row of a single-scale
+    run (--scale-bins 0, the main fit before 2026-11-17), its "single" keys
+    equal that run's main fit, and both write the same synthetic data."""
+    import iotbx.mtz
+    import numpy as np
+
+    (tmp_path / "b").mkdir()
+    (tmp_path / "s").mkdir()
+    out_b, binned, text_b = write_mtz_7fpv(tmp_path / "b")
+    out_s, single, _ = write_mtz_7fpv(tmp_path / "s", "--scale-bins", "0")
+    assert binned["main_scale_bins"] == 6 and single["main_scale_bins"] == 0
+    for key in ("R-work", "R-free", "k_sol", "b_sol"):
+        assert binned[key] == single[key + " binned"], key
+        assert binned[key + " single"] == single[key], key
+    for key in ("R-work", "R-free"):
+        assert binned[key + " no solvent single"] == single[key + " no solvent"], key
+    assert "wrote %s: main fit (6 log bins, solvent per bin)" % out_b in text_b
+    # the timing labels keep the meanings log parsers read: the single-scale
+    # fits under "fit, no solvent" / "fit, with solvent", the binned under
+    # "fit, binned row", in both runs
+    for r in (binned, single):
+        assert {"fit, no solvent", "fit, with solvent", "fit, binned row"} <= set(r["timing"])
+        assert "fit, single scale" not in r["timing"]
+    assert len(binned["u_params single"]) == 6        # --aniso: the B_cart of the single-scale fit
+
+    def columns(path):
+        return {c.label(): np.array(c.extract_values())
+                for c in iotbx.mtz.object(str(path)).columns()}
+    cb, cs = columns(out_b), columns(out_s)
+    assert set(cb) == set(cs)
+    for label in cb:
+        assert np.array_equal(cb[label], cs[label]), label

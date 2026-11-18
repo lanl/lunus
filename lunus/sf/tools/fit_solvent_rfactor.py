@@ -26,11 +26,17 @@ low resolution, wide at high, as many as the data support up to 30);
 `--scale-bins N` uses N equal-count bins, which is what every binned number
 recorded before 2026-11-09 was measured with. Across the 40 sampleworks
 entries the swap test (lunus.sf F_calc and mask, mmtbx scaling) put two thirds
-of the R gap in the scaling model and none in the structure factors. It is off
-by default so the numbers in the design note stay reproducible. The cost is
-that the lowest-resolution bin overlaps the solvent term, so a binned fit
-WITHOUT solvent recovers some of what the mask would have, and the drop in R
-from switching the solvent on is smaller.
+of the R gap in the scaling model and none in the structure factors. It is the
+main fit by default since 2026-11-17 (`--scale-bins log`, the method write-up's
+scaling); before that the main fit was single-scale and the binned fit was an
+extra row (--also-scale-bins). The single-scale fits are still made and
+reported alongside ("with a single scale instead", and the "torch" rows of
+pdb_rfactor.py, whose labels, order and numbers did not change), and
+`--scale-bins 0` (`--single-scale`) restores the old main fit and everything
+printed from it. The cost of binning is that the lowest-resolution bin
+overlaps the solvent term, so a binned fit WITHOUT solvent recovers some of
+what the mask would have, and the drop in R from switching the solvent on is
+smaller.
 
 WHAT THE ANSWER MEANS, AND WHAT IT DOES NOT.
 
@@ -40,7 +46,11 @@ WHAT THE ANSWER MEANS, AND WHAT IT DOES NOT.
     at the end of every run, and the larger one is not the solvent model.
   * What IS diagnostic: R should fall substantially when the solvent term is
     switched on, the fall should be concentrated below ~5 A, and the fitted
-    k_sol / b_sol should land near the conventional 0.35 e/A^3 and 46 A^2.
+    k_sol / b_sol of the single-scale fit (the "with a single scale instead"
+    line, or --single-scale) should land near the conventional 0.35 e/A^3
+    and 46 A^2. With the per-bin solvent of the default binned fit, the
+    k_sol / b_sol printed are the exponential nearest that curve at d >= 4 A,
+    as mmtbx reports them, and are not comparable to those values.
     Scales that fit well but land somewhere unphysical mean the mask is
     absorbing an error rather than modelling the solvent.
 
@@ -103,9 +113,12 @@ FreeR_flag the free set as read, in the CCP4 convention (test set 0, work
 bins 1..N-1: deposited CCP4 bins kept, status letters and 0/1 columns
 rewritten, the same reflections free) and
 PHIC the model's phase, on exactly the reflections the fit used, with the fit
-in the MTZ history. The model is the binned row's (--also-scale-bins, log
-bins by default since 2026-11-11), or the main fit's when that row does not
-run. --mtz-complete adds FMODEL/PHIFMODEL on every reflection to d_min, the
+in the MTZ history. The model is the binned one: the main fit (log bins by
+default since 2026-11-17), or with --scale-bins 0 the binned row
+(--also-scale-bins), and the single-scale fit only when neither is binned.
+The default writes the same model as before the main fit became binned
+(the same columns and values; the history calls it the main fit).
+--mtz-complete adds FMODEL/PHIFMODEL on every reflection to d_min, the
 unmeasured ones scaled with their nearest fitted reflection's bin, and
 extends FreeR_flag to the reflections the file never flagged at the observed
 fraction (extend_free_flags; 20 or fewer all go to the work set); a file
@@ -1537,8 +1550,9 @@ def fit_scales(F_obs, F_protein, F_mask, inv_d2, s_cart, work, aniso,
          the same inputs, fit_solvent and aniso. Stages 1 and 2 are skipped
          and the rest starts from its log_k, u_params, k_sol and b_sol, which
          is exactly where they would have finished, since both stages are
-         deterministic on the same inputs. run() passes the single-scale fit
-         with solvent to the binned row this way, which otherwise repeats the
+         deterministic on the same inputs. run() passes the single-scale fits
+         to the binned main fit, and the one with solvent to the binned row,
+         this way; each would otherwise repeat the
          scan and the LBFGS on the same structure factors; with the scan's
          real-array form (coarse_scan) and the per-bin solver's arrays
          gathered once (_fit_solvent_bins), the binned row takes about a
@@ -1599,8 +1613,11 @@ def fit_scales(F_obs, F_protein, F_mask, inv_d2, s_cart, work, aniso,
         b_sol = init["b_sol"].detach().clone().requires_grad_(fit_solvent)
         u_params = [p.detach().clone().requires_grad_(True)
                     for p in init["u_params"]]
-        print("  started from the single-scale fit: k_sol %.3f, b_sol %.1f"
-              % (float(init["k_sol"]), float(init["b_sol"])), file=log)
+        if fit_solvent:
+            print("  started from the single-scale fit: k_sol %.3f, b_sol %.1f"
+                  % (float(init["k_sol"]), float(init["b_sol"])), file=log)
+        else:
+            print("  started from the single-scale fit", file=log)
     else:
         k_sol0, b_sol0, b_ov0, log_k0 = coarse_scan(Fo, Fp, Fm, s2,
                                                     *scan_grids(fit_solvent, inv_d2))
@@ -2213,7 +2230,8 @@ def write_mtz_from_run(args, result, F_obs_array, free_flags, fit, binned_row,
         rw, rf = result["R-work binned"], result["R-free binned"]
         k_sol, b_sol = result["k_sol binned"], result["b_sol binned"]
     else:
-        reason = ("--scale-bins makes the main fit binned" if args.scale_bins
+        reason = ("the main fit is binned (--scale-bins %s)" % args.scale_bins
+                  if args.scale_bins
                   else "the binned row is off (--also-scale-bins 0)")
         which = "main fit (%s, solvent %s)" % (result["main_bin_scheme"] or "single scale",
                                                result["solvent_scheme"])
@@ -2306,6 +2324,40 @@ def write_mtz_from_run(args, result, F_obs_array, free_flags, fit, binned_row,
              "" if complete is None
              else ", FMODEL on %d to %.2f A" % (complete["set"].size(), F_obs_array.d_min())))
     return args.write_mtz
+
+
+def resolve_scale_bins(args):
+    """Settle --scale-bins and --also-scale-bins, both None when not given,
+    and return a note to print when one of them is ignored, else None.
+
+    The main fit is binned on log bins by default since 2026-11-17. Before
+    that it was single-scale and --also-scale-bins N added the binned row (0
+    removed it), so a command line that gives --also-scale-bins WITHOUT
+    --scale-bins is read the old way, a single-scale main fit with that row,
+    and reproduces what it always did. Both given with a binned main fit:
+    the extra row has nothing to add, so --also-scale-bins is ignored, and
+    said to be (not for 0, which asked for no row and gets none).
+
+    Settles args in place. Whether --also-scale-bins was GIVEN is recorded
+    on args at the first call (also_scale_bins_given) and fixed there, so a
+    second call on the same args (run() called again on them) does not read
+    the value the first call filled in as given. Only the values are re-read
+    on later calls, and the note is worked out from them; a caller that
+    changes which flags count as given between calls should build fresh
+    args."""
+    if not hasattr(args, "also_scale_bins_given"):
+        args.also_scale_bins_given = args.also_scale_bins is not None
+    also_given = args.also_scale_bins_given
+    if args.scale_bins is None:
+        args.scale_bins = 0 if also_given else "log"
+    if args.also_scale_bins is None:
+        args.also_scale_bins = "log"
+    if args.scale_bins and also_given and args.also_scale_bins:
+        return ("note: --also-scale-bins %s ignored: the main fit is binned "
+                "(--scale-bins %s), so there is no single-scale main fit to "
+                "add a binned row to; --scale-bins 0 gives a single-scale "
+                "main fit with that row" % (args.also_scale_bins, args.scale_bins))
+    return None
 
 
 def build_parser():
@@ -2417,23 +2469,34 @@ def build_parser():
                    help="also report what mmtbx reaches on the same model")
     p.add_argument("--aniso", action="store_true",
                    help="fit a full anisotropic scale tensor instead of one B")
-    p.add_argument("--scale-bins", type=scale_bins_arg, default=0,
+    p.add_argument("--scale-bins", type=scale_bins_arg, default=None,
                    metavar="log|N",
-                   help="refine one overall scale per resolution bin instead "
-                        "of a single one, as mmtbx does. 'log' uses mmtbx's "
-                        "own logarithmic bins; N uses N equal-count bins (how "
-                        "binned numbers before 2026-11-09 were measured, "
-                        "with N = 20). Default 0, off")
-    p.add_argument("--also-scale-bins", type=scale_bins_arg, default="log",
+                   help="the main fit's overall scale: one per resolution bin, "
+                        "as mmtbx fits. 'log' (default since 2026-11-17) uses "
+                        "mmtbx's own logarithmic bins; N uses N equal-count "
+                        "bins (how binned numbers before 2026-11-09 were "
+                        "measured, with N = 20); 0 is a single overall scale, "
+                        "the main fit before 2026-11-17. With bins, the "
+                        "single-scale fits are made as well and reported "
+                        "alongside. An --also-scale-bins given WITHOUT "
+                        "--scale-bins keeps its old meaning: a single-scale "
+                        "main fit with that row (none for 0)")
+    p.add_argument("--single-scale", dest="scale_bins", action="store_const",
+                   const=0,
+                   help="the same as --scale-bins 0: a single overall scale "
+                        "for the main fit, as every run before 2026-11-17, "
+                        "with the binned fit as an extra row (--also-scale-bins)")
+    p.add_argument("--also-scale-bins", type=scale_bins_arg, default=None,
                    metavar="log|N",
-                   help="after the main fit, fit again with scale bins ('log' "
-                        "or N, as --scale-bins) and "
-                        "report that R alongside it, leaving the main fit and "
-                        "everything printed from it unchanged. This is how "
-                        "pdb_rfactor.py shows how much of a gap to mmtbx is "
-                        "the scaling model, and the model --write-mtz writes. "
-                        "Default log (mmtbx's bins) since 2026-11-11, as "
-                        "pdb_rfactor already ran it; 0 turns it off")
+                   help="only with a single-scale main fit (--scale-bins 0): "
+                        "fit again with scale bins ('log' or N, as "
+                        "--scale-bins) and report that R alongside it, leaving "
+                        "the main fit and everything printed from it unchanged; "
+                        "that row is the model --write-mtz writes. Default log; "
+                        "0 turns it off. Given without --scale-bins it makes "
+                        "the main fit single-scale, as every command line "
+                        "before 2026-11-17 meant; given with a binned "
+                        "--scale-bins it is ignored, with a note")
     p.add_argument("--write-mtz", default=None, metavar="PATH",
                    help="write the scaled model as synthetic data: FP (the "
                         "model's amplitude on the Fobs scale), SIGFP (the "
@@ -2441,8 +2504,9 @@ def build_parser():
                         "the CCP4 convention: test 0, work bins 1..N-1) and "
                         "PHIC (the model's phase), on the reflections the fit "
                         "used, with the fit in the MTZ history. The model is "
-                        "the binned row's (--also-scale-bins); without that "
-                        "row, the main fit's")
+                        "the binned one: the main fit by default, the binned "
+                        "row (--also-scale-bins) with --scale-bins 0, and the "
+                        "single-scale fit only when neither is binned")
     p.add_argument("--mtz-complete", action="store_true",
                    help="with --write-mtz, also write FMODEL/PHIFMODEL on "
                         "every reflection to d_min, with the fitted scales "
@@ -2495,6 +2559,7 @@ def run(args):
     printed as it goes."""
     timing = {}
     t_start = time.perf_counter()
+    scale_bins_note = resolve_scale_bins(args)
     from lunus.sf.cell_utils import grid_shape_for_resolution, orth_matrix
     from lunus.sf.solvent_torch import (
         MASK_BLUR_DEFAULT, SolventMaskWarning, calibrate_cutoff, f_solvent,
@@ -2833,6 +2898,8 @@ def run(args):
     # ---- the fits
     print("\nfitting %d work reflections (%d free held out)"
           % (work.sum(), free_np.sum()))
+    if scale_bins_note:
+        print("  " + scale_bins_note)
     bins = assign_scale_bins(args.scale_bins, inv_d2, d_np)
     if bins is not None:
         print("overall scale per resolution bin: %s"
@@ -2841,15 +2908,38 @@ def run(args):
     def per_bin_solvent(spec):
         """The --solvent-bins rule: on for log bins unless told otherwise."""
         return {"on": True, "off": False}.get(args.solvent_bins, spec == "log")
+    # With a binned main fit (the default since 2026-11-17), the single-scale
+    # fits are made first, without and with solvent: they are the "torch, no
+    # solvent" and "torch" rows pdb_rfactor.py prints (the single-scale
+    # numbers every earlier run reported as its main fit), and the binned fits
+    # start from them (fit_scales, init), which is where their own coarse scan
+    # and single-scale LBFGS would have finished. Into a sink, so that what is
+    # printed below describes the main fit only.
+    # The timing labels keep the meanings log parsers read (the TorchRef kit's
+    # t_fit_nosolv / t_fit_solvent / t_fit_binned): "fit, no solvent" and
+    # "fit, with solvent" are the single-scale fits, "fit, binned row" the
+    # binned fit with solvent, whichever of them is the main fit. The binned
+    # fit without solvent, which only a binned main fit makes, has a label of
+    # its own, so that "fit, binned row" stays one fit's time.
+    fit0s = fit1s = None
+    if bins is not None:
+        with timed(timing, "fit, no solvent", device):
+            fit0s = fit_scales(F_obs, F_protein, None, inv_d2, s_cart, work,
+                               args.aniso, fit_solvent=False, log=io.StringIO())
+        with timed(timing, "fit, with solvent", device):
+            fit1s = fit_scales(F_obs, F_protein, F_mask, inv_d2, s_cart, work,
+                               args.aniso, fit_solvent=True, log=io.StringIO())
+    main_phase = ("fit, binned no solvent", "fit, binned row") if bins is not None \
+        else ("fit, no solvent", "fit, with solvent")
     print("no solvent:")
-    with timed(timing, "fit, no solvent", device):
+    with timed(timing, main_phase[0], device):
         fit0 = fit_scales(F_obs, F_protein, None, inv_d2, s_cart, work, args.aniso,
-                          fit_solvent=False, bins=bins)
+                          fit_solvent=False, bins=bins, init=fit0s)
     print("with solvent:")
-    with timed(timing, "fit, with solvent", device):
+    with timed(timing, main_phase[1], device):
         fit1 = fit_scales(F_obs, F_protein, F_mask, inv_d2, s_cart, work, args.aniso,
                           fit_solvent=True, bins=bins,
-                          solvent_bins=per_bin_solvent(args.scale_bins))
+                          solvent_bins=per_bin_solvent(args.scale_bins), init=fit1s)
 
     m0 = model_amplitudes(fit0, F_protein, None, inv_d2, s_cart)
     m1 = model_amplitudes(fit1, F_protein, F_mask, inv_d2, s_cart)
@@ -2873,8 +2963,11 @@ def run(args):
           % ("k_sol (e/A^3)", "-", float(fit1["k_sol"])))
     print("  %-22s %14s %14.4f"
           % ("b_sol (A^2)", "-", float(fit1["b_sol"])))
-    print("  %-22s %14s %14s"
-          % ("conventional", "-", "0.35 / 46"))
+    if solvent_scheme(fit1) == "exponential":
+        # A per-bin fit's k_sol/b_sol are the exponential nearest its curve,
+        # not comparable to the conventional values, so the row is left out.
+        print("  %-22s %14s %14s"
+              % ("conventional", "-", "0.35 / 46"))
 
     print("\noverall")
     result = {"n_atoms": len(elements), "protein_blur": float(blur),
@@ -2909,6 +3002,29 @@ def run(args):
         print("  %-8s no solvent %.4f   with solvent %.4f   change %+.4f (%+.1f%%)"
               % (name, r0, r1, r1 - r0, 100.0 * (r1 - r0) / r0))
 
+    def r_by_set(model, suffix):
+        """R-work and R-free of model into result, as "R-work<suffix>" and
+        "R-free<suffix>"; nan for a set of fewer than 2 reflections."""
+        for name, sel in (("R-work", work), ("R-free", free_np)):
+            result[name + suffix] = (r_factor(F_obs[sel], model[sel])
+                                     if sel.sum() >= 2 else float("nan"))
+
+    if fit1s is not None:
+        # The single-scale fits alongside the binned main fit (see above).
+        result.update({"k_sol single": float(fit1s["k_sol"]),
+                       "b_sol single": float(fit1s["b_sol"]),
+                       "k_overall single": float(torch.exp(fit1s["log_k"])),
+                       # B_cart (aniso: B11 B22 B33 B12 B13 B23) or B_overall
+                       "u_params single": [float(v) for v in fit1s["u_params"]],
+                       "u_params no solvent single": [float(v) for v in fit0s["u_params"]]})
+        r_by_set(model_amplitudes(fit0s, F_protein, None, inv_d2, s_cart),
+                 " no solvent single")
+        r_by_set(model_amplitudes(fit1s, F_protein, F_mask, inv_d2, s_cart), " single")
+        print("  with a single scale instead (--scale-bins 0): R-work %.4f, "
+              "R-free %.4f, k_sol %.3f, b_sol %.1f"
+              % (result["R-work single"], result["R-free single"],
+                 result["k_sol single"], result["b_sol single"]))
+
     fitb = None
     if args.also_scale_bins and not args.scale_bins:
         # Reuses F_protein and F_mask, so this costs a scale fit, not a
@@ -2935,10 +3051,7 @@ def run(args):
                                                    bins_b),
                        "k_sol binned": float(fitb["k_sol"]),
                        "b_sol binned": float(fitb["b_sol"])})
-        for name, sel in (("R-work", work), ("R-free", free_np)):
-            rb = (r_factor(F_obs[sel], mb[sel]) if sel.sum() >= 2
-                  else float("nan"))
-            result[name + " binned"] = rb
+        r_by_set(mb, " binned")
         # The scheme on its own line, so that the line below keeps the format
         # log parsers written before log bins existed already match.
         result["solvent_scheme binned"] = solvent_scheme(fitb)
