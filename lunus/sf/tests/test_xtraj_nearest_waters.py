@@ -46,7 +46,9 @@ PEPTIDE = [
     [("N", "N", 4.0, 1.1, -0.1), ("CA", "C", 5.2, 1.9, -0.4), ("C", "C", 6.4, 1.0, -0.6),
      ("O", "O", 6.3, -0.2, -0.5), ("CB", "C", 5.1, 2.8, -1.6), ("HA", "H", 5.3, 2.5, 0.5)],
 ]
-ION = (12.0, 13.0, 14.0)            # half a box from the peptide
+# Far from the peptide and, in frame 2, right beside water 1: were the ion
+# counted as solute, that water would be among the nearest.
+ION = (12.0, 13.0, 14.0)
 WATER_H = np.array([[0.96, 0.0, 0.0], [-0.24, 0.93, 0.0]])
 
 
@@ -79,7 +81,10 @@ def frames():
                           axis=1).reshape(-1, 3)
         jitter = rng.normal(scale=0.1, size=peptide.shape)
         out.append(np.concatenate([peptide + jitter, [ION], waters]))
-    return np.round(np.array(out), 2)
+    out = np.array(out)
+    first_water = len(peptide) + 1
+    out[2, first_water:first_water + 3] += np.array(ION) + [2.5, 0.0, 0.0] - out[2, first_water]
+    return np.round(out, 2)
 
 
 def write_system(folder, records, xyz):
@@ -154,9 +159,9 @@ def assert_same_structure_factors(got, expected, rtol):
 
 def test_shell_count_and_per_frame_choice(tmp_path):
     """nearest_waters=first: the count comes from the up-front shell
-    measurement, and each frame then holds that many nearest waters.
-    nearest_waters_ref= keeps the ion out of the distance measurement while
-    it stays in the calculation."""
+    measurement, and each frame then holds that many nearest waters. The
+    solute is named with nearest_waters_ref=, as an iotbx selection; the ion
+    is outside it but stays in the calculation."""
     records, xyz = atom_records(), frames()
     cutoff = 8.0
     ref_rows = [i for i, r in enumerate(records) if r[1] == "ALA" and r[4] != "H"]
@@ -207,14 +212,18 @@ def test_torch_per_atom_b_follows_the_chosen_waters(tmp_path):
     under nearest_waters= each frame must take the rows of the waters it
     chose. Every water here has its own B, and the frame chooses waters other
     than the ones the setup sized its arrays with. Hydrogens are deselected,
-    so each water is its oxygen alone; with no nearest_waters_ref= the ion
-    counts as solute."""
+    so each water is its oxygen alone. With no nearest_waters_ref= the solute
+    is the protein: the water beside the ion is not chosen, though the ion
+    itself is still in the calculation."""
     pytest.importorskip("torch")
     records, xyz = atom_records(), frames()
     n, frame = 7, 2
     heavy = lambda r: r[4] != "H"
-    ref_rows = [i for i, r in enumerate(records) if r[1] != "HOH" and heavy(r)]
+    ref_rows = [i for i, r in enumerate(records) if r[1] == "ALA" and heavy(r)]
     nearest = np.argsort(water_distances(xyz[frame], records, ref_rows))[:n]
+    with_ion = [i for i, r in enumerate(records) if r[1] != "HOH" and heavy(r)]
+    assert 0 in np.argsort(water_distances(xyz[frame], records, with_ion))[:n]
+    assert 0 not in nearest, "the water beside the ion should be left out"
     assert sorted(nearest) != list(range(n)), (
         "the frame should not choose the first n waters in this test")
 

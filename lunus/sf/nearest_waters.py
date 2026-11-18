@@ -188,6 +188,13 @@ def water_atom_mask(topology):
     return np.array([a.residue.is_water for a in topology.atoms], dtype=bool)
 
 
+def protein_atom_mask(topology):
+    """Which atoms of an mdtraj topology belong to protein residues, by
+    mdtraj's residue names. Those include the MD force fields' variants (HID,
+    HIE, CYX, ...), which iotbx's "protein" selection does not all know."""
+    return np.array([a.residue.is_protein for a in topology.atoms], dtype=bool)
+
+
 def heavy_atom_mask(topology):
     """Which atoms of an mdtraj topology are not hydrogen (or deuterium).
     Atoms with no element, virtual sites for one, are not heavy."""

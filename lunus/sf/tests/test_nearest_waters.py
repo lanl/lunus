@@ -10,8 +10,8 @@ import numpy as np
 import pytest
 
 from lunus.sf.nearest_waters import (
-    heavy_atom_mask, min_distances, nearest_points, water_atom_mask,
-    water_tables,
+    heavy_atom_mask, min_distances, nearest_points, protein_atom_mask,
+    water_atom_mask, water_tables,
 )
 
 ORTHORHOMBIC = np.diag([31.0, 24.0, 40.0])
@@ -156,6 +156,8 @@ def topology(tmp_path):
 def test_masks(topology):
     np.testing.assert_array_equal(water_atom_mask(topology),
                                   [0, 0, 0, 1, 1, 1, 1, 1, 1])
+    np.testing.assert_array_equal(protein_atom_mask(topology),
+                                  [1, 1, 1, 0, 0, 0, 0, 0, 0])
     np.testing.assert_array_equal(heavy_atom_mask(topology),
                                   [1, 1, 0, 1, 0, 0, 0, 1, 0])
 

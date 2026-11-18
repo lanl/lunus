@@ -337,10 +337,22 @@ if __name__=="__main__":
 #
 # A water is in the shell when its oxygen is within nearest_waters_cutoff=
 # (Angstrom; default 3.5 for first, 6.0 for second) of a non-hydrogen solute
-# atom. The solute is every selected atom that is not water -- ligands and
-# ions included -- unless nearest_waters_ref= names it with an atom selection
-# of its own (nearest_waters_ref=protein). Distances use the trajectory's own
-# periodic box frame by frame, not unit_cell=, which may be a different cell.
+# atom. The solute is the selected PROTEIN atoms, so that a free ion out in
+# the solvent does not count the waters around it as ordered. Ligands and
+# bound ions are left out by the same rule, as is a modified residue whose
+# name mdtraj does not know as protein; nearest_waters_ref= names the solute
+# with an atom selection instead, for example
+#
+#   nearest_waters_ref="protein or resname NAP or resname FOL"
+#
+# The default goes by mdtraj's residue names, which include the force fields'
+# variants (HID, HIE, CYX, ...). nearest_waters_ref= is an iotbx selection
+# like selection=, and iotbx's own "protein" is narrower: on the 7FPV MD
+# topology it leaves out every histidine. Check the atom count the run
+# prints. Either way the solute is only what distances are measured TO: which
+# atoms enter the calculation is selection='s business alone, ions included.
+# Distances use the trajectory's own periodic box frame by frame, not
+# unit_cell=, which may be a different cell.
 #
 # The rest of the selection is unchanged, and a water contributes whichever
 # of its atoms the selection includes: with selection="not element H" the
@@ -1151,7 +1163,8 @@ if __name__=="__main__":
       # message.
       if nearest_waters is not None and n_atoms_mdtraj == n_atoms_cctbx:
         from lunus.sf.nearest_waters import (
-          water_tables, water_atom_mask, heavy_atom_mask, min_distances)
+          water_tables, water_atom_mask, protein_atom_mask, heavy_atom_mask,
+          min_distances)
         nw_is_water = water_atom_mask(md_top)
         nw_pos_idx, nw_atoms = water_tables(md_top, selection_mask)
         if len(nw_pos_idx) == 0:
@@ -1160,8 +1173,8 @@ if __name__=="__main__":
             "from. The option keeps a subset of the SELECTED waters, so the "
             "selection must include them." % selection_text)
         if nearest_waters_ref is None:
-          nw_ref_mask = selection_mask & ~nw_is_water
-          nw_ref_text = "the selected atoms that are not water"
+          nw_ref_mask = selection_mask & protein_atom_mask(md_top)
+          nw_ref_text = "the selected protein atoms"
         else:
           from lunus.sf.atom_order import selection_in_file_order
           nw_ref_mask = selection_in_file_order(pdb_in, nearest_waters_ref) & ~nw_is_water
@@ -1170,7 +1183,8 @@ if __name__=="__main__":
         if len(nw_ref_idx) == 0:
           raise ValueError(
             "nearest_waters: no non-hydrogen solute atoms to measure "
-            "distances to (%s)" % nw_ref_text)
+            "distances to (%s). Name the solute with nearest_waters_ref= if "
+            "it is not protein." % nw_ref_text)
         print("nearest_waters: %d waters in the selection, %d selected atom(s) "
               "each; distances from the water oxygen to %d non-hydrogen atoms "
               "(%s)" % (len(nw_pos_idx), nw_atoms.shape[1], len(nw_ref_idx),
