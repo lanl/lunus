@@ -961,6 +961,14 @@ the settings 1.0 was measured with (`--sphere-offset`, `--sphere-edge`,
 `--sphere-radii element`, `--mask-blur`, `--taper-frac`), since each of those
 moves where the field crosses 1.0.
 
+The atom-presence field (`--mask-source atoms`) takes a level by hand too,
+in its own unit, atoms/A^3 on the field as built (`--mask-source-b`,
+`--mask-blur`, `--taper-frac` as given, and `--protein-blur` where it
+exceeds `--mask-blur`; each atom weighted by its occupancy, its kernel
+truncated at `--density-cutoff`), through the same path: no gemmi target,
+no search. Its `auto` still calibrates, since no fixed level has been
+measured for it. The density source takes no level (`--mask-level
+calibrate`), nor does `--mask gemmi`.
 
 ### In the library: the mask source follows the atoms
 
@@ -1002,6 +1010,7 @@ default now raises until it says `mask_source="density"` or calls
 no hydrogens. Sphere kernels passed by hand may have been built with any
 settings, so `cutoff=None` raises with them, `set_atoms` or not. `spheres=True` and
 `source_b=B` remain, as `mask_source="spheres"` and `"atoms"` at B.
+
 ## What the density cutoff costs
 
 The R-factor above was measured at an atomic density cutoff of 0.01 e/A^3 --

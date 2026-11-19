@@ -1362,16 +1362,98 @@ def test_mask_level_cuts_the_sphere_field_without_calibrating(tmp_path, monkeypa
 
 
 @requires_cctbx
-def test_mask_level_needs_the_sphere_field_and_no_target(tmp_path):
-    """A level is in sphere overlaps, so it is refused for the other mask
-    sources and for --mask gemmi, and alongside a calibration target."""
+def test_mask_level_cuts_the_atom_field_without_calibrating(tmp_path, monkeypatch):
+    """--mask-level L with --mask-source atoms cuts the atom-presence field at
+    L atoms/A^3 on the fixed-level path the spheres use: no gemmi
+    reference-grid target, no cutoff search, the level printed in the atom
+    field's unit and the out-of-range warning naming the atom field, not the
+    sphere field. The toy (three atoms in a 20 A cell) is nearly all solvent,
+    so the warning fires. Feeding a calibrated atom-field cutoff back in as
+    the level, at full precision, gives the same mask and R-factors bit for
+    bit: calibrate_cutoff returns a Python float, the level is one too."""
+    import contextlib
+    import io
+    import warnings
+
+    import fit_solvent_rfactor
+    import lunus.sf.solvent_torch as solvent_torch
+    from lunus.sf.solvent_torch import SolventMaskWarning
+
+    pdb, mtz = sharp_toy(tmp_path, sharp=False)
+    calls = []
+    real_target = fit_solvent_rfactor.gemmi_mask_occupancy_at_spacing
+    real_calibrate = solvent_torch.calibrate_cutoff
+
+    def spy_target(*a, **k):
+        calls.append("target")
+        return real_target(*a, **k)
+
+    def spy_calibrate(*a, **k):
+        calls.append("calibrate")
+        return real_calibrate(*a, **k)
+
+    monkeypatch.setattr(fit_solvent_rfactor, "gemmi_mask_occupancy_at_spacing", spy_target)
+    monkeypatch.setattr(solvent_torch, "calibrate_cutoff", spy_calibrate)
+
+    def fit(*extra):
+        args = fit_solvent_rfactor.build_parser().parse_args(
+            [pdb, mtz, "--shells", "2", "--mask-source", "atoms"] + list(extra))
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                r = fit_solvent_rfactor.run(args)
+        r["warnings"] = [str(w.message) for w in caught
+                         if issubclass(w.category, SolventMaskWarning)
+                         and "which no protein crystal has" in str(w.message)]
+        return r, out.getvalue()
+
+    r1, text = fit("--mask-level", "0.02")
+    assert calls == [], calls
+    assert r1["mask_level"] == 0.02 and r1["mask_cutoff"] == 0.02
+    assert r1["target_occupancy"] is None and r1["target_spacing"] is None
+    assert r1["target_source"] == "none (fixed level 0.02)"
+    assert r1["mask_level_rule"] == "--mask-level 0.02"
+    assert "mask level: 0.02 atoms/A^3 (--mask-level 0.02)" in text
+    assert "calibration target: none (the atom field is cut at 0.02)" in text
+    assert "threshold mask at a fixed level (--mask-level): cutoff 0.02 atoms/A^3" in text
+    assert "sphere" not in text.split("mask level:")[1].split("occupancy")[0]
+    assert r1["mask_occupancy"] > 0.95 and len(r1["warnings"]) == 1
+    assert "the atom field expects" in r1["warnings"][0]
+    assert "sphere" not in r1["warnings"][0]
+    r2, _ = fit("--mask-level", "0.04")
+    assert calls == []
+    assert r2["mask_occupancy"] > r1["mask_occupancy"]
+    assert r2["R-work no solvent"] == r1["R-work no solvent"]
+
+    # auto still calibrates the atom field
+    ra, text = fit()
+    assert calls == ["target", "calibrate"], calls
+    assert ra["mask_level"] is None
+    assert "no fixed level has been measured for the atom field" in ra["mask_level_rule"]
+    # its cutoff, fed back as the level, reproduces the run exactly
+    rb, _ = fit("--mask-level", repr(ra["mask_cutoff"]))
+    assert calls == ["target", "calibrate"], calls
+    assert rb["mask_cutoff"] == ra["mask_cutoff"]
+    for key in ("mask_occupancy", "R-work", "k_sol", "b_sol"):  # the toy has no free set
+        assert rb[key] == ra[key], (key, rb[key], ra[key])
+
+
+@requires_cctbx
+def test_mask_level_needs_a_field_with_a_unit_and_no_target(tmp_path):
+    """A level is in sphere overlaps or atoms/A^3, so it is refused for the
+    density source and for --mask gemmi (whatever the source), naming the
+    sources that take one, and alongside a calibration target."""
     import fit_solvent_rfactor
 
     pdb, mtz = sharp_toy(tmp_path, sharp=False)
     parse = fit_solvent_rfactor.build_parser().parse_args
-    for extra in (["--mask-source", "atoms"], ["--mask-source", "density"],
-                  ["--mask", "gemmi"], ["--target-occupancy", "0.4"]):
-        with pytest.raises(ValueError, match="--mask-level"):
+    for extra in (["--mask-source", "density"], ["--mask", "gemmi"],
+                  ["--mask", "gemmi", "--mask-source", "atoms"]):
+        with pytest.raises(ValueError, match="--mask-source spheres .* or atoms"):
+            fit_solvent_rfactor.run(parse([pdb, mtz, "--mask-level", "1.0"] + extra))
+    for extra in (["--target-occupancy", "0.4"],
+                  ["--target-occupancy", "0.4", "--mask-source", "atoms"]):
+        with pytest.raises(ValueError, match="--target-occupancy"):
             fit_solvent_rfactor.run(parse([pdb, mtz, "--mask-level", "1.0"] + extra))
 
 
@@ -1407,9 +1489,15 @@ def test_mask_level_auto_rule():
     for h in ("H", "D", "h"):
         level, why = rule("auto", "threshold", "spheres", heavy + [h], None)
         assert level is None and "1 hydrogens" in why, (h, why)
-    assert rule("auto", "threshold", "atoms", heavy, None)[0] is None
-    assert rule("auto", "threshold", "density", heavy, None)[0] is None
-    assert rule("auto", "gemmi", "spheres", heavy, None)[0] is None
+    level, why = rule("auto", "threshold", "atoms", heavy, None)
+    assert level is None and "atom field" in why, why
+    assert rule(0.025, "threshold", "atoms", heavy, None) == (0.025, "--mask-level 0.025")
+    assert rule("auto", "threshold", "density", heavy, None) == (
+        None, "auto: the density source takes no fixed level")
+    assert rule("auto", "gemmi", "spheres", heavy, None) == (
+        None, "auto: --mask gemmi takes no fixed level")
+    assert rule("auto", "gemmi", "atoms", heavy, None) == (
+        None, "auto: --mask gemmi takes no fixed level")
     assert rule("auto", "threshold", "spheres", heavy, 0.4)[0] is None
     assert rule("calibrate", "threshold", "spheres", heavy, None)[0] is None
     assert rule(0.9, "threshold", "spheres", heavy + ["H"], None) == (0.9, "--mask-level 0.9")
@@ -1550,6 +1638,17 @@ def model_as_components(cols, model="FP", phase="PHIC"):
         b = (Fp.real * Fmod.imag - Fp.imag * Fmod.real) / det
     ok = np.abs(det) > 1e-3 * np.abs(Fp) * np.abs(Fm)
     return a, b, ok
+
+
+@requires_cctbx
+def test_write_mtz_history_names_the_atom_field_level_unit(tmp_path):
+    """--write-mtz at a fixed atom-field level records the level in that
+    field's unit, atoms/A^3, not in sphere overlaps."""
+    out, r, _ = write_mtz_7fpv(tmp_path, "--mask-source", "atoms", "--mask-level", "0.025")
+    assert r["mask_level"] == 0.025
+    _, history, _ = read_mtz_columns(out)
+    line = [h for h in history if h.startswith("mask: ")]
+    assert line and line[0].startswith("mask: atoms source, 0.025 atoms/A^3;"), history
 
 
 @requires_cctbx

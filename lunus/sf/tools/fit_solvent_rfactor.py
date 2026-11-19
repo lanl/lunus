@@ -74,7 +74,9 @@ the right level to 1.1-1.5 with the hydrogen fraction; so are the atoms and
 density sources, --target-occupancy, and a sphere field built with any of
 --sphere-offset, --sphere-edge, --sphere-radii, --mask-blur or --taper-frac
 away from its default. --mask-level calibrate calibrates
-every model; a number cuts at that level. See docs/solvent-design.md, "A
+every model; a number cuts at that level, in sphere overlaps for the sphere
+field or atoms/A^3 for the atoms source (whose auto still calibrates: no
+fixed level has been measured for it). See docs/solvent-design.md, "A
 fixed level instead of a calibration".
 
 THE TARGET IS MEASURED ON A FIXED REFERENCE GRID (--target-spacing, default
@@ -908,13 +910,19 @@ def keyword_or_number_arg(keyword, option, unit, allow_zero, keywords=None):
 protein_blur_arg = keyword_or_number_arg("auto", "--protein-blur", "A^2", allow_zero=True)
 
 # --mask-level: "auto", "calibrate" (to gemmi's occupancy), or a level > 0 in
-# sphere overlaps. auto is MASK_LEVEL_FIXED for a model without hydrogens and
-# calibration for one with them (mask_level_rule says why).
+# the unit of the field it cuts: sphere overlaps for the sphere field,
+# atoms/A^3 for the atom-presence field (MASK_LEVEL_UNITS). auto is
+# MASK_LEVEL_FIXED for a sphere field of a model without hydrogens and
+# calibration for everything else (mask_level_rule says why).
 MASK_LEVEL_DEFAULT = "auto"
 MASK_LEVEL_FIXED = 1.0
+# the mask sources a fixed level can cut, with its unit and the field's name
+MASK_LEVEL_UNITS = {"spheres": "sphere overlaps", "atoms": "atoms/A^3"}
+MASK_LEVEL_FIELDS = {"spheres": "sphere field", "atoms": "atom field"}
 
 
-mask_level_arg = keyword_or_number_arg("calibrate", "--mask-level", "sphere overlaps",
+mask_level_arg = keyword_or_number_arg("calibrate", "--mask-level",
+                                       "sphere overlaps (spheres) or atoms/A^3 (atoms)",
                                        allow_zero=False, keywords=("auto", "calibrate"))
 
 
@@ -922,9 +930,14 @@ def mask_level_rule(setting, mask, mask_source, elements, target_occupancy,
                     nondefault_field=()):
     """--mask-level resolved: (level or None to calibrate, the reason).
 
-    A fixed level is in sphere overlaps, so it only means anything for the
-    sphere field. 'auto' cuts that field at MASK_LEVEL_FIXED when the model
-    has no hydrogens and calibrates it to gemmi's occupancy when it has any.
+    A fixed level is in the unit of the field it cuts (MASK_LEVEL_UNITS):
+    sphere overlaps for the sphere field, atoms/A^3 for the atom-presence
+    field, and nothing for the density, which takes no level. An explicit
+    level is taken as it is for either field; 'auto' has a fixed level for
+    the sphere field only, since none has been measured for the atom field,
+    which it calibrates. 'auto' cuts the sphere field at MASK_LEVEL_FIXED
+    when the model has no hydrogens and calibrates it to gemmi's occupancy
+    when it has any.
     Measured 2026-11-10 against calibration on every entry, the binned
     R-free gap to mmtbx, medians: 1.0 is -0.0015 / -0.0021 / -0.0014 on the
     models without hydrogens of the 2.6-3.0 A, 1.8-2.6 A and SW40 sets
@@ -953,8 +966,13 @@ def mask_level_rule(setting, mask, mask_source, elements, target_occupancy,
         return None, "--mask-level calibrate"
     if setting != "auto":
         return float(setting), "--mask-level %g" % setting
+    if mask != "gemmi" and mask_source == "atoms":
+        return None, ("auto: no fixed level has been measured for the atom "
+                      "field, so it is calibrated (--mask-level L cuts it at L "
+                      "atoms/A^3)")
     if mask == "gemmi" or mask_source != "spheres":
-        return None, "auto: a fixed level is only defined for the sphere field"
+        return None, ("auto: %s takes no fixed level"
+                      % ("--mask gemmi" if mask == "gemmi" else "the density source"))
     if target_occupancy is not None:
         return None, "auto: --target-occupancy given"
     if nondefault_field:
@@ -1474,7 +1492,8 @@ def write_mtz_from_run(args, result, F_obs_array, free_flags, fit, binned_row,
     kb = (torch.exp(fit["log_k_bins"]).tolist() if fit.get("log_k_bins") is not None
           else [float(torch.exp(fit["log_k"]))])
     km = fit["k_mask_bins"].tolist() if fit.get("k_mask_bins") is not None else None
-    level = ("%g sphere overlaps" % mask_level if mask_level is not None
+    level = ("%g %s" % (mask_level, MASK_LEVEL_UNITS[mask_source])
+             if mask_level is not None
              else "gemmi mask" if math.isnan(result["mask_cutoff"])
              else "calibrated, cutoff %.4g" % result["mask_cutoff"])
 
@@ -1603,15 +1622,16 @@ def build_parser():
                    help="override the gemmi-measured calibration target")
     p.add_argument("--mask-level", type=mask_level_arg, default=MASK_LEVEL_DEFAULT,
                    metavar="auto|calibrate|L",
-                   help="where the sphere field is cut: 'calibrate' finds the "
-                        "cutoff at which the mask's occupancy matches gemmi's "
-                        "geometric mask on the reference grid; a number L cuts "
-                        "at L sphere overlaps directly, with no gemmi target and "
-                        "no search (--mask-source spheres only); 'auto' "
-                        "(default) is %g for a model without hydrogens and "
-                        "calibrate for one with them, for another source, or "
-                        "for a sphere field with non-default settings"
-                        % MASK_LEVEL_FIXED)
+                   help="where the mask's source field is cut: 'calibrate' "
+                        "finds the cutoff at which the mask's occupancy matches "
+                        "gemmi's geometric mask on the reference grid; a number "
+                        "L cuts at L directly, with no gemmi target and no "
+                        "search, in sphere overlaps for --mask-source spheres "
+                        "or atoms/A^3 for --mask-source atoms (not for density "
+                        "or --mask gemmi); 'auto' (default) is %g for a sphere "
+                        "field of a model without hydrogens and calibrate for "
+                        "one with them, for another source, or for a sphere "
+                        "field with non-default settings" % MASK_LEVEL_FIXED)
     p.add_argument("--taper-frac", type=float, default=0.5,
                    help="taper width as a fraction of the SOLVENT MASK cutoff")
     p.add_argument("--density-cutoff", type=float, default=1e-4, metavar="E",
@@ -1767,11 +1787,15 @@ def run(args):
         mask_occupancy, mask_source_weights, shell_voxels, solvent_mask,
     )
     explicit_level = args.mask_level not in ("calibrate", "auto")
-    if explicit_level and (args.mask == "gemmi" or args.mask_source != "spheres"):
-        # a level is in sphere overlaps, a unit only the sphere field has
+    if explicit_level and (args.mask == "gemmi"
+                           or args.mask_source not in MASK_LEVEL_UNITS):
+        # a level is in sphere overlaps or atoms/A^3, units only the sphere
+        # and atom fields have; the density and gemmi's mask take none
         raise ValueError("--mask-level %g needs --mask threshold and "
-                         "--mask-source spheres; use --mask-level calibrate "
-                         "for the other sources" % args.mask_level)
+                         "--mask-source spheres (a level in sphere overlaps) "
+                         "or atoms (in atoms/A^3); use --mask-level calibrate "
+                         "for --mask-source density, and leave it out for "
+                         "--mask gemmi" % args.mask_level)
     if explicit_level and args.target_occupancy is not None:
         raise ValueError("--target-occupancy is a calibration target, and "
                          "--mask-level %g calibrates nothing; pass one or the "
@@ -1945,12 +1969,13 @@ def run(args):
     fixed_level = mask_level is not None
     if args.mask != "gemmi":
         print("  mask level: %s (%s)"
-              % ("%g sphere overlaps" % mask_level if fixed_level else "calibrated",
+              % ("%g %s" % (mask_level, MASK_LEVEL_UNITS[args.mask_source])
+                 if fixed_level else "calibrated",
                  level_reason))
     with timed(timing, "gemmi mask (cpu)"):
         occ_working, gemmi_grid = gemmi_mask_occupancy(args.pdb, grid, args.radii_set)
         if fixed_level:
-            # the cut is a fixed level of the sphere field: nothing to match,
+            # the cut is a fixed level of the field: nothing to match,
             # so the reference-grid mask is not built at all
             target, target_source = None, "none (fixed level %g)" % mask_level
         elif args.target_occupancy is not None:
@@ -1969,8 +1994,8 @@ def run(args):
     print("  gemmi %s geometric mask on the same model and grid: occupancy %.4f"
           % (args.radii_set, occ_working))
     if fixed_level:
-        print("  calibration target: none (the sphere field is cut at %g)"
-              % mask_level)
+        print("  calibration target: none (the %s is cut at %g)"
+              % (MASK_LEVEL_FIELDS[args.mask_source], mask_level))
     elif args.target_occupancy is not None:
         print("  calibration target: occupancy %.4f (--target-occupancy)" % target)
     elif args.mask == "gemmi":
@@ -2069,15 +2094,15 @@ def run(args):
         print("  threshold mask %s: cutoff %.4g %s (%.3f of peak %.3f)"
               % ("at a fixed level (--mask-level)" if fixed_level
                  else "calibrated to it", cutoff,
-                 {"atoms": "atoms/A^3", "spheres": "sphere overlaps"}.get(
-                     args.mask_source, "e/A^3"),
+                 MASK_LEVEL_UNITS.get(args.mask_source, "e/A^3"),
                  cutoff / float(source.max()), float(source.max())))
         if fixed_level and not 0.05 < occupancy < 0.95:
             warnings.warn(
                 "the mask level %g calls %.1f%% of the cell solvent, which no "
                 "protein crystal has; the level is wrong for this model, or the "
-                "model is not what the sphere field expects"
-                % (mask_level, 100.0 * occupancy),
+                "model is not what the %s expects"
+                % (mask_level, 100.0 * occupancy,
+                   MASK_LEVEL_FIELDS[args.mask_source]),
                 SolventMaskWarning, stacklevel=2)
         print("  occupancy %.4f, taper shell %d voxels (%.2f%% of the grid)"
               % (occupancy, shell, 100.0 * shell / np.prod(grid)))
