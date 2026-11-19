@@ -95,7 +95,7 @@ def system():
     )
     s["density_sym"] = symmetrize_sum(s["density_raw"], grid_ops)
     s["cutoff"] = 0.01 * float(s["density_sym"].max())
-    s["model"] = SolventModel(cutoff=s["cutoff"], taper_width=0.5 * s["cutoff"])
+    s["model"] = SolventModel(mask_source="density", cutoff=s["cutoff"], taper_width=0.5 * s["cutoff"])
     return s
 
 

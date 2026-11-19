@@ -169,7 +169,7 @@ def test_the_pipeline_masks_before_folding():
         s["atom_lam"], s["elem_offsets"], s["atom_radius_ang"], big_grid,
         s["orth"] * scale, s["taper_width"], compile_core=False)
     cutoff = 0.01 * float(rho_super.max())
-    model = SolventModel(cutoff=cutoff, taper_width=0.5 * cutoff,
+    model = SolventModel(mask_source="density", cutoff=cutoff, taper_width=0.5 * cutoff,
                          check_occupancy=False)
 
     from lunus.sf.solvent_torch import f_solvent, f_total

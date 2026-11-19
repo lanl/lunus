@@ -115,19 +115,27 @@ def structure_factors_one_config(
     symmetry_torch.supercell_factors() derives the factors and rejects a
     non-integer ratio, for which no exact grid folding exists.
 
-    mask_kernels: (atom_A, atom_lam, elem_offsets, atom_radius_ang,
-    taper_width) for the MASK's source field when solvent.source_b is set --
-    uniform-B kernels built with that B (kernel_torch.build_atom_kernels_torch
-    with b_per_atom filled with source_b and the same blur), with mask_occ the
-    occupancies times solvent_torch.mask_source_weights(). The field is placed
-    from the same coordinates, symmetry-expanded and folded exactly like the
-    density, and the mask is thresholded from it instead; F_protein is
-    untouched. Required when solvent.source_b is not None, ignored otherwise.
+    mask_kernels: the kernels of the MASK's own field, when it is not cut from
+    the density. Normally left None: a SolventModel told its atoms with
+    set_atoms() builds them on first use and caches them (the sphere field, or
+    the atom-presence field with its weights applied to occ), and that is
+    what is used. Passed explicitly, they win over the cached ones; without
+    set_atoms they need an explicit mask_source "spheres" or "atoms"
+    (spheres=True, source_b=B), since "auto" decides from set_atoms alone:
 
-    With solvent.spheres, mask_kernels is the 6-tuple mask_spheres.
-    sphere_kernels() returns (its last entry the field's own element index,
-    all zeros, since the sphere kernels are grouped by radius rather than
-    element) and mask_occ is the plain occupancies.
+      * the atom-presence field: (atom_A, atom_lam, elem_offsets,
+        atom_radius_ang, taper_width), uniform-B kernels built with the
+        field's B (kernel_torch.build_atom_kernels_torch with b_per_atom
+        filled with it and the same blur), with mask_occ the occupancies
+        times solvent_torch.mask_source_weights() -- both required;
+      * the sphere field: the 6-tuple mask_spheres.sphere_kernels() returns
+        (its last entry the field's own element index, all zeros, since the
+        sphere kernels are grouped by radius rather than element), with
+        mask_occ the plain occupancies or None.
+
+    The field is placed from the same coordinates, symmetry-expanded and
+    folded exactly like the density, and the mask is thresholded from it
+    instead; F_protein is untouched. Ignored for mask_source "density".
 
     return_parts: False (default) returns F_total (F_protein without
     solvent), as always. True, with solvent given, returns a SolventParts
@@ -142,19 +150,35 @@ def structure_factors_one_config(
     if return_parts and solvent is None:
         raise ValueError("return_parts=True needs solvent=: without a solvent "
                          "model there is no F_mask")
-    uses_field = solvent is not None and (solvent.source_b is not None or solvent.spheres)
-    if solvent is not None and solvent.spheres and (mask_kernels is None or len(mask_kernels) != 6):
+    kind = None if solvent is None else solvent.resolved_source(mask_kernels)
+    uses_field = kind in ("spheres", "atoms")
+    if uses_field and mask_kernels is None:
+        # the set_atoms atoms: kernels cached on the model, built for the
+        # TARGET grid as hand-built ones are (same voxel size in a supercell)
+        solvent._check_atom_count(frac_coords.shape[0])
+        mask_kernels, weights = solvent.cached_mask_kernels(
+            kind, grid_shape, orth_matrix, blur)
+        if mask_occ is None and weights is not None:
+            mask_occ = occ * weights
+    elif kind == "spheres" and solvent.cutoff is None:
+        # the fixed level was measured on set_atoms' spheres (default offset
+        # and edge); kernels built by hand may be anything
         raise ValueError(
-            "solvent.spheres is set, so mask_kernels= must be the 6-tuple "
-            "mask_spheres.sphere_kernels() returns")
-    if solvent is not None and solvent.source_b is not None and (
-            mask_kernels is None or mask_occ is None):
+            "SolventModel(cutoff=None) with sphere kernels passed by hand: the "
+            "fixed level holds only for the spheres set_atoms() builds, at the "
+            "settings it was measured with. Give cutoff=, or calibrate().")
+    elif kind == "spheres" and len(mask_kernels) != 6:
+        raise ValueError(
+            "the mask is cut from the sphere field, so mask_kernels= must be "
+            "the 6-tuple mask_spheres.sphere_kernels() returns")
+    elif kind == "atoms" and mask_occ is None:
         # both, not either: the kernels alone would place the field with the
         # elements' electron counts, the half-gain variant the docs reject
         raise ValueError(
-            "solvent.source_b is set, so mask_kernels= and mask_occ= are "
-            "both needed to place the mask's atom-presence field; see "
-            "solvent_torch.mask_source_weights")
+            "the mask is cut from the atom-presence field, so mask_kernels= and "
+            "mask_occ= are both needed to place it; see "
+            "solvent_torch.mask_source_weights (or call set_atoms() and pass "
+            "neither)")
 
     if supercell is None:
         dens_grid, dens_orth, dens_frac = grid_shape, orth_matrix, frac_coords
@@ -197,7 +221,7 @@ def structure_factors_one_config(
         # dens_orth, not orth_matrix: the mask is built in the SUPERCELL's
         # frame, so the blur's frequency grid has to be the supercell's too.
         mask = solvent.build_mask(density, dens_orth, pipeline_blur=blur,
-                                  source=source)
+                                  source=source, _kind=kind)
 
     if supercell is not None:
         density = fold_supercell(density, n)
@@ -234,7 +258,7 @@ def structure_factors_one_config(
     # checkpointing exists to control comes straight back.
     F_total, _, F_mask = solvent.apply(density, F_protein, cell_volume, hkl,
                                        orth_matrix, pipeline_blur=blur,
-                                       source=source)
+                                       source=source, _kind=kind)
     if return_parts:
         # apply()'s own F_mask, the one F_total was built from: no second FFT.
         # It comes back unscaled, and apply() was called without its

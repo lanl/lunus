@@ -204,7 +204,7 @@ def main():
             d = symmetrize_sum(d, grid_ops)
         f = compute_fcalc(d, volume, hkl, orth)
         c = args.cutoff_frac * float(d.max())
-        SolventModel(cutoff=c, taper_width=0.5 * c, check_occupancy=False,
+        SolventModel(mask_source="density", cutoff=c, taper_width=0.5 * c, check_occupancy=False,
                      mask_blur=args.mask_blur).apply(d, f, volume, hkl, orth)
 
     with torch.no_grad():
@@ -229,7 +229,7 @@ def main():
         mem_protein = peak_memory(dev)
 
         cutoff = args.cutoff_frac * float(density.max())
-        model = SolventModel(cutoff=cutoff, taper_width=0.5 * cutoff,
+        model = SolventModel(mask_source="density", cutoff=cutoff, taper_width=0.5 * cutoff,
                              check_occupancy=False, mask_blur=args.mask_blur)
         if args.occupancy is not None:
             cutoff = model.calibrate(density, orth, args.occupancy)

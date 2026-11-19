@@ -202,6 +202,69 @@ def contact_radius(resname, name, element, explicit_hydrogens=False, vdw_radius=
     return 0.5 * (lj_sigma(resname, name, element, explicit_hydrogens, vdw_radius) + SIGMA_WATER)
 
 
+def names_from_cctbx_labels(labels):
+    """(atom_names, residue_names, residue_ids) from cctbx scatterer labels,
+    the three per-atom sequences sphere_radii_from_names takes.
+
+    cctbx labels are 'pdb=" CA AMET A   1 "': atom name in columns 1-4 of the
+    quoted part, altloc 5, residue name 6-8, then chain, number and insertion
+    code. The names come back stripped. The residue id is columns 6 onwards
+    as they stand -- residue name, chain, number and insertion code, the
+    altloc left out -- so two altloc residues with different names at one
+    position stay two residues, and the grouping is the one sphere_radii has
+    always used."""
+    atom_names, residue_names, residue_ids = [], [], []
+    for lab in labels:
+        q = lab.split('"')[1] if '"' in lab else lab
+        atom_names.append(q[0:4].strip() if len(q) >= 4 else "")
+        residue_names.append(q[5:8].strip() if len(q) >= 8 else "")
+        residue_ids.append(q[5:])
+    return atom_names, residue_names, residue_ids
+
+
+def sphere_radii_from_names(elements, atom_names, residue_names, residue_ids=None,
+                            offset=0.0, explicit_hydrogens=None, by_element=False):
+    """The mask's sphere radii, sigma/2 + offset per atom, from plain per-atom
+    sequences: element symbols, atom names (CA, OG1, ...) and residue names
+    (GLY, HOH, ...), any case and padding. What sphere_radii computes from
+    cctbx labels, without needing cctbx: a biotite AtomArray, a gemmi
+    structure or an MD topology supplies the same three columns directly.
+    See sphere_radii for what the radii are and why.
+
+    residue_ids (optional) is anything hashable per atom that tells the
+    residues apart -- a (chain, number, insertion code) tuple, say -- and is
+    what the per-residue hydrogen rule groups by: with explicit_hydrogens
+    None, a residue holding a hydrogen has its sp3 carbons bare and every
+    other residue keeps the united-atom types. WITHOUT residue_ids that rule
+    has nothing to group by, so it is decided once for the whole model: any
+    hydrogen anywhere makes every residue explicit-hydrogen (True for all
+    atoms), none leaves them all united-atom. explicit_hydrogens True or
+    False forces it either way, residue_ids or not."""
+    n = len(elements)
+    if len(atom_names) != n or len(residue_names) != n:
+        raise ValueError("elements, atom_names and residue_names must have one "
+                         "entry per atom (%d, %d, %d)"
+                         % (n, len(atom_names), len(residue_names)))
+    if residue_ids is not None and len(residue_ids) != n:
+        raise ValueError("residue_ids has %d entries for %d atoms"
+                         % (len(residue_ids), n))
+    if explicit_hydrogens is not None:
+        per_atom = [bool(explicit_hydrogens)] * n
+    elif residue_ids is None:
+        per_atom = [any(is_hydrogen(e) for e in elements)] * n
+    else:
+        with_h = {key for key, el in zip(residue_ids, elements) if is_hydrogen(el)}
+        per_atom = [key in with_h for key in residue_ids]
+    out = np.empty(n)
+    for i, (name, resname, el) in enumerate(zip(atom_names, residue_names, elements)):
+        out[i] = 0.5 * lj_sigma(str(resname), str(name), str(el), per_atom[i],
+                                by_element=by_element) + offset
+    if (out <= 0.0).any():
+        raise ValueError("offset %g leaves a sphere radius <= 0 (smallest %.3f A)"
+                         % (offset, out.min()))
+    return out
+
+
 def sphere_radii(labels, elements, offset=0.0, explicit_hydrogens=None, by_element=False):
     """The mask's sphere radii: sigma/2 + offset per atom (offset in A, the
     knob that plays the geometric mask's probe-minus-shrink), from cctbx
@@ -217,28 +280,14 @@ def sphere_radii(labels, elements, offset=0.0, explicit_hydrogens=None, by_eleme
     explicit_hydrogens None (default) decides PER RESIDUE: a residue whose
     atoms include a hydrogen has its sp3 carbons bare, every other residue
     keeps the united-atom types, so hydrogens on a ligand or a water do not
-    shrink the protein. True or False forces it for every atom."""
-    parsed = []
-    for lab in labels:
-        # cctbx labels are 'pdb=" CA AMET A   1 "': atom name in columns 1-4
-        # of the quoted part, altloc 5, residue name 6-8, the rest chain,
-        # number and insertion code
-        q = lab.split('"')[1] if '"' in lab else lab
-        parsed.append((q[0:4] if len(q) >= 4 else "", q[5:8] if len(q) >= 8 else "", q[5:]))
-    if explicit_hydrogens is None:
-        with_h = {key for (_, _, key), el in zip(parsed, elements)
-                  if is_hydrogen(el)}
-        per_atom = [key in with_h for (_, _, key) in parsed]
-    else:
-        per_atom = [bool(explicit_hydrogens)] * len(parsed)
-    out = np.empty(len(labels))
-    for i, ((name, resname, _), el) in enumerate(zip(parsed, elements)):
-        out[i] = 0.5 * lj_sigma(resname, name, el, per_atom[i],
-                                by_element=by_element) + offset
-    if (out <= 0.0).any():
-        raise ValueError("offset %g leaves a sphere radius <= 0 (smallest %.3f A)"
-                         % (offset, out.min()))
-    return out
+    shrink the protein. True or False forces it for every atom.
+
+    The labels are split by names_from_cctbx_labels and the radii computed by
+    sphere_radii_from_names; without cctbx labels, call that directly."""
+    atom_names, residue_names, residue_ids = names_from_cctbx_labels(labels)
+    return sphere_radii_from_names(elements, atom_names, residue_names, residue_ids,
+                                   offset=offset, explicit_hydrogens=explicit_hydrogens,
+                                   by_element=by_element)
 
 
 def fermi(r, radius, width):
