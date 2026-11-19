@@ -543,6 +543,89 @@ def _kernel_symbol_is_global():
         return False
 
 
+_OPENMP_QUERIES = ("omp_get_thread_num", "omp_get_num_threads")
+_FOREIGN_OPENMP = None      # None: not decided yet; "": none; else the library
+_FOREIGN_OPENMP_WARNED = False
+
+
+def _library_at(address):
+    """Path of the shared library mapped at an address, from /proc/self/maps;
+    None when it is not in a file mapping (or there is no such file)."""
+    try:
+        with open("/proc/self/maps") as maps:
+            for line in maps:
+                fields = line.split(None, 5)
+                low, high = (int(x, 16) for x in fields[0].split("-"))
+                if low <= address < high:
+                    return fields[5].strip() if len(fields) > 5 else None
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _foreign_openmp_library():
+    """The library whose OpenMP thread queries the compiled CPU kernels would
+    call instead of the OpenMP runtime's own; "" when there is none.
+
+    An inductor CPU kernel starts its threads with GOMP_parallel and then
+    divides each loop among them itself, with omp_get_num_threads() and
+    omp_get_thread_num() (GCC inlines the static schedule). The linker looks
+    those two names up in the global scope first. cctbx built without OpenMP
+    puts stubs there -- libomptbx.so, loaded by scitbx.fftpack and so by
+    cctbx.miller, cctbx.xray and iotbx.pdb: one thread, numbered 0 -- while
+    the threads still come from torch's runtime, which is not in the global
+    scope. Every thread then takes itself for the only one and runs every
+    loop over its whole range: the scatter adds each atom once per thread and
+    the per-thread sums collide. Measured on one carbon with four threads:
+    F(000) = 23.99 for 5.998 without gradients, 740-780 and different each
+    run with them. No error.
+
+    Whatever answers the queries is foreign when GOMP_parallel is not in the
+    global scope with them: an OpenMP runtime loaded globally brings its
+    GOMP_parallel along, so the answers come from something that is not one.
+    That much needs no /proc/self/maps, which is read to name the library
+    and, when GOMP_parallel is global too, to see whether a different library
+    provides it (also foreign). Two real runtimes where only one is global
+    and it is not torch's are not told apart.
+
+    Linux only. That is where a global symbol captures a locally loaded
+    library's calls; macOS binds each library to the one it was linked
+    against. The first match in the global scope does not change once there
+    is one, so a verdict is kept; until the names are there at all, the lookup
+    is repeated on every call.
+    """
+    global _FOREIGN_OPENMP, _GLOBAL_SCOPE
+    if _FOREIGN_OPENMP is not None:
+        return _FOREIGN_OPENMP
+    if not sys.platform.startswith("linux"):
+        _FOREIGN_OPENMP = ""
+        return _FOREIGN_OPENMP
+    try:
+        if _GLOBAL_SCOPE is None:
+            _GLOBAL_SCOPE = ctypes.CDLL(None)
+
+        def owner(name):
+            address = ctypes.cast(getattr(_GLOBAL_SCOPE, name), ctypes.c_void_p).value
+            return _library_at(address)
+
+        queries = [name for name in _OPENMP_QUERIES if hasattr(_GLOBAL_SCOPE, name)]
+        if not queries:
+            return ""               # not global (yet): the kernel uses its own
+        if not hasattr(_GLOBAL_SCOPE, "GOMP_parallel"):
+            verdict = owner(queries[0]) or "a library that is not an OpenMP runtime"
+        else:
+            runtime = owner("GOMP_parallel")
+            verdict = ""
+            for path in map(owner, queries):
+                if path is not None and path != runtime:
+                    verdict = path
+                    break
+        _FOREIGN_OPENMP = verdict
+        return verdict
+    except (OSError, TypeError, ValueError):
+        return ""
+
+
 _CPU_KERNEL_CAPTURED = False
 
 
@@ -556,11 +639,32 @@ def _cpu_kernel_captured(args):
     the global scope (_kernel_symbol_is_global) means every kernel library
     loaded from now on would call it, so CPU calls run the eager core, with
     one warning, for the rest of the process (it cannot be unloaded).
+
+    The same for a foreign omp_get_thread_num in the global scope
+    (_foreign_openmp_library), while torch runs more than one thread: with
+    one thread the stub's answers are the right ones, and the compiled cores
+    are kept.
     """
-    global _CPU_KERNEL_CAPTURED
+    global _CPU_KERNEL_CAPTURED, _FOREIGN_OPENMP_WARNED
     first = next((a for a in args if isinstance(a, torch.Tensor)), None)
     if first is None or first.device.type != "cpu":
         return False
+    if not _CPU_KERNEL_CAPTURED and torch.get_num_threads() > 1:
+        library = _foreign_openmp_library()
+        if library:
+            if not _FOREIGN_OPENMP_WARNED:
+                _FOREIGN_OPENMP_WARNED = True
+                warnings.warn(
+                    "%s is answering the OpenMP thread queries in this "
+                    "process (cctbx built without OpenMP loads such stubs "
+                    "with scitbx.fftpack), so torch.compile's CPU kernels "
+                    "would run every loop once per thread and return wrong "
+                    "densities. lunus is using its eager density cores on "
+                    "the CPU while torch has more than one thread (CUDA is "
+                    "unaffected); results are unaffected, speed is not. One "
+                    "thread (torch_num_threads=1) keeps the compiled cores."
+                    % library, RuntimeWarning, stacklevel=3)
+            return True
     if not _CPU_KERNEL_CAPTURED and _kernel_symbol_is_global():
         _CPU_KERNEL_CAPTURED = True
         warnings.warn(
