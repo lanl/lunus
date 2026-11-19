@@ -23,8 +23,8 @@ version = "0.2.1"
 description = "Analysis and modeling of diffuse X-ray scattering from protein crystals"
 readme = { file = "README", content-type = "text/plain" }
 requires-python = ">=3.9"
-license = "BSD-3-Clause"
-license-files = ["LICENSE"]
+license = "BSD-3-Clause AND BSD-3-Clause-LBNL"
+license-files = ["LICENSE", "lunus/sf/THIRD_PARTY_NOTICES"]
 authors = [{ name = "Michael E. Wall" }]
 keywords = ["crystallography", "diffuse scattering", "structure factors", "X-ray"]
 classifiers = [

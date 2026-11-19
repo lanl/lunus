@@ -19,6 +19,8 @@ if TOOLS not in sys.path:
     sys.path.insert(0, TOOLS)
 
 import fit_solvent_rfactor as fsr  # noqa: E402
+# The fit runs in the library module; what it calls is patched there.
+import lunus.sf.scaling_torch as scaling  # noqa: E402
 
 
 def _synthetic(n=6000, n_bins=10, seed=0):
@@ -34,7 +36,7 @@ def _synthetic(n=6000, n_bins=10, seed=0):
                            torch.randn(n, generator=g, dtype=dt)) * 300.0
     bins = fsr.resolution_bins(inv_d2, n_bins)
     k_true = 1.0 + 0.3 * torch.sin(torch.arange(n_bins, dtype=dt) * 1.7)
-    F_c = fsr._f_calc(F_protein, F_mask, inv_d2, torch.tensor(0.35, dtype=dt),
+    F_c = scaling.inner_f_calc(F_protein, F_mask, inv_d2, torch.tensor(0.35, dtype=dt),
                       torch.tensor(46.0, dtype=dt))
     F_obs = k_true[bins] * torch.exp(-0.25 * 10.0 * inv_d2) * F_c.abs()
     work = torch.rand(n, generator=g).numpy() > 0.05
@@ -328,9 +330,9 @@ def test_per_bin_solvent_cut_removes_a_bump_beyond_the_first_zero(seed, monkeypa
     assert len(bump_bins) >= 2                  # bins lying wholly inside the bump
 
     with monkeypatch.context() as m:
-        m.setattr(fsr, "solvent_curve_rule",
+        m.setattr(scaling, "solvent_curve_rule",
                   lambda k, dmin, smooth=True, d_cut=3.0: torch.clamp(k, min=0))
-        m.setattr(fsr, "solvent_cut_index", lambda k, dmin, d_cut=3.0: len(k))
+        m.setattr(scaling, "solvent_cut_index", lambda k, dmin, d_cut=3.0: len(k))
         no_cut = fsr.fit_scales(F_obs, Fp, Fm, s2, s, work, aniso=False, bins=bins,
                                 solvent_bins=True, log=io.StringIO())
     assert all(no_cut["k_mask_bins"][i] > 0.04 for i in bump_bins)   # the bump is real
@@ -452,7 +454,7 @@ def test_coarse_scan_real_form_survives_cancelling_amplitudes(dt):
     w = 0.35 * torch.exp(-0.25 * 40.0 * s2)
     cancel = torch.arange(len(s2)) % 10 == 0
     Fm = torch.where(cancel, -Fp / w.to(Fp.dtype), Fm)
-    F_obs = fsr._f_calc(Fp, Fm, s2, torch.tensor(0.35, dtype=s2.dtype),
+    F_obs = scaling.inner_f_calc(Fp, Fm, s2, torch.tensor(0.35, dtype=s2.dtype),
                         torch.tensor(40.0, dtype=s2.dtype)).abs() * torch.exp(-0.25 * 5.0 * s2)
     cdt = torch.complex128 if dt == torch.float64 else torch.complex64
     Fo, Fp, Fm, s2 = F_obs[work].to(dt), Fp[work].to(cdt), Fm[work].to(cdt), s2[work].to(dt)
@@ -493,7 +495,7 @@ def test_binned_fit_from_init_is_the_binned_fit_from_scratch(aniso, cliff, solve
     def no_scan(*a, **kw):
         raise AssertionError("init= must skip the coarse scan")
     F_obs, Fp, Fm, s2, s, work, bins = data
-    monkeypatch.setattr(fsr, "coarse_scan", no_scan)
+    monkeypatch.setattr(scaling, "coarse_scan", no_scan)
     started = fsr.fit_scales(F_obs, Fp, Fm, s2, s, work, aniso, bins=bins,
                              solvent_bins=solvent_bins, log=open(os.devnull, "w"),
                              init=single)
@@ -527,27 +529,27 @@ def test_per_bin_solver_returns_each_bins_bounded_minimum(monkeypatch):
     its output is the solve's own: every bin's solvent scale is the minimum
     over [0, SOLVENT_BIN_MAX] of that bin's residual at the closed-form
     scale, checked against a 0.0005 grid computed here independently."""
-    monkeypatch.setattr(fsr, "solvent_curve_rule", lambda k, d, **kw: k.clamp(min=0.0))
+    monkeypatch.setattr(scaling, "solvent_curve_rule", lambda k, d, **kw: k.clamp(min=0.0))
     F_obs, Fp, Fm, s2, s, work, bins, d = _synthetic_cliff(seed=4, bump=0.3)
-    monkeypatch.setattr(fsr, "solvent_cut_index", lambda k, d, **kw: len(k))
+    monkeypatch.setattr(scaling, "solvent_cut_index", lambda k, d, **kw: len(k))
     expo = fsr.fit_scales(F_obs, Fp, Fm, s2, s, work, aniso=True, bins=bins,
                           log=open(os.devnull, "w"))
     n_bins = int(bins.max()) + 1
     d_min_bins = [float(1.0 / torch.sqrt(s2[bins == i].max())) for i in range(n_bins)]
     s2_bins = [float(s2[bins == i].mean()) for i in range(n_bins)]
     Fo, Fpw, Fmw, s2w, sw, bw = F_obs[work], Fp[work], Fm[work], s2[work], s[work], bins[work]
-    km, lk = fsr._fit_solvent_bins(Fo, Fpw, Fmw, s2w, sw, bw, n_bins, expo["log_k_bins"],
+    km, lk = scaling._fit_solvent_bins(Fo, Fpw, Fmw, s2w, sw, bw, n_bins, expo["log_k_bins"],
                                    expo["u_params"], True, expo["k_sol"], expo["b_sol"],
                                    d_min_bins, s2_bins)
     zero = torch.zeros((), dtype=s2.dtype)
-    A = fsr._scaled_amplitudes(torch.ones_like(Fpw), s2w, sw, zero, expo["u_params"], True)
-    grid = torch.linspace(0.0, fsr.SOLVENT_BIN_MAX, 2001, dtype=s2.dtype)
+    A = scaling.scaled_amplitudes(torch.ones_like(Fpw), s2w, sw, zero, expo["u_params"], True)
+    grid = torch.linspace(0.0, scaling.SOLVENT_BIN_MAX, 2001, dtype=s2.dtype)
 
     def resid(k, sel):                    # k: (m,) -> (m,) residuals in the bin
         g = A[sel][None, :] * (Fpw[sel][None, :] + k[:, None] * Fmw[sel][None, :]).abs()
         fo = Fo[sel][None, :]
         return (fo * fo).sum(1) - (fo * g).sum(1) ** 2 / (g * g).sum(1)
-    assert ((km >= 0) & (km <= fsr.SOLVENT_BIN_MAX)).all()
+    assert ((km >= 0) & (km <= scaling.SOLVENT_BIN_MAX)).all()
     assert len(set(round(float(k), 3) for k in km)) > 3      # bins really differ
     for i in range(n_bins):
         sel = bw == i
@@ -606,9 +608,9 @@ def test_per_bin_solvent_scale_is_bounded_as_mmtbx_bounds_it(monkeypatch):
     assert float(km.max()) <= 1.0 + 1e-12, (
         "per-bin solvent scale ran away to %.3g; mmtbx's grid stops at 1.0" % float(km.max()))
     assert (km >= 0).all()
-    assert fsr.SOLVENT_BIN_MAX == 1.0
+    assert scaling.SOLVENT_BIN_MAX == 1.0
     with monkeypatch.context() as m:
-        m.setattr(fsr, "SOLVENT_BIN_MAX", None)
+        m.setattr(scaling, "SOLVENT_BIN_MAX", None)
         free = fsr.fit_scales(F_obs, Fp, Fm, s2, s, work, aniso=False, bins=bins,
                               solvent_bins=True, log=io.StringIO())
     assert float(free["k_mask_bins"].max()) > 2.0, free["k_mask_bins"]

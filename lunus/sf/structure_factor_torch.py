@@ -14,7 +14,19 @@ composes with density_torch.compute_density to give end-to-end gradients
 from F(hkl) all the way back to atomic fractional coordinates.
 """
 
+from collections import namedtuple
+
 import torch
+
+
+# What return_parts=True returns: the usual F_total and the two terms it is
+# made of, F_total = k_overall exp(-h.U.h) [F_protein + k_sol exp(-b_sol s^2/4)
+# F_mask] at the SolventModel's parameters. F_mask carries the density scale
+# (the supercell fold's cell count times SolventModel.density_scale; see
+# solvent_torch.f_total), so F_protein + k F_mask has k on the per-cell scale
+# k_sol is on, and a scale fitted to the two (scaling_torch.BraggScaler) is
+# comparable to the conventional 0.35 e/A^3 whether or not a box was folded.
+SolventParts = namedtuple("SolventParts", ["F_total", "F_protein", "F_mask"])
 
 
 def reciprocal_inv_d2(orth_matrix: torch.Tensor, hkl: torch.Tensor) -> torch.Tensor:
@@ -59,7 +71,7 @@ def structure_factors_one_config(
     grid_shape, orth_matrix, cell_volume,
     hkl, taper_width, blur=0.0, max_atoms_per_batch=50_000,
     grid_ops=None, compile_core=True, solvent=None, supercell=None,
-    mask_kernels=None, mask_occ=None,
+    mask_kernels=None, mask_occ=None, return_parts=False,
 ):
     """One configuration, start to finish: density -> symmetrize -> FFT ->
     extract F(hkl). Differentiable with respect to frac_coords. atom_A/atom_lam/
@@ -115,10 +127,21 @@ def structure_factors_one_config(
     With solvent.spheres, mask_kernels is the 6-tuple mask_spheres.
     sphere_kernels() returns (its last entry the field's own element index,
     all zeros, since the sphere kernels are grouped by radius rather than
-    element) and mask_occ is the plain occupancies."""
+    element) and mask_occ is the plain occupancies.
+
+    return_parts: False (default) returns F_total (F_protein without
+    solvent), as always. True, with solvent given, returns a SolventParts
+    (F_total, F_protein, F_mask) instead: F_total exactly as the default
+    returns it, and the two terms a scale fit needs separately
+    (scaling_torch.BraggScaler); see SolventParts for F_mask's scale. All
+    three are differentiable. Without solvent there is no F_mask and it
+    raises."""
     from .density_torch import compute_density
     from .symmetry_torch import fold_supercell, symmetrize_sum
 
+    if return_parts and solvent is None:
+        raise ValueError("return_parts=True needs solvent=: without a solvent "
+                         "model there is no F_mask")
     uses_field = solvent is not None and (solvent.source_b is not None or solvent.spheres)
     if solvent is not None and solvent.spheres and (mask_kernels is None or len(mask_kernels) != 6):
         raise ValueError(
@@ -195,19 +218,29 @@ def structure_factors_one_config(
         # density is that many cells' worth while the mask is still in [0,1];
         # k_sol has to be scaled to match. See f_total's density_scale.
         n_cells = n[0] * n[1] * n[2]
-        return f_total(
+        F_total = f_total(
             F_protein, F_mask, reciprocal_inv_d2(orth_matrix, hkl),
             k_sol=solvent.k_sol, b_sol=solvent.b_sol,
             k_overall=solvent.k_overall, u_aniso=solvent.u_aniso, hkl=hkl,
             density_scale=solvent.density_scale * n_cells)
+        if return_parts:
+            return SolventParts(F_total, F_protein,
+                                F_mask * (solvent.density_scale * n_cells))
+        return F_total
     # Built from the symmetry-expanded density, per the note above. The mask
     # FFT happens here rather than outside so that it lands INSIDE the
     # checkpointed region in structure_factors_batch -- otherwise the density
     # grid is retained for every configuration at once and the peak memory
     # checkpointing exists to control comes straight back.
-    F_total, _mask = solvent.apply(density, F_protein, cell_volume, hkl,
-                                   orth_matrix, pipeline_blur=blur,
-                                   source=source)
+    F_total, _, F_mask = solvent.apply(density, F_protein, cell_volume, hkl,
+                                       orth_matrix, pipeline_blur=blur,
+                                       source=source)
+    if return_parts:
+        # apply()'s own F_mask, the one F_total was built from: no second FFT.
+        # It comes back unscaled, and apply() was called without its
+        # density_scale argument, so solvent.density_scale is the whole of the
+        # scale F_total used; pass one above and it must be applied here too.
+        return SolventParts(F_total, F_protein, F_mask * solvent.density_scale)
     return F_total
 
 
@@ -218,7 +251,7 @@ def structure_factors_batch(
     hkl, taper_width, blur=0.0, max_atoms_per_batch=50_000,
     grid_ops=None, compile_core=True,
     use_checkpoint=False, solvent=None, supercell=None,
-    mask_kernels=None, mask_occ=None,
+    mask_kernels=None, mask_occ=None, return_parts=False,
 ):
     """N configurations at once: (N, n_atoms, 3) -> (N, n_refl) complex.
 
@@ -289,8 +322,16 @@ def structure_factors_batch(
     wants to be wider here than Bragg accuracy alone would suggest.
 
     Returns a (N, n_refl) complex tensor; pass it straight to
-    mean_and_diffuse() for the ensemble observables.
+    mean_and_diffuse() for the ensemble observables. With return_parts=True
+    (solvent required) a SolventParts of three (N, n_refl) tensors instead,
+    F_total, F_protein and F_mask per configuration, as
+    structure_factors_one_config returns them. For the Bragg term the
+    ensemble means of F_protein and F_mask are what a scale fit takes: the
+    model is linear in them at fixed solvent scale.
     """
+    if return_parts and solvent is None:
+        raise ValueError("return_parts=True needs solvent=: without a solvent "
+                         "model there is no F_mask")
     if frac_coords_batch.dim() != 3 or frac_coords_batch.shape[-1] != 3:
         raise ValueError(
             "frac_coords_batch must be (n_configs, n_atoms, 3), got %s"
@@ -354,12 +395,18 @@ def structure_factors_batch(
             grid_ops=grid_ops, compile_core=compile_core,
             solvent=solvent, supercell=supercell,
             mask_kernels=mask_kernels, mask_occ=mask_row,
+            return_parts=return_parts,
         )
 
+    def stacked(results):
+        if return_parts:
+            return SolventParts(*(torch.stack([r[i] for r in results], dim=0)
+                                  for i in range(3)))
+        return torch.stack(results, dim=0)
+
     if not use_checkpoint:
-        return torch.stack(
-            [one(fc, oc, mo) for fc, oc, mo
-             in zip(frac_coords_batch, occ_rows, mask_rows)], dim=0)
+        return stacked([one(fc, oc, mo) for fc, oc, mo
+                        in zip(frac_coords_batch, occ_rows, mask_rows)])
 
     from torch.utils.checkpoint import checkpoint
 
@@ -371,11 +418,9 @@ def structure_factors_batch(
     #
     # preserve_rng_state=False: the density calculation draws no random numbers, so there is
     # no RNG state worth saving and restoring per configuration.
-    return torch.stack(
+    return stacked(
         [checkpoint(one, fc, oc, mo, use_reentrant=False, preserve_rng_state=False)
-         for fc, oc, mo in zip(frac_coords_batch, occ_rows, mask_rows)],
-        dim=0,
-    )
+         for fc, oc, mo in zip(frac_coords_batch, occ_rows, mask_rows)])
 
 
 def mean_and_diffuse(F_configs: torch.Tensor):
