@@ -315,6 +315,89 @@ if __name__=="__main__":
   else:
     selection_text = args.pop(idx).split("=")[1]
 
+# nearest_waters -- of the waters in the selection, keep only the ones
+# nearest the solute, and choose them again in EVERY frame (default: off, all
+# the selected waters are kept).
+#
+# An ordered water site is ordered only in the average: any one molecule
+# moves in and out of it. So the choice is by distance in each frame, not by
+# identity, and the NUMBER kept is the same in every frame, which keeps the
+# scattering power constant across the ensemble.
+#
+#   nearest_waters=first    the count is the mean number of waters in the
+#                           first solvation shell, measured up front on up to
+#                           ten frames spread over first..last
+#   nearest_waters=second   the same for the first and second shells together
+#   nearest_waters=N        keep N waters; nothing is measured up front
+#
+# first and second measure the count on THIS run's first..last, so runs over
+# different frame ranges get different counts. Pieces of one ensemble that
+# are to be combined (partial_sum=True) should all be given the same
+# nearest_waters=N instead; the run prints the count it measured.
+#
+# A water is in the shell when its oxygen is within nearest_waters_cutoff=
+# (Angstrom; default 3.5 for first, 6.0 for second) of a non-hydrogen solute
+# atom. The solute is the selected PROTEIN atoms, so that a free ion out in
+# the solvent does not count the waters around it as ordered. Ligands and
+# bound ions are left out by the same rule, as is a modified residue whose
+# name mdtraj does not know as protein; nearest_waters_ref= names the solute
+# with an atom selection instead, for example
+#
+#   nearest_waters_ref="protein or resname NAP or resname FOL"
+#
+# The default goes by mdtraj's residue names, which include the force fields'
+# variants (HID, HIE, CYX, ...). nearest_waters_ref= is an iotbx selection
+# like selection=, and iotbx's own "protein" is narrower: on the 7FPV MD
+# topology it leaves out every histidine. Check the atom count the run
+# prints. Either way the solute is only what distances are measured TO: which
+# atoms enter the calculation is selection='s business alone, ions included.
+# Distances use the trajectory's own periodic box frame by frame, not
+# unit_cell=, which may be a different cell.
+#
+# The rest of the selection is unchanged, and a water contributes whichever
+# of its atoms the selection includes: with selection="not element H" the
+# waters are oxygens only. The search is on a grid (lunus/sf/nearest_waters.py)
+# and is timed as the "nearest waters" phase under torch_timing=True.
+#
+# All three are matched with their "=" so that the first does not swallow the
+# other two.
+
+  try:
+    idx = [a.find("nearest_waters=")==0 for a in args].index(True)
+  except ValueError:
+    nearest_waters = None
+  else:
+    nearest_waters = args.pop(idx).split("=")[1]
+    if nearest_waters not in ("first", "second"):
+      try:
+        nearest_waters = int(nearest_waters)
+      except ValueError:
+        raise ValueError(
+          "nearest_waters must be first, second or a number of waters; got {0!r}"
+          .format(nearest_waters))
+      if nearest_waters < 0:
+        raise ValueError("nearest_waters cannot be negative")
+
+  try:
+    idx = [a.find("nearest_waters_cutoff=")==0 for a in args].index(True)
+  except ValueError:
+    nearest_waters_cutoff = None
+  else:
+    nearest_waters_cutoff = float(args.pop(idx).split("=")[1])
+    # Refused here, on every rank alike, rather than as the search's own
+    # "r_max must be positive" from inside the frame loop.
+    if not nearest_waters_cutoff > 0:
+      raise ValueError(
+        "nearest_waters_cutoff must be a positive distance in Angstrom; got %g"
+        % nearest_waters_cutoff)
+
+  try:
+    idx = [a.find("nearest_waters_ref=")==0 for a in args].index(True)
+  except ValueError:
+    nearest_waters_ref = None
+  else:
+    nearest_waters_ref = args.pop(idx).split("=")[1]
+
 # d_min
 
   try:
@@ -1049,6 +1132,9 @@ if __name__=="__main__":
   # so that every rank stops instead of waiting in a broadcast.
   pdb_in = selection_mask = n_atoms_cctbx = n_atoms_mdtraj = None
   setup_error = None
+  # nearest_waters= : the index tables the frame loop chooses waters from,
+  # built on rank 0 with the count and broadcast. None when the option is off.
+  nw = None
   if mpi_rank == 0:
     try:
       pdb_in = hierarchy.input(file_name=top_file,sort_atoms=False)
@@ -1070,7 +1156,96 @@ if __name__=="__main__":
       else:
         from lunus.sf.atom_order import selection_in_file_order
         selection_mask = selection_in_file_order(pdb_in, selection_text)
-      n_atoms_mdtraj = md.load_topology(top_file).n_atoms
+      md_top = md.load_topology(top_file)
+      n_atoms_mdtraj = md_top.n_atoms
+      # With mismatched atom counts the tables below would index the wrong
+      # atoms; the check after the broadcast stops the run with its own
+      # message.
+      if nearest_waters is not None and n_atoms_mdtraj == n_atoms_cctbx:
+        from lunus.sf.nearest_waters import (
+          water_tables, water_atom_mask, protein_atom_mask, heavy_atom_mask,
+          min_distances)
+        nw_is_water = water_atom_mask(md_top)
+        nw_pos_idx, nw_atoms = water_tables(md_top, selection_mask)
+        if len(nw_pos_idx) == 0:
+          raise ValueError(
+            "nearest_waters: the selection %r holds no water atoms to choose "
+            "from. The option keeps a subset of the SELECTED waters, so the "
+            "selection must include them." % selection_text)
+        if nearest_waters_ref is None:
+          nw_ref_mask = selection_mask & protein_atom_mask(md_top)
+          nw_ref_text = "the selected protein atoms"
+        else:
+          from lunus.sf.atom_order import selection_in_file_order
+          nw_ref_mask = selection_in_file_order(pdb_in, nearest_waters_ref) & ~nw_is_water
+          nw_ref_text = "nearest_waters_ref=%r" % nearest_waters_ref
+        nw_ref_idx = np.nonzero(nw_ref_mask & heavy_atom_mask(md_top))[0]
+        if len(nw_ref_idx) == 0:
+          raise ValueError(
+            "nearest_waters: no non-hydrogen solute atoms to measure "
+            "distances to (%s). Name the solute with nearest_waters_ref= if "
+            "it is not protein." % nw_ref_text)
+        print("nearest_waters: %d waters in the selection, %d selected atom(s) "
+              "each; distances from the water oxygen to %d non-hydrogen atoms "
+              "(%s)" % (len(nw_pos_idx), nw_atoms.shape[1], len(nw_ref_idx),
+                        nw_ref_text))
+
+        if isinstance(nearest_waters, int):
+          nw_count = nearest_waters
+          # Only where the per-frame search starts; it widens as needed.
+          nw_radius = 3.5 if nearest_waters_cutoff is None else nearest_waters_cutoff
+          print("nearest_waters: keeping %d waters per frame, as given" % nw_count)
+        else:
+          if nearest_waters_cutoff is None:
+            nw_cutoff = 3.5 if nearest_waters == "first" else 6.0
+          else:
+            nw_cutoff = nearest_waters_cutoff
+          # Up to ten frames spread over the run. One frame would do for a
+          # count, but the count fluctuates and the mean is what the fixed
+          # number should be.
+          nw_sample = np.unique(np.linspace(first, last, min(10, nsteps)).round().astype(int))
+          nw_counts = []
+          for nw_frame in nw_sample:
+            nw_t = md.load_frame(traj_file, int(nw_frame), top=md_top)
+            # Rounded as the frame loop rounds, so both see the same numbers.
+            nw_xyz = np.around(np.array(nw_t.xyz[0]*10., dtype=np.float64), 3)
+            nw_cell = (None if nw_t.unitcell_vectors is None
+                       else np.array(nw_t.unitcell_vectors[0]*10., dtype=np.float64))
+            nw_d = min_distances(nw_xyz[nw_pos_idx], nw_xyz[nw_ref_idx], nw_cell, nw_cutoff)
+            nw_counts.append(int(np.isfinite(nw_d).sum()))
+          nw_count = int(round(float(np.mean(nw_counts))))
+          nw_radius = nw_cutoff + 1.0
+          print("nearest_waters: %s shell, water oxygens within %g A; counted "
+                "on frames %s: %s" % (
+                  "first" if nearest_waters == "first" else "first and second",
+                  nw_cutoff, nw_sample.tolist(), nw_counts))
+          print("nearest_waters: keeping %d waters per frame (mean %.1f, "
+                "range %d-%d)" % (nw_count, np.mean(nw_counts),
+                                  min(nw_counts), max(nw_counts)))
+          if partial_sum_mode:
+            print("nearest_waters: WARNING, partial_sum=True and the count was "
+                  "measured on this run's frames %d..%d alone. A run over "
+                  "another frame range measures its own, and sums over "
+                  "different numbers of waters do not combine: pass "
+                  "nearest_waters=%d to every piece." % (first, last, nw_count))
+        if nw_count > len(nw_pos_idx):
+          raise ValueError(
+            "nearest_waters: %d waters requested but the selection holds only "
+            "%d" % (nw_count, len(nw_pos_idx)))
+
+        nw = dict(
+          count=nw_count, radius=nw_radius,
+          pos_idx=nw_pos_idx, atoms=nw_atoms, ref_idx=nw_ref_idx,
+          fixed_idx=np.nonzero(selection_mask & ~nw_is_water)[0],
+          # Every atom a frame could select: what the user's selection said.
+          union_mask=selection_mask.copy())
+        # From here on selection_mask is a stand-in with the right atom
+        # COUNT -- the fixed atoms and the first nw_count waters in file
+        # order -- for the setup below, which sizes arrays and reads off
+        # elements from it. Each frame makes its own choice.
+        selection_mask = np.zeros(n_atoms_cctbx, dtype=bool)
+        selection_mask[nw["fixed_idx"]] = True
+        selection_mask[nw_atoms[:nw_count].ravel()] = True
     except Exception as e:
       if not mpi_enabled():
         raise
@@ -1082,12 +1257,14 @@ if __name__=="__main__":
       pdb_bytes = pickle.dumps(pdb_in, protocol=4)
     else:
       pdb_bytes = None
-    pdb_bytes, setup_error, selection_mask, n_atoms_cctbx, n_atoms_mdtraj = mpi_comm.bcast(
-      (pdb_bytes, setup_error, selection_mask, n_atoms_cctbx, n_atoms_mdtraj), root=0)
+    pdb_bytes, setup_error, selection_mask, n_atoms_cctbx, n_atoms_mdtraj, nw = mpi_comm.bcast(
+      (pdb_bytes, setup_error, selection_mask, n_atoms_cctbx, n_atoms_mdtraj, nw), root=0)
     if mpi_rank != 0:
       pdb_in = pickle.loads(pdb_bytes)
     if setup_error is not None:
-      raise SystemExit("xtraj: reading the topology %s failed on rank 0: %s"
+      # Not only the topology read: the selection and the nearest_waters=
+      # setup, which reads trajectory frames, fail through here as well.
+      raise SystemExit("xtraj: setup from the topology %s failed on rank 0: %s"
                        % (top_file, setup_error))
 
   # mdtraj keeps only the first conformer of each atom; cctbx keeps them all.
@@ -1422,7 +1599,18 @@ if __name__=="__main__":
               torch_threads, ") per rank to avoid oversubscription (torch_num_threads=N "
               "to change; keep mpi_size*N near the physical core count)")
 
-    torch_elements_present = sorted(set(s.scattering_type for s in xrs_sel.scatterers()))
+    # The atoms the kernels are built for. Under nearest_waters= that is every
+    # atom a frame could select, not the stand-in selection xrs_sel holds: the
+    # per-atom kernels below are gathered from it frame by frame.
+    if nw is None:
+      xrs_kernel = xrs_sel
+    else:
+      xrs_kernel = xrs.select(flex.bool(nw["union_mask"].tolist()))
+      # Row of xrs_kernel for each atom of the topology (meaningless outside
+      # the union, which no frame selects).
+      nw_kernel_row = np.cumsum(nw["union_mask"]) - 1
+
+    torch_elements_present = sorted(set(s.scattering_type for s in xrs_kernel.scatterers()))
     # Read the scattering coefficients for exactly the elements in this
     # structure. They come from gemmi or cctbx at run time rather than from a
     # table stored here, so any element those libraries know is supported
@@ -1491,9 +1679,9 @@ if __name__=="__main__":
       # xrs_sel.scatterers(): the scatterer-array overload requires a unit_cell
       # argument (to convert u_star -> u_equiv) and raises Boost.Python
       # ArgumentError without one. This matches the gemmi branch's working call.
-      torch_u_isos_setup = np.array(xrs_sel.extract_u_iso_or_u_equiv())
+      torch_u_isos_setup = np.array(xrs_kernel.extract_u_iso_or_u_equiv())
       torch_b_per_atom_setup = torch_u_isos_setup * (8.0 * np.pi ** 2)  # U -> B, same as the gemmi branch
-      torch_elements_per_atom_setup = [s.scattering_type for s in xrs_sel.scatterers()]
+      torch_elements_per_atom_setup = [s.scattering_type for s in xrs_kernel.scatterers()]
 
       # THE FFT-ARTIFACT BLUR. Placing a sharp atom onto a finite grid
       # samples it badly; placing a spread one and removing the spread in
@@ -1586,6 +1774,15 @@ if __name__=="__main__":
         [torch_element_to_idx[s.scattering_type] for s in xrs_sel.scatterers()],
         dtype=np.int64,
       )
+      if nw is not None:
+        # nearest_waters= changes the selection every frame, so the frame
+        # loop gathers from these whole-topology arrays instead. -1 marks an
+        # element no frame can select.
+        torch_occ_all_np = np.array(xrs.scatterers().extract_occupancies())
+        torch_element_idx_all_np = np.array(
+          [torch_element_to_idx.get(s.scattering_type, -1) for s in xrs.scatterers()],
+          dtype=np.int64,
+        )
 
       if mpi_rank == 0:
         print("torch engine: bypassing the per-frame xray.structure round trip"
@@ -1869,6 +2066,13 @@ EOF
     
   ti = md.iterload(traj_file,chunk=chunklist[work_rank],top=top_file,skip=skiplist[work_rank])
 
+  if nw is not None:
+    from lunus.sf.nearest_waters import nearest_points
+    # Where each frame's search starts. The choice does not depend on it, only
+    # the number of passes, so after the first frame it follows the distance
+    # the last frame's waters were found within.
+    nw_search_radius = nw["radius"]
+
 # Each MPI rank works with its own trajectory chunk t
   
   chunk_ct = 0
@@ -1962,6 +2166,32 @@ EOF
 
       for i in range(num_elems):
 
+        # nearest_waters=: this frame's selection, as ascending row indices
+        # into the trajectory's atom axis -- the fixed atoms plus the atoms
+        # of the nw["count"] waters nearest the solute in THIS frame, in the
+        # trajectory's own periodic box. Taken from tsites, before any
+        # translational fit, which moves every atom alike.
+        if nw is not None:
+          with host_phase("nearest waters"):
+            nw_cell = (None if t.unitcell_vectors is None
+                       else np.array(t.unitcell_vectors[i]*10., dtype=np.float64))
+            nw_pick, nw_farthest = nearest_points(
+              tsites[i][nw["pos_idx"]], tsites[i][nw["ref_idx"]], nw_cell,
+              nw["count"], nw_search_radius)
+            if nw["count"] > 0:
+              nw_search_radius = nw_farthest + 1.0
+            frame_sel_idx = np.sort(np.concatenate(
+              (nw["fixed_idx"], nw["atoms"][nw_pick].ravel())))
+          if mpi_rank == 0 and chunk_ct == 0 and i == 0:
+            print("nearest_waters: first frame on rank 0, the %d waters kept "
+                  "lie within %.2f A of the solute (%d atoms selected)"
+                  % (nw["count"], nw_farthest, len(frame_sel_idx)))
+            if nw_cell is None:
+              print("nearest_waters: WARNING, the trajectory carries no "
+                    "periodic box, so distances are NOT periodic: a water "
+                    "that is near the solute only through the box boundary "
+                    "is not counted or chosen")
+
         # overwrite crystal structure coords with trajectory coords
 
         # Skipped entirely under the torch bypass, which reads the frame's
@@ -2001,7 +2231,10 @@ EOF
     #   (under the torch bypass the selection was applied once, at setup)
         if not torch_bypass_xrs:
           with host_phase("xrs.select"):
-            xrs_sel = xrs.select(selection)
+            if nw is None:
+              xrs_sel = xrs.select(selection)
+            else:
+              xrs_sel = xrs.select(flex.size_t(frame_sel_idx.tolist()))
         if engine == "sfall":
           t_engine = time.time()
           pdbtmp = xrs_sel.as_pdb_file()
@@ -2161,10 +2394,17 @@ EOF
             # coordinates fractionalized in one matmul, and the occupancies and
             # element indices computed once at setup.
             with host_phase("frac coords"):
-              cart_np = tsites[i] if torch_sel_idx is None else tsites[i][torch_sel_idx]
+              if nw is not None:
+                cart_np = tsites[i][frame_sel_idx]
+              else:
+                cart_np = tsites[i] if torch_sel_idx is None else tsites[i][torch_sel_idx]
               coords_frac_np = cart_np @ torch_frac_matrix_np.T
-            occ_np = torch_occ_np
-            element_idx_np = torch_element_idx_np
+            if nw is not None:
+              occ_np = torch_occ_all_np[frame_sel_idx]
+              element_idx_np = torch_element_idx_all_np[frame_sel_idx]
+            else:
+              occ_np = torch_occ_np
+              element_idx_np = torch_element_idx_np
           else:
             with host_phase("sites_frac+occ"):
               coords_frac_np = xrs_sel.sites_frac().as_double().as_numpy_array().reshape((-1, 3))
@@ -2183,7 +2423,15 @@ EOF
             occ_t = torch.tensor(occ_np, dtype=torch_dtype, device=torch_device)
             element_idx_t = torch.tensor(element_idx_np, dtype=torch.long, device=torch_device)
 
-          if use_top_bfacs:
+          if use_top_bfacs and nw is not None:
+            # The kernels were built for every atom a frame could select;
+            # take this frame's rows, so each water keeps its own B.
+            nw_rows_t = torch.as_tensor(
+              nw_kernel_row[frame_sel_idx], dtype=torch.long, device=torch_device)
+            atom_A_t = torch_atom_A[nw_rows_t]
+            atom_lam_t = torch_atom_lam[nw_rows_t]
+            atom_radius_ang_t = torch_atom_radius_ang[nw_rows_t]
+          elif use_top_bfacs:
             assert torch_atom_A.shape[0] == frac_t.shape[0], (
               f"per-frame atom count ({frac_t.shape[0]}) doesn't match the "
               f"setup-time count ({torch_atom_A.shape[0]}) that the per-atom B-factor "
