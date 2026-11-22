@@ -105,6 +105,44 @@ SIGMA_UA = {
 }
 EDGE_WIDTH_DEFAULT = 0.5       # A
 
+# The fixed level of the sphere field, in "sphere overlaps": one sphere's
+# plateau for a model without hydrogens, rising with the hydrogen fraction h
+# for a model with them (a hydrogen is a sphere of its own, and its residue's
+# sp3 carbons go bare, which packs the field deeper). Measured against
+# calibration to gemmi's occupancy (binned R-free gap to mmtbx, 2026-11-19 to
+# 11-22; docs/solvent-design.md, "A fixed level instead of a calibration"),
+# at the default offset and edge, no extra smoothing, taper half the level.
+# The slope is per radius table: 0.89 for the united-atom table (fitted on 92
+# models with hydrogens, held at 1.0 at h = 0, and tested on a hold-out of 39
+# at 1.5-1.8 A: median gap -0.0028, as calibrated), 1.17 for element radii on
+# every atom (the same 92 and 39: -0.0023 against -0.0025 calibrated). Only
+# four measured models are partly protonated (h 0.17-0.42); on them the rule
+# sits 0.12-0.24 above the calibrated level and costs -0.0016 to +0.0008.
+SPHERE_LEVEL_FIXED = 1.0
+SPHERE_LEVEL_H_SLOPE_UA = 0.89
+SPHERE_LEVEL_H_SLOPE_ELEMENT = 1.17
+
+
+def sphere_level(n_atoms, n_hydrogens, by_element=False):
+    """The sphere field's fixed level for a model of n_atoms atoms, n_hydrogens
+    of them hydrogen or deuterium (is_hydrogen), every atom counted: protein,
+    waters, ligands. SPHERE_LEVEL_FIXED + slope * h, h = n_hydrogens / n_atoms,
+    with the united-atom slope, or the element one when every atom has its
+    element radius (by_element, as sphere_radii's argument of that name).
+    Exactly SPHERE_LEVEL_FIXED without hydrogens. A united-atom model whose
+    ligands or ions fall back to element radii is still a united-atom model:
+    its slope was measured on such models."""
+    if n_atoms <= 0:
+        raise ValueError("sphere_level needs at least one atom, got %d" % n_atoms)
+    if not 0 <= n_hydrogens <= n_atoms:
+        raise ValueError("sphere_level: %d hydrogens among %d atoms"
+                         % (n_hydrogens, n_atoms))
+    if n_hydrogens == 0:
+        return SPHERE_LEVEL_FIXED
+    slope = SPHERE_LEVEL_H_SLOPE_ELEMENT if by_element else SPHERE_LEVEL_H_SLOPE_UA
+    return SPHERE_LEVEL_FIXED + slope * n_hydrogens / n_atoms
+
+
 _AROMATIC_RES = {"PHE", "TYR", "TRP", "HIS", "HID", "HIE", "HIP"}
 _STANDARD = {"ALA", "ARG", "ASN", "ASP", "CYS", "GLN", "GLU", "GLY", "HIS", "ILE", "LEU",
              "LYS", "MET", "PHE", "PRO", "SER", "THR", "TRP", "TYR", "VAL", "MSE",

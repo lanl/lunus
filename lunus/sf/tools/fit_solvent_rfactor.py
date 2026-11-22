@@ -63,21 +63,22 @@ while the bulk mask covers only the disordered remainder: the ordered waters
 and ligands in the model occupy the rest. gemmi's mask on the same coordinates
 already makes that subtraction, which is why it is the target.
 
-FOR A MODEL WITHOUT HYDROGENS THERE IS NO CALIBRATION, since 2026-11-10:
---mask-level auto (the default) cuts the sphere field at 1.0 sphere overlaps,
-where the calibration lands anyway (median 0.93-0.95): with no search and no
-gemmi target it gains at 2.6-3.0 A, ties at 1.8-2.6 A and is within 0.001 of
-calibration on every SW40 entry (slightly worse on more of them than better;
-mask_level_rule has the numbers). Models with
-hydrogens are still calibrated as below, because their extra spheres push
-the right level to 1.1-1.5 with the hydrogen fraction; so are the atoms and
-density sources, --target-occupancy, and a sphere field built with any of
---sphere-offset, --sphere-edge, --sphere-radii, --mask-blur or --taper-frac
-away from its default. --mask-level calibrate calibrates
-every model; a number cuts at that level, in sphere overlaps for the sphere
-field or atoms/A^3 for the atoms source (whose auto still calibrates: no
-fixed level has been measured for it). See docs/solvent-design.md, "A
-fixed level instead of a calibration".
+THE SPHERE FIELD HAS NO CALIBRATION BY DEFAULT, since 2026-11-10 for models
+without hydrogens and 2026-11-22 for models with them: --mask-level auto
+(the default) cuts it at a fixed level, 1.0 sphere overlaps without
+hydrogens and 1.0 + 0.89 h with them (h the hydrogen fraction; 1.0 + 1.17 h
+with --sphere-radii element). Without hydrogens that is where the
+calibration lands anyway; with them the rule can sit above the calibrated
+level (by 0.12-0.24 on partly protonated models, 1.407 against 1.195 on 7FPV
+at 3 A), but on 1,000+ entries and a 1.5-1.8 A hold-out it ties calibration
+in R-free in the median, with no search and no gemmi target
+(mask_level_rule has the numbers). Still calibrated as below: the atoms and density sources, --target-occupancy, and
+a sphere field built with any of --sphere-offset, --sphere-edge,
+--mask-blur or --taper-frac away from its default. --mask-level calibrate
+calibrates every model; a number cuts at that level, in sphere overlaps for
+the sphere field or atoms/A^3 for the atoms source (whose auto still
+calibrates: its measured level, 0.024, drifts with the water fraction). See
+docs/solvent-design.md, "A fixed level instead of a calibration".
 
 THE TARGET IS MEASURED ON A FIXED REFERENCE GRID (--target-spacing, default
 0.7 A), not on the working grid, since 2026-11-10. gemmi's occupancy on a
@@ -911,11 +912,14 @@ protein_blur_arg = keyword_or_number_arg("auto", "--protein-blur", "A^2", allow_
 
 # --mask-level: "auto", "calibrate" (to gemmi's occupancy), or a level > 0 in
 # the unit of the field it cuts: sphere overlaps for the sphere field,
-# atoms/A^3 for the atom-presence field (MASK_LEVEL_UNITS). auto is
-# MASK_LEVEL_FIXED for a sphere field of a model without hydrogens and
-# calibration for everything else (mask_level_rule says why).
+# atoms/A^3 for the atom-presence field (MASK_LEVEL_UNITS). auto is the
+# sphere field's fixed level, mask_spheres.sphere_level (MASK_LEVEL_FIXED
+# without hydrogens, rising with the hydrogen fraction), and calibration for
+# everything else (mask_level_rule says why).
 MASK_LEVEL_DEFAULT = "auto"
-MASK_LEVEL_FIXED = 1.0
+from lunus.sf.mask_spheres import SPHERE_LEVEL_FIXED as MASK_LEVEL_FIXED  # noqa: E402
+from lunus.sf.mask_spheres import (  # noqa: E402
+    SPHERE_LEVEL_H_SLOPE_ELEMENT, SPHERE_LEVEL_H_SLOPE_UA)
 # the mask sources a fixed level can cut, with its unit and the field's name
 MASK_LEVEL_UNITS = {"spheres": "sphere overlaps", "atoms": "atoms/A^3"}
 MASK_LEVEL_FIELDS = {"spheres": "sphere field", "atoms": "atom field"}
@@ -927,49 +931,62 @@ mask_level_arg = keyword_or_number_arg("calibrate", "--mask-level",
 
 
 def mask_level_rule(setting, mask, mask_source, elements, target_occupancy,
-                    nondefault_field=()):
+                    nondefault_field=(), by_element=False):
     """--mask-level resolved: (level or None to calibrate, the reason).
 
     A fixed level is in the unit of the field it cuts (MASK_LEVEL_UNITS):
     sphere overlaps for the sphere field, atoms/A^3 for the atom-presence
     field, and nothing for the density, which takes no level. An explicit
-    level is taken as it is for either field; 'auto' has a fixed level for
-    the sphere field only, since none has been measured for the atom field,
-    which it calibrates. 'auto' cuts the sphere field at MASK_LEVEL_FIXED
-    when the model has no hydrogens and calibrates it to gemmi's occupancy
-    when it has any.
-    Measured 2026-11-10 against calibration on every entry, the binned
-    R-free gap to mmtbx, medians: 1.0 is -0.0015 / -0.0021 / -0.0014 on the
-    models without hydrogens of the 2.6-3.0 A, 1.8-2.6 A and SW40 sets
-    (calibrated -0.0003 / -0.0022 / -0.0016). Per entry that is a gain at
-    low resolution (13 better, 3 worse), a wash at 1.8-2.6 A (9 / 7) and a
-    slight loss on SW40 (7 / 14, median +0.0001, none by more than 0.001).
-    0.9 is the best level on SW40 (-0.0017) but loses at low resolution
-    (6 entries worse by more than 0.001 against 1); 1.1 is worse on SW40
-    and at 1.8-2.6 A. The hydrogen test runs on the model as selected, so
-    --select "not element H" makes a model with hydrogens one without. A
-    model with explicit hydrogens has its sp3 carbons bare plus a sphere per
-    hydrogen, which packs the field deeper, and its calibrated level runs
-    from 1.12 to 1.46 with the hydrogen fraction; at 1.0 the four such
-    entries at 1.8-3.0 A lost 0.006-0.011. Typing them united-atom with the
-    hydrogens left out brings their level back to ~0.93 and recovers the
-    low-resolution loss, but costs SW40's hydrogen entries 0.0009, so they
-    keep the calibration. An explicit target (--target-occupancy) is a
-    request to calibrate, and auto honours it. So is any sphere-field setting
-    away from the one the level was measured with (nondefault_field, the
-    options' names): an offset, edge, radius table, extra smoothing or taper
-    moves where the field crosses 1.0, which calibration compensates for and
-    a fixed level does not."""
-    from lunus.sf.mask_spheres import is_hydrogen
+    level is taken as it is for either field. 'auto' has a fixed level for
+    the sphere field only: mask_spheres.sphere_level, from the hydrogen
+    fraction h of the model as selected (`elements`, every atom counted) and
+    the radius table (by_element: --sphere-radii element) -- 1.0 without
+    hydrogens, 1.0 + 0.89 h for united-atom radii, 1.0 + 1.17 h for element
+    radii. The atom field and the density are calibrated.
+
+    Measured against calibration (binned R-free gap to mmtbx, medians;
+    "worse" is worse than calibration by more than 0.001):
+    - Without hydrogens, 1.0 for united-atom spheres: 1.5-1.8 A, 310 entries,
+      -0.0012 at both, 5 worse; 1.8-2.6 A, 480 entries, 31 worse; and the
+      2.6-3.0 A set and SW40 (first measured 2026-11-10: -0.0015 / -0.0021 /
+      -0.0014 on 2.6-3.0 A, 1.8-2.6 A and SW40, calibrated -0.0003 / -0.0022
+      / -0.0016). 0.9 is best on SW40 but loses at low resolution; 1.1 is
+      worse on SW40 and at 1.8-2.6 A.
+    - Without hydrogens, 1.0 for element spheres: their calibrated level sits
+      at 1.0, and they beat the calibrated atom field (SW40 -0.0012 against
+      -0.0003, 2.6-3.0 A +0.0018 against +0.0050, 1.8-2.6 A +0.0003 against
+      +0.0023) while trailing united-atom spheres by 0.001-0.0025.
+    - With hydrogens, the calibrated level climbs with h: a hydrogen is a
+      sphere of its own and its residue's sp3 carbons go bare, which packs
+      the field deeper. Both slopes were fitted on 92 models (SW40, 2.6-3.0
+      and 1.8-2.6 A) with the level held at 1.0 at h = 0, and tested on a
+      hold-out of 39 at 1.5-1.8 A. United-atom 1.0 + 0.89 h: -0.0015
+      (calibrated -0.0016), 8 of 92 worse; hold-out -0.0028 (-0.0028), 1 of
+      39 worse. Element 1.0 + 1.17 h: -0.0006 (-0.0011), 11 of 92 worse;
+      hold-out -0.0023 (-0.0025), 1 of 39 worse. Four models are partly
+      protonated (h 0.17-0.42): the rule sits 0.12-0.24 above their
+      calibrated level and costs -0.0016 to +0.0008.
+    - The atom field at a fixed 0.024 atoms/A^3 tied calibration on 598
+      models without hydrogens (39 worse), but its level drifts with the
+      water fraction and element spheres beat it, so auto calibrates it.
+
+    The hydrogen count runs on the model as selected, so --select "not
+    element H" makes a model with hydrogens one without. An explicit target
+    (--target-occupancy) is a request to calibrate, and auto honours it. So
+    is any sphere-field setting away from the ones the level was measured
+    with (nondefault_field, the options' names): an offset, edge, extra
+    smoothing or taper moves where the field crosses the level, which
+    calibration compensates for and a fixed level does not."""
+    from lunus.sf.mask_spheres import is_hydrogen, sphere_level
 
     if setting == "calibrate":
         return None, "--mask-level calibrate"
     if setting != "auto":
         return float(setting), "--mask-level %g" % setting
     if mask != "gemmi" and mask_source == "atoms":
-        return None, ("auto: no fixed level has been measured for the atom "
-                      "field, so it is calibrated (--mask-level L cuts it at L "
-                      "atoms/A^3)")
+        return None, ("auto: the atom field's fixed level (0.024 atoms/A^3) "
+                      "drifts with the water fraction and was not adopted, so it "
+                      "is calibrated (--mask-level L cuts it at L atoms/A^3)")
     if mask == "gemmi" or mask_source != "spheres":
         return None, ("auto: %s takes no fixed level"
                       % ("--mask gemmi" if mask == "gemmi" else "the density source"))
@@ -978,11 +995,15 @@ def mask_level_rule(setting, mask, mask_source, elements, target_occupancy,
     if nondefault_field:
         return None, ("auto: %s differ from the settings the fixed level was "
                       "measured with, so it is calibrated" % ", ".join(nondefault_field))
+    table = "element" if by_element else "ua"
     n_h = sum(is_hydrogen(e) for e in elements)
-    if n_h:
-        return None, ("auto: the model has %d hydrogens, whose spheres move the "
-                      "level, so it is calibrated" % n_h)
-    return MASK_LEVEL_FIXED, "auto: no hydrogens in the model"
+    level = sphere_level(len(elements), n_h, by_element=by_element)
+    if not n_h:
+        return level, "auto: no hydrogens in the model, %s radii" % table
+    slope = SPHERE_LEVEL_H_SLOPE_ELEMENT if by_element else SPHERE_LEVEL_H_SLOPE_UA
+    return level, ("auto: %d of %d atoms are hydrogens (h %.3f), %s radii, level "
+                   "%.1f + %g h = %.4g" % (n_h, len(elements), n_h / len(elements),
+                                         table, MASK_LEVEL_FIXED, slope, level))
 
 
 def protein_blur(setting, b_min, grid, orth_np, d_min):
@@ -1628,10 +1649,13 @@ def build_parser():
                         "L cuts at L directly, with no gemmi target and no "
                         "search, in sphere overlaps for --mask-source spheres "
                         "or atoms/A^3 for --mask-source atoms (not for density "
-                        "or --mask gemmi); 'auto' (default) is %g for a sphere "
-                        "field of a model without hydrogens and calibrate for "
-                        "one with them, for another source, or for a sphere "
-                        "field with non-default settings" % MASK_LEVEL_FIXED)
+                        "or --mask gemmi); 'auto' (default) is a fixed level "
+                        "for the sphere field, %g + %g h for ua radii and %g + "
+                        "%g h for element radii (h the model's hydrogen "
+                        "fraction), and calibrate for another source or for a "
+                        "sphere field with non-default settings"
+                        % (MASK_LEVEL_FIXED, SPHERE_LEVEL_H_SLOPE_UA,
+                           MASK_LEVEL_FIXED, SPHERE_LEVEL_H_SLOPE_ELEMENT))
     p.add_argument("--taper-frac", type=float, default=0.5,
                    help="taper width as a fraction of the SOLVENT MASK cutoff")
     p.add_argument("--density-cutoff", type=float, default=1e-4, metavar="E",
@@ -1665,7 +1689,8 @@ def build_parser():
     p.add_argument("--sphere-radii", default="ua", choices=["ua", "element"],
                    help="'ua': OPLS united-atom Lennard-Jones radii (sigma/2) by residue "
                         "and atom name; 'element': the element fallback for every "
-                        "atom (to separate the typing from the shape)")
+                        "atom: what a model known only by its elements gets "
+                        "(its own fixed level, 1.0 + 1.17 h)")
     p.add_argument("--mask-source-b", type=positive_float_arg("--mask-source-b"),
                    default=SOURCE_B_DEFAULT, metavar="B",
                    help="the B every atom is placed with in the 'atoms' mask "
@@ -1960,12 +1985,11 @@ def run(args):
         ("--sphere-offset", args.sphere_offset != 0.0),
         ("--sphere-edge", args.sphere_edge not in (None, mask_spheres.EDGE_WIDTH_DEFAULT)
          if mask_source == "spheres" else False),
-        ("--sphere-radii", args.sphere_radii != "ua"),
         ("--mask-blur", args.mask_blur != 0.0),
         ("--taper-frac", args.taper_frac != 0.5)) if changed]
     mask_level, level_reason = mask_level_rule(
         args.mask_level, args.mask, args.mask_source, elements, args.target_occupancy,
-        nondefault_field=nondefault_field)
+        nondefault_field=nondefault_field, by_element=args.sphere_radii == "element")
     fixed_level = mask_level is not None
     if args.mask != "gemmi":
         print("  mask level: %s (%s)"

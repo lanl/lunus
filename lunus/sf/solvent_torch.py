@@ -11,11 +11,12 @@ shrink) mask that Phenix and REFMAC build. That choice, and its consequences,
 are argued in docs/solvent-design.md; the short version is that
 compute_density() already produces exactly the grid a threshold needs, so
 F_mask costs one extra FFT and inherits the protein density's grid and symmetry
-conventions unchanged. The field is, by default, soft spheres or an
-atom-presence field built from the atoms (SolventModel.set_atoms; the
-benchmark ranks them in that order), or the electron density itself on
-request (mask_source="density"); most of what follows was learned on the
-density and holds for every field.
+conventions unchanged. The field is, by default, soft spheres built from
+the atoms (SolventModel.set_atoms: united-atom radii with names, element
+radii without), or on request an atom-presence field (mask_source="atoms")
+or the electron density itself (mask_source="density") -- the benchmark ranks
+them in that order; most of what follows was learned on the density and
+holds for every field.
 
 The model is EXPLICIT ORDERED WATERS PLUS A MASK FOR THE REMAINDER, the same
 division crystallographic refinement makes. A threshold mask suits that well:
@@ -82,12 +83,13 @@ B_SOL_DEFAULT = 46.0     # A^2
 MASK_BLUR_DEFAULT = 100.0    # A^2
 SOURCE_B_DEFAULT = 20.0      # A^2; see mask_source_weights() and SolventModel.source_b
 
-# The fixed level of the soft-sphere field: one sphere's plateau, in "sphere
-# overlaps". Measured, against calibration to gemmi's occupancy, ONLY for
-# united-atom spheres at the default offset and edge, with no extra smoothing,
-# on models without hydrogens -- fit_solvent_rfactor.mask_level_rule has the
-# numbers. Every other mask source and setting is calibrated or given.
-SPHERE_LEVEL_FIXED = 1.0
+# The fixed level of the soft-sphere field, in "sphere overlaps": 1.0 for a
+# model without hydrogens, rising with the hydrogen fraction for one with
+# them (mask_spheres.sphere_level, which holds the rule, its slopes and where
+# they were measured). It holds for set_atoms' spheres at the default offset
+# and edge with no extra smoothing; every other mask source and setting is
+# calibrated or given.
+from .mask_spheres import SPHERE_LEVEL_FIXED  # noqa: E402,F401
 # The atom-presence field's kernels are truncated where the atom's density
 # falls below this, e/A^3: the R-factor tool's --density-cutoff default, with
 # which the field was measured.
@@ -457,33 +459,40 @@ class SolventModel:
 
     WHICH FIELD THE MASK IS CUT FROM is mask_source:
 
-      "auto"        (default) soft spheres when set_atoms was given the
-                    atoms' names (atom_names and residue_names), else the
-                    atom-presence field when it was given only their
-                    elements. Decided by set_atoms alone: kernels built by
+      "auto"        (default) soft spheres: of united-atom radius when
+                    set_atoms was given the atoms' names (atom_names and
+                    residue_names), of element radius when it was given only
+                    their elements. Decided by set_atoms alone: kernels built by
                     hand and passed as mask_kernels= go with an explicit
                     "spheres" or "atoms". Knowing NOTHING about the atoms is
                     an error, not a quiet fall back to the electron density,
                     which measured worst of the three; pass
                     mask_source="density" to ask for it.
       "spheres"     the soft-sphere field (lunus.sf.mask_spheres); the same as
-                    spheres=True.
+                    spheres=True. Like "auto", united-atom radii with names
+                    and element radii without.
       "atoms"       the atom-presence field at source_b (default
-                    SOURCE_B_DEFAULT); the same as source_b=B.
+                    SOURCE_B_DEFAULT); the same as source_b=B. Until
+                    2026-11-22 what "auto" gave a model known by its elements
+                    only; element spheres measured better (see
+                    docs/solvent-design.md), so it is now only asked for.
       "density"     the electron density itself, thresholded in e/A^3.
 
     Measured on the R-factor benchmark (binned R-free gap to mmtbx; see
-    docs/solvent-design.md), united-atom spheres beat the atom-presence field,
-    which beats the density, at every resolution tried.
+    docs/solvent-design.md), united-atom spheres beat element spheres, which
+    beat the atom-presence field (measured on models without hydrogens, at
+    1.8-3.0 A), which beats the density, at every resolution tried.
 
     Fields:
       cutoff        the level below which a voxel is solvent, in the units of
                     the field it is cut from: e/A^3 for the density, sphere
                     overlaps for the spheres, unit-Gaussian overlaps for the
-                    atom-presence field. None (default) is SPHERE_LEVEL_FIXED
-                    for spheres on a model without hydrogens -- the one case
-                    with a measured fixed level -- and an error everywhere else
-                    until calibrate() sets it.
+                    atom-presence field. None (default) is the sphere field's
+                    fixed level, mask_spheres.sphere_level: 1.0 without
+                    hydrogens, 1.0 + 0.89 h with them for united-atom radii,
+                    1.0 + 1.17 h for element radii (h the hydrogen fraction
+                    set_atoms was told). The atom-presence field and the
+                    density have none: an error until calibrate() sets it.
       taper_width   width of the C^1 transition, in the cutoff's units (see
                     solvent_mask). None (default) is half the cutoff.
       k_sol         solvent electron density, e/A^3
@@ -554,7 +563,7 @@ class SolventModel:
                  "atom_elements", "atom_radii", "last_occupancy",
                  "last_shell_voxels", "_inv_d2_grid", "_inv_d2_key",
                  "_warned_blur", "_kernels", "_kernels_key", "_kernels_orth",
-                 "_n_hydrogens")
+                 "_n_hydrogens", "atom_by_element", "_h_whole_model")
 
     def __init__(self, cutoff=None, taper_width=None, k_sol=K_SOL_DEFAULT,
                  b_sol=B_SOL_DEFAULT, k_overall=1.0, u_aniso=None,
@@ -608,6 +617,7 @@ class SolventModel:
         self.source_kind = mask_source
         self.atom_elements = None
         self.atom_radii = None
+        self.atom_by_element = False
         self.last_occupancy = None
         self.last_shell_voxels = None
         self._inv_d2_grid = None
@@ -617,6 +627,7 @@ class SolventModel:
         self._kernels_key = None
         self._kernels_orth = None
         self._n_hydrogens = None
+        self._h_whole_model = False
 
     # ------------------------------------------------------------------
     # the atoms, and what follows from them
@@ -629,9 +640,11 @@ class SolventModel:
         come (any case, charges allowed: 'C', 'ZN', 'O1-'). With atom_names
         and residue_names as well -- PDB names, any case and padding -- the
         atoms become soft spheres of united-atom radius
-        (mask_spheres.sphere_radii_from_names), which is what
-        mask_source="auto" then uses; with elements only, the atom-presence
-        field. residue_ids (optional, anything hashable per atom, e.g. a
+        (mask_spheres.sphere_radii_from_names); with elements only, soft
+        spheres of element radius (by_element). mask_source="auto" and
+        "spheres" use those spheres; mask_source="atoms" places the
+        atom-presence field from the elements, names or not. residue_ids
+        (optional, anything hashable per atom, e.g. a
         (chain, number, insertion code) tuple) lets the radii's hydrogen
         rule work per residue; without it a single hydrogen anywhere makes
         the whole model explicit-hydrogen (sphere_radii_from_names).
@@ -647,27 +660,37 @@ class SolventModel:
         With the atom-presence field, structure_factors_one_config multiplies
         the occupancies by the field's weights itself; a mask_occ= passed
         alongside is taken as already weighted, as it always has been."""
-        from .mask_spheres import is_hydrogen, sphere_radii_from_names
+        from .mask_spheres import bare_element, is_hydrogen, sphere_radii_from_names
 
         elements = [str(e) for e in elements]
         if (atom_names is None) != (residue_names is None):
             raise ValueError("set_atoms needs atom_names AND residue_names for "
-                             "the sphere field (or neither, for the atom-presence "
-                             "field)")
+                             "united-atom spheres (or neither, for element-radius "
+                             "spheres or the atom-presence field)")
         radii = None
-        if atom_names is not None and self.source_kind != "atoms":
-            radii = sphere_radii_from_names(
-                elements, list(atom_names), list(residue_names),
-                None if residue_ids is None else list(residue_ids))
-        elif self.source_kind == "spheres":
-            raise ValueError("mask_source='spheres' needs the atoms' names: "
-                             "set_atoms(elements, atom_names, residue_names, "
-                             "residue_ids)")
+        by_element = False
+        if self.source_kind in ("auto", "spheres"):
+            if atom_names is not None:
+                radii = sphere_radii_from_names(
+                    elements, list(atom_names), list(residue_names),
+                    None if residue_ids is None else list(residue_ids))
+            else:
+                # element radii ignore the names, so there are none to pass;
+                # gemmi gives an unknown symbol X's radius rather than failing
+                import gemmi
+                unknown = sorted(e for e in set(elements)
+                                 if gemmi.Element(bare_element(e).capitalize()).atomic_number == 0)
+                if unknown:
+                    raise ValueError("set_atoms: unknown element(s) %s; element-"
+                                     "radius spheres need a van der Waals radius "
+                                     "for every element" % ", ".join(unknown))
+                radii = sphere_radii_from_names(elements, [""] * len(elements),
+                                                [""] * len(elements), by_element=True)
+                by_element = True
         if radii is None and self.source_kind != "density":
             # the atom-presence field needs every element's IT92 coefficients;
             # an unknown symbol fails here, not at the first structure-factor call
             from .elements import it92_coefficients
-            from .mask_spheres import bare_element
             try:
                 it92_coefficients(sorted({bare_element(e).capitalize() for e in elements}))
             except KeyError as e:
@@ -675,16 +698,23 @@ class SolventModel:
                                  "scattering factor for every element" % e)
         self.atom_elements = elements
         self.atom_radii = radii
+        self.atom_by_element = by_element
         # counted once here, not per configuration in threshold()
         self._n_hydrogens = sum(is_hydrogen(e) for e in elements)
+        # names without residue_ids: one hydrogen anywhere made every residue
+        # explicit-hydrogen (sphere_radii_from_names), which is not the
+        # per-residue typing the fixed level was measured on
+        self._h_whole_model = (radii is not None and not by_element
+                               and residue_ids is None and self._n_hydrogens > 0)
         self._kernels = None
         self._kernels_key = None
         self._kernels_orth = None
 
     def resolved_source(self, mask_kernels=None):
         """The field this model's mask is cut from, "spheres", "atoms" or
-        "density". With "auto" that is decided by set_atoms ALONE -- names
-        give the spheres, elements only the atom-presence field -- and never
+        "density". With "auto" that is decided by set_atoms ALONE -- it gives
+        the spheres, of united-atom radius with names and of element radius
+        with elements only -- and never
         by the kernels a caller passes: hand-built mask_kernels= go with an
         explicit mask_source="spheres" or "atoms" (spheres=True, source_b=B),
         so that calibrate() and the structure-factor call cannot read one
@@ -699,9 +729,9 @@ class SolventModel:
             if mask_kernels is None and self.atom_radii is None:
                 raise ValueError(
                     "mask_source='spheres' needs the atoms: call set_atoms("
-                    "elements, atom_names, residue_names, residue_ids), or pass "
-                    "the 6-tuple mask_spheres.sphere_kernels() returns as "
-                    "mask_kernels=")
+                    "elements, atom_names, residue_names, residue_ids) (or "
+                    "set_atoms(elements) for element radii), or pass the 6-tuple "
+                    "mask_spheres.sphere_kernels() returns as mask_kernels=")
             return kind
         if kind == "atoms":
             if mask_kernels is None and self.atom_elements is None:
@@ -713,7 +743,13 @@ class SolventModel:
         if self.atom_radii is not None:
             return "spheres"
         if self.atom_elements is not None:
-            return "atoms"
+            # only reached by assigning atom_elements directly: set_atoms
+            # always gives "auto" its sphere radii
+            raise ValueError(
+                "SolventModel(mask_source='auto'): atom_elements was assigned "
+                "without set_atoms(), so there are no sphere radii. Call "
+                "set_atoms(), or pass mask_source='atoms' for the atom-presence "
+                "field.")
         if mask_kernels is not None:
             raise ValueError(
                 "SolventModel(mask_source='auto') takes its field from "
@@ -725,8 +761,9 @@ class SolventModel:
             "SolventModel(mask_source='auto') builds its mask from the atoms, "
             "and it has not been told what they are. Either call "
             "set_atoms(elements, atom_names, residue_names, residue_ids) -- soft "
-            "spheres, the measured best -- or set_atoms(elements) for the "
-            "atom-presence field; or pass mask_source='density' to threshold "
+            "spheres of united-atom radius, the measured best -- or "
+            "set_atoms(elements) for spheres of element radius; or pass "
+            "mask_source='density' to threshold "
             "the electron density, with its cutoff in e/A^3, as SolventModel "
             "did by default before 2026-11-18.")
 
@@ -742,52 +779,64 @@ class SolventModel:
 
     def threshold(self, kind):
         """(cutoff, taper_width) for a mask cut from `kind`: as given, or as
-        calibrate() set them; with cutoff None, SPHERE_LEVEL_FIXED for the
-        sphere field of a model without hydrogens at the settings it was
-        measured with (no mask_blur, taper half the level), and an error
-        otherwise; with taper_width None, half the cutoff."""
+        calibrate() set them; with cutoff None, the sphere field's fixed
+        level (mask_spheres.sphere_level: from the hydrogen fraction of the
+        atoms set_atoms was told, with the slope of their radius table) at
+        the settings it was measured with (no mask_blur, taper half the
+        level), and an error otherwise; with taper_width None, half the
+        cutoff."""
+        from .mask_spheres import is_hydrogen, sphere_level
+
         if self.cutoff is not None:
             taper = self.taper_width if self.taper_width is not None else 0.5 * self.cutoff
             return self.cutoff, taper
+        if kind == "atoms":
+            raise ValueError(
+                "SolventModel(cutoff=None): the atom-presence field has no fixed "
+                "level. One was measured (0.024 atoms/A^3 in the R-factor tool, "
+                "at source_b 20 and mask_blur 100 A^2) but not adopted: the "
+                "level it needs drifts with the model's water fraction, and "
+                "element-radius spheres -- set_atoms(elements) with "
+                "mask_source='auto' -- beat it at a fixed level. Give cutoff=, "
+                "or call calibrate() with a target solvent fraction.")
         if kind != "spheres":
             raise ValueError(
-                "SolventModel(cutoff=None): the %s field has no fixed level -- "
-                "what it should be depends on the system, its B factors and "
-                "the grid. Give cutoff=%s, or call calibrate() with a target "
-                "solvent fraction."
-                % ({"atoms": "atom-presence", "density": "electron-density"}[kind],
-                   " in e/A^3" if kind == "density" else ""))
+                "SolventModel(cutoff=None): the electron-density field has no "
+                "fixed level -- what it should be depends on the system, its B "
+                "factors and the grid. Give cutoff= in e/A^3, or call "
+                "calibrate() with a target solvent fraction.")
         if self.atom_elements is None:
             raise ValueError(
                 "SolventModel(cutoff=None) on the sphere field: the fixed level "
-                "%.1f holds only for a model without hydrogens, and without "
+                "depends on the model's hydrogen fraction, and without "
                 "set_atoms() the model cannot tell. Call set_atoms(), give "
-                "cutoff=, or calibrate()." % SPHERE_LEVEL_FIXED)
+                "cutoff=, or calibrate().")
         n_h = self._n_hydrogens
         if n_h is None:                 # atom_elements assigned without set_atoms
-            from .mask_spheres import is_hydrogen
             n_h = sum(is_hydrogen(e) for e in self.atom_elements)
-        if n_h:
+        if self._h_whole_model:
             raise ValueError(
                 "SolventModel(cutoff=None) on the sphere field: the model has %d "
-                "hydrogens, whose spheres pack the field deeper and move its "
-                "level (calibrated levels ran 1.12-1.46 on such models), so the "
-                "fixed level %.1f does not apply. Call calibrate() with a target "
-                "solvent fraction, or give cutoff=." % (n_h, SPHERE_LEVEL_FIXED))
+                "hydrogens and set_atoms() was given no residue_ids, so every "
+                "residue was typed explicit-hydrogen; the fixed level was "
+                "measured with the per-residue rule. Pass residue_ids to "
+                "set_atoms(), give cutoff=, or calibrate()." % n_h)
+        level = sphere_level(len(self.atom_elements), n_h,
+                             by_element=self.atom_by_element)
         if self.effective_mask_blur(kind) != 0.0:
             raise ValueError(
                 "SolventModel(cutoff=None) on the sphere field: the fixed level "
-                "%.1f was measured with no extra smoothing, and mask_blur is "
+                "%.4g was measured with no extra smoothing, and mask_blur is "
                 "%g A^2. Calibrate, or give cutoff=."
-                % (SPHERE_LEVEL_FIXED, self.effective_mask_blur(kind)))
-        taper = 0.5 * SPHERE_LEVEL_FIXED
+                % (level, self.effective_mask_blur(kind)))
+        taper = 0.5 * level
         if self.taper_width is not None and self.taper_width != taper:
             raise ValueError(
                 "SolventModel(cutoff=None) on the sphere field: the fixed level "
-                "%.1f was measured with taper_width %.2f, and %g moves where the "
-                "mask crosses it. Calibrate, or give cutoff=."
-                % (SPHERE_LEVEL_FIXED, taper, self.taper_width))
-        return SPHERE_LEVEL_FIXED, taper
+                "%.4g was measured with taper_width %r (half the level), and "
+                "%r moves where the mask crosses it. Calibrate, or give cutoff=."
+                % (level, taper, self.taper_width))
+        return level, taper
 
     def cached_mask_kernels(self, kind, grid_shape, orth_matrix, blur=0.0):
         """(mask_kernels, weights) for `kind` from the set_atoms atoms, in the
@@ -1075,6 +1124,7 @@ class SolventModel:
                    self.source_b,
                    "none" if self.atom_elements is None else "%d%s" % (
                        len(self.atom_elements),
-                       " named" if self.atom_radii is not None else ""),
+                       "" if self.atom_radii is None
+                       else " element radii" if self.atom_by_element else " named"),
                    "unmeasured" if self.last_occupancy is None
                    else "%.4f" % self.last_occupancy))
