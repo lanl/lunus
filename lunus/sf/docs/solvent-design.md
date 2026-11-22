@@ -916,16 +916,18 @@ model without hydrogens (median 0.93-0.95 across the three sets, range
 isolated sphere reaches 1 only at its centre, so the level set at 1 runs
 through the region where neighbouring spheres overlap. So the tool's default
 since 2026-11-10 (`--mask-level auto`) cuts the field of a model WITHOUT
-hydrogens at 1.0 overlaps, with no gemmi target and no search, and calibrates
-a model WITH any. Binned R-free gap to mmtbx, medians, same entries:
+hydrogens at 1.0 overlaps, with no gemmi target and no search, and until
+2026-11-22 calibrated a model WITH any (since then those have a fixed level
+too; see "Hydrogens: a level from the hydrogen fraction" below). Binned R-free
+gap to mmtbx, medians, same entries:
 
-| set | calibrated | 0.8 | 0.9 | 1.0 | 1.1 | auto (1.0, calibrated if H) | auto vs calibrated, per entry |
+| set | calibrated | 0.8 | 0.9 | 1.0 | 1.1 | auto as of 2026-11-10 (1.0, calibrated if H) | that auto vs calibrated, per entry |
 |---|---|---|---|---|---|---|---|
 | 20 entries, 2.6-3.0 Å (2 with H) | −0.0003 | +0.0035 | +0.0002 | −0.0009 | −0.0007 | −0.0010 | 13 better, 1 worse by > 0.001 |
 | 20 entries, 1.8-2.6 Å (2 with H) | −0.0017 | +0.0003 | −0.0012 | −0.0020 | −0.0013 | −0.0020 | 9 better, none worse by > 0.001 |
 | SW40, 39 entries (12 with H) | −0.0018 | −0.0008 | −0.0013 | −0.0014 | −0.0011 | −0.0016 | 7 better, none worse by > 0.001; median change 0 |
 
-The last column counts the hydrogen entries, which auto leaves calibrated.
+The last column counts the hydrogen entries, which that auto left calibrated.
 On the entries it does change, those without hydrogens, the fixed level
 against calibration is 13 better / 3 worse at 2.6-3.0 Å (median −0.0006),
 9 / 7 at 1.8-2.6 Å (median 0) and 7 better / 14 worse / 6 equal on SW40
@@ -935,21 +937,21 @@ in the middle, and a slight loss on SW40 that the SW40 median shows as
 better) but leaves six low-resolution entries worse by more than 0.001,
 against one at 1.0; 1.0 is that trade.
 
-Hydrogens are why one level does not serve every model. A residue that
-carries them has its sp3 carbons bare and a sphere per hydrogen, which packs
-the field deeper, and its calibrated level runs from 1.12 to 1.46 with the
-hydrogen fraction; cut at 1.0, the four low- and mid-resolution entries with
-hydrogens lost 0.006-0.011. Typing those models united-atom with the
-hydrogens left out of the field brings their calibrated level back to 0.93
-(0.79-1.04) and at 1.0 recovers the loss at 1.8-3.0 Å (median of the four
-+0.0020 against calibrated +0.0023), but costs SW40's twelve hydrogen entries 0.0009
-(−0.0014 against −0.0023), so they keep the calibration. The rule is "any
-hydrogen or deuterium in the model", the same flag the measurement used,
-counted after `--select`: a model whose hydrogens are selected away is cut
-at 1.0 like any model without them, so a with/without-hydrogens comparison
-should pass `--mask-level calibrate` to keep one mask rule for both arms.
-Not measured: the fixed level's dependence on the field's absolute scale,
-which calibration absorbed, for models with many partially occupied atoms.
+Hydrogens are why 1.0 does not serve every model. A residue that carries
+them has its sp3 carbons bare and a sphere per hydrogen, which packs the field
+deeper, and its calibrated level runs from 1.12 to 1.46 with the hydrogen
+fraction; cut at 1.0, the four low- and mid-resolution entries with hydrogens
+lost 0.006-0.011. Typing those models united-atom with the hydrogens left out
+of the field brings their calibrated level back to 0.93 (0.79-1.04) and at
+1.0 recovers the loss at 1.8-3.0 Å (median of the four +0.0020 against
+calibrated +0.0023), but costs SW40's twelve hydrogen entries 0.0009
+(−0.0014 against −0.0023), so it was not adopted; the level rule below was.
+The hydrogen count is taken after `--select`: a model whose hydrogens are
+selected away is cut at 1.0 like any model without them, so a
+with/without-hydrogens comparison that wants one mask rule for both arms
+should pass `--mask-level calibrate`. Not measured: the fixed level's
+dependence on the field's absolute scale, which calibration absorbed, for
+models with many partially occupied atoms.
 
 The time saved is the 62 thresholds of the search and gemmi's reference-grid
 mask: on these sets mask and gemmi time fell from 6.3 / 6.1 / 30.9 s to 1.2 /
@@ -957,29 +959,118 @@ mask: on these sets mask and gemmi time fell from 6.3 / 6.1 / 30.9 s to 1.2 /
 1,000-entry GPU run the threshold step was 27% of torch time. `--mask-level
 calibrate` restores the old behaviour for every model, and a number sets the
 level by hand. auto also calibrates whenever the sphere field is built off
-the settings 1.0 was measured with (`--sphere-offset`, `--sphere-edge`,
-`--sphere-radii element`, `--mask-blur`, `--taper-frac`), since each of those
-moves where the field crosses 1.0.
+the settings the level was measured with (`--sphere-offset`, `--sphere-edge`,
+`--mask-blur`, `--taper-frac`), since each of those moves where the field
+crosses it. `--sphere-radii element` was on that list until 2026-11-22; it
+now has a fixed level of its own (below).
 
 The atom-presence field (`--mask-source atoms`) takes a level by hand too,
 in its own unit, atoms/A^3 on the field as built (`--mask-source-b`,
 `--mask-blur`, `--taper-frac` as given, and `--protein-blur` where it
 exceeds `--mask-blur`; each atom weighted by its occupancy, its kernel
 truncated at `--density-cutoff`), through the same path: no gemmi target,
-no search. Its `auto` still calibrates, since no fixed level has been
-measured for it. The density source takes no level (`--mask-level
+no search. Its `auto` still calibrates: a fixed level was measured for it
+(below) but not adopted. The density source takes no level (`--mask-level
 calibrate`), nor does `--mask gemmi`.
+
+#### Hydrogens: a level from the hydrogen fraction
+
+Since 2026-11-22 a model with hydrogens has a fixed level too. On models with
+hydrogens the calibrated level climbs with the hydrogen fraction h = (H + D
+atoms) / (all atoms, waters and ligands included, after `--select`), and does
+so at a different slope for each radius table. Held at 1.0 at h = 0 (so a
+model without hydrogens is cut exactly where it was), each slope was fitted on
+92 models with hydrogens (SW40, and the clean TR1000 entries at 2.6-3.0 and
+1.8-2.6 Å) and tested on a hold-out of 39 at 1.5-1.8 Å that played no part in
+the fit. Binned R-free gap to mmtbx, medians; "worse" is worse than
+calibration by more than 0.001; the taper is half the level:
+
+| rule | fitted set (92) | worse | hold-out (39) | worse |
+|---|---|---|---|---|
+| united-atom radii, 1.0 + 0.89 h | −0.0015 (calibrated −0.0016) | 8 | −0.0028 (calibrated −0.0028) | 1 |
+| element radii, 1.0 + 1.17 h | −0.0006 (calibrated −0.0011) | 11 | −0.0023 (calibrated −0.0025) | 1 |
+
+Element radii need the steeper slope: at the united-atom slope they lose on
+the fitted set (+0.0000, 37 worse) and at a flat 1.0 they lose badly
+(+0.0047, 74 worse). Their level also drifts a little with resolution (the
+fully protonated median is 1.56 at 1.8-2.6 Å, 1.48 at 1.5-1.8 Å), which is
+why their rule is the looser of the two. Calibrated, element spheres trail
+united-atom spheres on hydrogen models as they do without (worse on 114 of
+131 models, by more than 0.001 on 21). Almost every measured model is either
+nearly without hydrogens (h below 0.06: a few on ligands) or fully protonated
+(h 0.44-0.51). **Only four are partly protonated**, all in the fitted set:
+
+| entry | h | ua rule level / calibrated | ua: rule − calibrated gap | element: rule − calibrated gap |
+|---|---|---|---|---|
+| 5O76 | 0.171 | 1.152 / 0.982 | −0.0016 | −0.0008 |
+| 9L5U | 0.267 | 1.238 / 1.119 | −0.0003 | −0.0001 |
+| 2YL0 | 0.313 | 1.278 / 1.120 | +0.0007 | +0.0003 |
+| 5MHX | 0.416 | 1.370 / 1.130 | +0.0008 | +0.0005 |
+
+On all four the straight line in h sits 0.12-0.24 above the calibrated level
+(their calibrated levels sit near 1.12, not on the line), and the cost is no
+more than the rule's usual spread. Four models are thin evidence for that
+range; a partly protonated model is where the rule is least tested. The
+level is `mask_spheres.sphere_level`, which the tool and `SolventModel` both
+call.
+
+Which radius table counts: "united-atom" is the table chosen by atom and
+residue names (`--sphere-radii ua`, or `set_atoms` with names), and atoms the
+table does not cover (ions, unusual ligands) fall back to element radii inside
+it. Those models are what the 0.89 slope was measured on, so it applies to the
+whole model. The 1.17 slope is for element radii on every atom.
+
+#### Element spheres without hydrogens, and what was not adopted
+
+Element-radius spheres need no calibration without hydrogens either: their
+calibrated level sits at 1.0, and at 1.0 they beat the calibrated
+atom-presence field (SW40 −0.0012 against −0.0003; 2.6-3.0 Å +0.0018 against
++0.0050; 1.8-2.6 Å +0.0003 against +0.0023; the atom field was not run at
+1.5-1.8 Å). They trail united-atom spheres by 0.001-0.0025, and by 0.0009 at
+1.5-1.8 Å, where 134 of 310 entries are worse than united-atom by more than
+0.001: the fallback for a model known only by its elements, not a rival. On
+the 1.5-1.8 Å hold-out united-atom spheres at 1.0 match calibration as
+elsewhere (310 entries without hydrogens, −0.0012 at both, 5 worse; 31 of 480
+worse at 1.8-2.6 Å).
+
+Two candidates were measured and set aside:
+
+- **The atom-presence field at a fixed level.** 0.024 atoms/Å³ (on the field
+  at `--mask-source-b` 20 and `--mask-blur` 100) ties calibration on 598
+  models without hydrogens (39 worse; 0.023 has 48), but its calibrated level
+  drifts from 0.0247 at 1.8-2.0 Å to 0.0230 at 2.4-2.6 Å and 0.0228 at
+  2.6-3.0 Å, tracking the water fraction (R² 0.62; d_min adds nothing): the
+  Gaussian tails of a water-rich surface sum and swell the field. Element
+  spheres at 1.0 beat it without the drift.
+- **A union of spheres.** Each sphere's profile s replaced by −log(1 − 0.98 s),
+  so that the summed field cut at L is the union 1 − Π(1 − 0.98 s_i) cut at
+  1 − exp(−L). On hydrogen models it is the best field measured (hold-out
+  −0.0042 calibrated, −0.0040 at its own rule 0.78 + 1.105 h), but without
+  hydrogens it loses to the sum (2.6-3.0 Å: 47 of 91 worse at 1.0; 1.8-2.6 Å:
+  203 of 480): counting overlaps acts like the geometric mask's probe-and-shrink,
+  which a union does not. Adopting it would mean a second field for hydrogen
+  models.
+
+The data are kept outside the repository with the runs' scripts and job
+lists: `ATOM_LEVEL_SWEEP_2026-11-19.txt` and `atom_level_logs_2026-11-19/`
+(the atom field), `mask_field_holdout_hi349_2026-11-22/` (the 1.5-1.8 Å
+hold-out, united-atom, union and element spheres) and
+`mask_field_el_H_2026-11-22/` (element and united-atom spheres on the 131
+hydrogen models).
 
 ### In the library: the mask source follows the atoms
 
 Since 2026-11-18 `SolventModel` defaults to `mask_source="auto"`, which uses
 the best field the model can build from what it has been told about the
-atoms, in the order the measurements above rank them:
+atoms, in the order the measurements above rank them (h the hydrogen fraction
+of the atoms `set_atoms` was told). Until 2026-11-22 `set_atoms(elements)`
+gave the atom-presence field and a model with hydrogens needed `calibrate()`:
 
 | told | field | cutoff=None |
 |---|---|---|
-| `set_atoms(elements, atom_names, residue_names, residue_ids)` | soft spheres, united-atom radii | 1.0, taper 0.5, if the model has no hydrogens; otherwise an error until `calibrate()` |
-| `set_atoms(elements)` | atom-presence field, B = 20 Å² | an error until `calibrate()` |
+| `set_atoms(elements, atom_names, residue_names, residue_ids)` | soft spheres, united-atom radii | 1.0 + 0.89 h (1.0 without hydrogens), taper half the level |
+| `set_atoms(elements)` | soft spheres, element radii | 1.0 + 1.17 h (1.0 without hydrogens), taper half the level |
+| `mask_source="atoms"`, `set_atoms(elements)` | atom-presence field, B = 20 Å² | an error until `calibrate()` |
 | nothing | an error naming both fixes | — |
 | `mask_source="density"` | the electron density, as before | an error: give the cutoff in e/Å³, or `calibrate()` |
 
@@ -1006,10 +1097,14 @@ measured worst of the three, so that no caller gets the weakest mask without
 asking for it: code written before 2026-11-18 that relied on the density
 default now raises until it says `mask_source="density"` or calls
 `set_atoms`. The fixed level is used only where it was measured: spheres from
-`set_atoms` (the default offset and edge), no `mask_blur`, the default taper,
-no hydrogens. Sphere kernels passed by hand may have been built with any
-settings, so `cutoff=None` raises with them, `set_atoms` or not. `spheres=True` and
-`source_b=B` remain, as `mask_source="spheres"` and `"atoms"` at B.
+`set_atoms` (the default offset and edge), no `mask_blur`, taper half the
+level. Sphere kernels passed by hand may have been built with any settings,
+so `cutoff=None` raises with them, `set_atoms` or not. A model with
+hydrogens told its names without `residue_ids` raises too: without them every
+residue is typed explicit-hydrogen, not per residue as the level was measured. `spheres=True` and
+`source_b=B` remain, as `mask_source="spheres"` and `"atoms"` at B; an
+explicit `mask_source="spheres"` takes elements alone as element radii, like
+"auto".
 
 ## What the density cutoff costs
 

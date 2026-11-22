@@ -1,14 +1,15 @@
 """
 SolventModel's mask source follows what it knows about the atoms.
 
-mask_source="auto" (the default) cuts the mask from soft spheres when the
-model has been told the atoms' names (set_atoms with atom_names and
-residue_names), from the atom-presence field when it has only their elements,
-and refuses -- naming both fixes -- when it has been told nothing: the
-electron density, which measured worst, is never a silent fallback and has to
-be asked for as mask_source="density". cutoff=None is the one measured fixed
-level (1.0, spheres, no hydrogens) and an error everywhere else until
-calibrate() sets it.
+mask_source="auto" (the default) cuts the mask from soft spheres: of
+united-atom radius when the model has been told the atoms' names (set_atoms
+with atom_names and residue_names), of element radius when it has only their
+elements, and refuses -- naming both fixes -- when it has been told nothing:
+the electron density, which measured worst, is never a silent fallback and
+has to be asked for as mask_source="density". cutoff=None is the sphere
+field's measured fixed level, mask_spheres.sphere_level (1.0 without
+hydrogens, 1.0 + 0.89 h or 1.0 + 1.17 h with them), and an error for the
+atom-presence field and the density until calibrate() sets it.
 
 The kernels set_atoms() builds must be exactly the ones a caller would build
 by hand and pass as mask_kernels=, so every comparison against the hand-built
@@ -28,6 +29,7 @@ from lunus.sf.cell_utils import orth_matrix  # noqa: E402
 from lunus.sf.density_torch import compute_density  # noqa: E402
 from lunus.sf.elements import it92_coefficients  # noqa: E402
 from lunus.sf.kernel_torch import build_atom_kernels_torch  # noqa: E402
+from lunus.sf.mask_spheres import sphere_level  # noqa: E402
 from lunus.sf.solvent_torch import (  # noqa: E402
     SOURCE_DENSITY_CUTOFF, SPHERE_LEVEL_FIXED, SolventModel, mask_occupancy,
     mask_source_weights)
@@ -103,9 +105,15 @@ def sf_batch(s, frac, occ, **kw):
     return structure_factors_batch(frac, *r, blur=s["blur"], compile_core=False, **kw)
 
 
-def hand_built_spheres(s):
-    radii = mask_spheres.sphere_radii_from_names(
-        s["elements"], s["atom_names"], s["residue_names"], s["residue_ids"])
+def hand_built_spheres(s, by_element=False):
+    if by_element:
+        # the tool's way: cctbx-style labels, element radii for every atom
+        labels = ['pdb=" %-4s %3s A%4d "' % (n, r, k[1]) for n, r, k in
+                  zip(s["atom_names"], s["residue_names"], s["residue_ids"])]
+        radii = mask_spheres.sphere_radii(labels, s["elements"], by_element=True)
+    else:
+        radii = mask_spheres.sphere_radii_from_names(
+            s["elements"], s["atom_names"], s["residue_names"], s["residue_ids"])
     return mask_spheres.sphere_kernels(radii, GRID, s["M"], dtype=DTYPE)
 
 
@@ -136,17 +144,34 @@ QUIET = dict(check_occupancy=False)
 
 # ----------------------------------------------------------------- auto
 
-def test_auto_picks_spheres_with_names_and_the_atom_field_with_elements():
+def test_auto_picks_ua_spheres_with_names_and_element_spheres_with_elements():
     s = named_system()
-    assert told(SolventModel(), s).resolved_source() == "spheres"
-    assert told(SolventModel(), s, names=False).resolved_source() == "atoms"
+    named, bare = told(SolventModel(), s), told(SolventModel(), s, names=False)
+    assert named.resolved_source() == bare.resolved_source() == "spheres"
+    assert not named.atom_by_element and bare.atom_by_element
+    assert np.array_equal(named.atom_radii, mask_spheres.sphere_radii_from_names(
+        s["elements"], s["atom_names"], s["residue_names"], s["residue_ids"]))
+    # element radii ignore the names: the same radii whatever names there are
+    assert np.array_equal(bare.atom_radii, mask_spheres.sphere_radii_from_names(
+        s["elements"], s["atom_names"], s["residue_names"], by_element=True))
+    assert not np.array_equal(named.atom_radii, bare.atom_radii)
+    # explicit "spheres" takes elements only the same way
+    assert np.array_equal(told(SolventModel(mask_source="spheres"), s, names=False).atom_radii,
+                          bare.atom_radii)
+    # the atom-presence field is now only asked for
+    assert told(SolventModel(mask_source="atoms"), s, names=False).resolved_source() == "atoms"
+    # atom_elements assigned by hand gives auto no radii: refused, not the old field
+    m = SolventModel()
+    m.atom_elements = list(s["elements"])
+    with pytest.raises(ValueError, match="without set_atoms"):
+        m.resolved_source()
     # set_atoms alone decides: kernels passed by hand do not, with "auto"
     sk = hand_built_spheres(s)
     with pytest.raises(ValueError, match="say which field"):
         SolventModel().resolved_source(sk)
     with pytest.raises(ValueError, match="say which field"):
         sf(s, solvent=SolventModel(cutoff=1.0, taper_width=0.5), mask_kernels=sk)
-    assert told(SolventModel(), s, names=False).resolved_source(sk) == "atoms"
+    assert told(SolventModel(), s, names=False).resolved_source(sk) == "spheres"
     assert SolventModel(spheres=True).resolved_source(sk) == "spheres"
     assert SolventModel(mask_source="density").resolved_source(sk) == "density"
 
@@ -183,26 +208,43 @@ def test_set_atoms_atom_field_equals_hand_built_kernels_bit_for_bit(blur):
     """The atom-presence field carries the pipeline blur, so the cached
     kernels are keyed on it; mask_occ is occ times the weights."""
     s = named_system(blur=blur)
-    auto = told(SolventModel(cutoff=0.05, taper_width=0.025, **QUIET), s, names=False)
+    auto = told(SolventModel(cutoff=0.05, taper_width=0.025, mask_source="atoms", **QUIET),
+                s, names=False)
     ref = SolventModel(cutoff=0.05, taper_width=0.025, source_b=20.0, **QUIET)
     ak, w = hand_built_atoms(s)
     assert torch.equal(sf(s, solvent=auto),
                        sf(s, solvent=ref, mask_kernels=ak, mask_occ=s["occ"] * w))
 
 
-@pytest.mark.parametrize("names", [True, False])
+def test_set_atoms_element_spheres_equal_hand_built_kernels_bit_for_bit():
+    """set_atoms(elements) under auto: element-radius spheres, exactly the
+    kernels the R-factor tool builds with --sphere-radii element."""
+    s = named_system()
+    auto = told(SolventModel(cutoff=1.0, taper_width=0.5, **QUIET), s, names=False)
+    ref = SolventModel(cutoff=1.0, taper_width=0.5, spheres=True, **QUIET)
+    sk = hand_built_spheres(s, by_element=True)
+    assert torch.equal(sf(s, solvent=auto), sf(s, solvent=ref, mask_kernels=sk))
+    assert not torch.equal(sf(s, solvent=auto),
+                           sf(s, solvent=ref, mask_kernels=hand_built_spheres(s)))
+
+
+@pytest.mark.parametrize("names", [True, "elements", False])
 def test_set_atoms_through_the_batch_checkpointed_or_not(names):
     """Per-configuration occupancies: the atom field's weights are applied
-    to each configuration's row."""
+    to each configuration's row. names: True ua spheres, "elements" element
+    spheres (auto, elements only), False the atom field (asked for)."""
     s = named_system()
     frac = torch.stack([s["frac"], s["frac"] + 0.01, s["frac"] - 0.02])
     occ = torch.stack([s["occ"], 0.9 * s["occ"], s["occ"].flip(0)])
     if names:
-        auto = told(SolventModel(cutoff=1.0, taper_width=0.5, **QUIET), s)
+        by_element = names == "elements"
+        auto = told(SolventModel(cutoff=1.0, taper_width=0.5, **QUIET), s,
+                    names=not by_element)
         ref = SolventModel(cutoff=1.0, taper_width=0.5, spheres=True, **QUIET)
-        kw = dict(mask_kernels=hand_built_spheres(s))
+        kw = dict(mask_kernels=hand_built_spheres(s, by_element=by_element))
     else:
-        auto = told(SolventModel(cutoff=0.05, taper_width=0.025, **QUIET), s, names=False)
+        auto = told(SolventModel(cutoff=0.05, taper_width=0.025, mask_source="atoms",
+                                 **QUIET), s, names=False)
         ref = SolventModel(cutoff=0.05, taper_width=0.025, source_b=20.0, **QUIET)
         ak, w = hand_built_atoms(s)
         kw = dict(mask_kernels=ak, mask_occ=occ * w)
@@ -264,8 +306,8 @@ def test_contradictory_sources_are_refused():
         SolventModel(source_b=20.0, mask_source="density")
     with pytest.raises(ValueError, match="atom_names AND residue_names"):
         SolventModel().set_atoms(["C"], atom_names=["CA"])
-    with pytest.raises(ValueError, match="needs the atoms' names"):
-        SolventModel(mask_source="spheres").set_atoms(["C"])
+    with pytest.raises(ValueError, match="needs the atoms"):
+        SolventModel(mask_source="spheres").resolved_source()
 
 
 # ---------------------------------------------------------- cutoff=None
@@ -278,7 +320,7 @@ def test_cutoff_none_is_the_fixed_level_for_spheres_without_hydrogens():
                        sf(s, solvent=told(SolventModel(cutoff=1.0, taper_width=0.5, **QUIET), s)))
     # the taper it was measured with may be given; another one moves the level
     assert told(SolventModel(taper_width=0.5), s).threshold("spheres") == (1.0, 0.5)
-    with pytest.raises(ValueError, match="taper_width 0.50"):
+    with pytest.raises(ValueError, match="taper_width 0.5 "):
         told(SolventModel(taper_width=0.2), s).threshold("spheres")
     # extra smoothing moves the level, so it is not the measured case
     with pytest.raises(ValueError, match="no extra smoothing"):
@@ -294,23 +336,83 @@ def test_cutoff_none_is_the_fixed_level_for_spheres_without_hydrogens():
         SolventModel(spheres=True).threshold("spheres")
 
 
-def test_cutoff_none_with_hydrogens_needs_calibration():
+def test_sphere_level_is_the_hydrogen_fraction_rule():
+    assert sphere_level(10, 0) == sphere_level(10, 0, by_element=True) == SPHERE_LEVEL_FIXED == 1.0
+    assert sphere_level(8, 2) == 1.0 + 0.89 * 2 / 8
+    assert sphere_level(8, 2, by_element=True) == 1.0 + 1.17 * 2 / 8
+    for bad in ((0, 0), (4, 5), (4, -1)):
+        with pytest.raises(ValueError):
+            sphere_level(*bad)
+
+
+@pytest.mark.parametrize("names", [True, False])
+def test_cutoff_none_with_hydrogens_is_the_hydrogen_fraction_level(names):
+    """No calibration needed with hydrogens: ua radii at 1.0 + 0.89 h,
+    element radii at 1.0 + 1.17 h, taper half the level, and the mask is the
+    one an explicit cutoff of that level gives, bit for bit."""
     s = named_system(with_h=True)
-    model = told(SolventModel(), s)
-    with pytest.raises(ValueError, match="hydrogens"):
-        sf(s, solvent=model)
+    n, n_h = len(s["elements"]), sum(e == "H" for e in s["elements"])
+    assert 0 < n_h < n
+    level = 1.0 + (0.89 if names else 1.17) * n_h / n
+    model = told(SolventModel(**QUIET), s, names=names)
+    assert model.threshold("spheres") == (level, 0.5 * level)
+    explicit = told(SolventModel(cutoff=level, taper_width=0.5 * level, **QUIET), s, names=names)
+    assert torch.equal(sf(s, solvent=model), sf(s, solvent=explicit))
+    # the measured settings still apply: another taper or extra smoothing
+    with pytest.raises(ValueError, match="half the level"):
+        told(SolventModel(taper_width=0.5, **QUIET), s, names=names).threshold("spheres")
+    with pytest.raises(ValueError, match="no extra smoothing"):
+        told(SolventModel(mask_blur=25.0, **QUIET), s, names=names).threshold("spheres")
+    # calibrate() still overrides it
+    model = told(SolventModel(), s, names=names)
     field = model.mask_field(s["frac"], s["occ"], GRID, s["orth"])
     model.calibrate(None, s["orth"], 0.6, source=field)
     sf(s, solvent=model)
     assert abs(model.last_occupancy - 0.6) < 2e-3
 
 
+def test_cutoff_none_with_hydrogens_needs_residue_ids_with_names():
+    """Names without residue_ids type every residue explicit-hydrogen when
+    the model has one hydrogen anywhere, which the fixed level was not
+    measured on: cutoff=None refuses, and an explicit cutoff still works."""
+    s = named_system(with_h=True)
+    model = SolventModel(**QUIET)
+    model.set_atoms(s["elements"], s["atom_names"], s["residue_names"])
+    with pytest.raises(ValueError, match="residue_ids"):
+        model.threshold("spheres")
+    model = SolventModel(cutoff=1.2, **QUIET)
+    model.set_atoms(s["elements"], s["atom_names"], s["residue_names"])
+    assert model.threshold("spheres") == (1.2, 0.6)
+    # calibrate(), the other escape the error names, works on it
+    model = SolventModel()
+    model.set_atoms(s["elements"], s["atom_names"], s["residue_names"])
+    model.calibrate(None, s["orth"], 0.6,
+                    source=model.mask_field(s["frac"], s["occ"], GRID, s["orth"]))
+    sf(s, solvent=model)
+    assert abs(model.last_occupancy - 0.6) < 2e-3
+    # without hydrogens there is nothing for residue_ids to decide
+    s = named_system()
+    model = SolventModel(**QUIET)
+    model.set_atoms(s["elements"], s["atom_names"], s["residue_names"])
+    assert model.threshold("spheres") == (1.0, 0.5)
+
+
+def test_cutoff_none_without_hydrogens_is_1_for_element_spheres_too():
+    s = named_system()
+    model = told(SolventModel(**QUIET), s, names=False)
+    assert model.threshold("spheres") == (1.0, 0.5)
+    assert torch.equal(sf(s, solvent=model),
+                       sf(s, solvent=told(SolventModel(cutoff=1.0, taper_width=0.5, **QUIET),
+                                          s, names=False)))
+
+
 @pytest.mark.parametrize("blur", [0.0, 5.0])
 def test_cutoff_none_on_the_atom_field_needs_calibration(blur):
     s = named_system(blur=blur)
-    model = told(SolventModel(), s, names=False)
-    with pytest.raises(ValueError, match="no fixed level"):
+    model = told(SolventModel(mask_source="atoms"), s, names=False)
+    with pytest.raises(ValueError, match="no fixed\\s+level") as e:
         sf(s, solvent=model)
+    assert "0.024" in str(e.value) and "set_atoms(elements)" in str(e.value)
     field = model.mask_field(s["frac"], s["occ"], GRID, s["orth"], blur=blur)
     model.calibrate(None, s["orth"], 0.6, pipeline_blur=blur, source=field)
     F = sf(s, solvent=model)
@@ -406,9 +508,9 @@ def test_names_give_the_label_radii_on_a_model_with_hydrogens():
 def test_element_case_and_charges_do_not_matter():
     """biotite gives 'CL', 'FE'; cctbx gives 'Cl1-': the same atom field."""
     orth = torch.tensor(orth_matrix(*CELL), dtype=DTYPE)
-    a = SolventModel()
+    a = SolventModel(mask_source="atoms")
     a.set_atoms(["C", "CL", "FE", "O"])
-    b = SolventModel()
+    b = SolventModel(mask_source="atoms")
     b.set_atoms(["c", "Cl1-", "Fe", "O"])
     ka, wa = a.cached_mask_kernels("atoms", GRID, orth)
     kb, wb = b.cached_mask_kernels("atoms", GRID, orth)
@@ -444,7 +546,8 @@ def test_set_atoms_on_a_supercell_with_parts(names):
         ref = SolventModel(cutoff=1.0, taper_width=0.5, spheres=True, **QUIET)
         kw = dict(mask_kernels=hand_built_spheres(s))
     else:
-        auto = told(SolventModel(cutoff=0.05, taper_width=0.025, **QUIET), s, names=False)
+        auto = told(SolventModel(cutoff=0.05, taper_width=0.025, mask_source="atoms", **QUIET),
+                    s, names=False)
         ref = SolventModel(cutoff=0.05, taper_width=0.025, source_b=20.0, **QUIET)
         ak, w = hand_built_atoms(s)
         kw = dict(mask_kernels=ak, mask_occ=s["occ"] * w)
@@ -458,7 +561,8 @@ def test_gradients_through_the_cached_kernels():
     """Coordinates and per-configuration occupancies, batch and checkpoint:
     the cached path's gradients are the hand-built path's, bit for bit."""
     s = named_system()
-    auto = told(SolventModel(cutoff=0.05, taper_width=0.025, **QUIET), s, names=False)
+    auto = told(SolventModel(cutoff=0.05, taper_width=0.025, mask_source="atoms", **QUIET),
+                s, names=False)
     ref = SolventModel(cutoff=0.05, taper_width=0.025, source_b=20.0, **QUIET)
     ak, w = hand_built_atoms(s)
     out = {}
@@ -481,7 +585,7 @@ def test_gradients_through_the_cached_kernels():
 
 def test_cached_kernels_follow_blur_dtype_source_b_and_cell():
     s = named_system()
-    model = told(SolventModel(**QUIET), s, names=False)
+    model = told(SolventModel(mask_source="atoms", **QUIET), s, names=False)
     k0 = model.cached_mask_kernels("atoms", GRID, s["orth"], blur=0.0)
     assert model.cached_mask_kernels("atoms", GRID, s["orth"], blur=0.0) is k0
     assert model.cached_mask_kernels("atoms", GRID, s["orth"], blur=5.0) is not k0
@@ -501,5 +605,42 @@ def test_cached_kernels_follow_blur_dtype_source_b_and_cell():
 
 
 def test_an_unknown_element_fails_at_set_atoms():
+    """Element spheres need a van der Waals radius (gemmi would quietly give
+    an unknown symbol X's), the atom field a scattering factor."""
+    for unknown in ("Xx", "X"):
+        with pytest.raises(ValueError, match="van der Waals radius"):
+            SolventModel().set_atoms(["C", unknown])
     with pytest.raises(ValueError, match="scattering factor"):
-        SolventModel().set_atoms(["C", "Xx"])
+        SolventModel(mask_source="atoms").set_atoms(["C", "Xx"])
+    SolventModel().set_atoms(["C", "D", "Zn2+"])      # known symbols, any form
+
+
+@requires_cctbx
+@pytest.mark.parametrize("by_element", [False, True])
+def test_library_and_tool_give_the_same_level_on_a_model_with_hydrogens(by_element):
+    """8VPW, hydrogens kept: SolventModel's cutoff=None level from set_atoms
+    and the R-factor tool's --mask-level auto level from its own reading of
+    the model are the same number, for either radius table."""
+    import os
+    import sys
+
+    sys.path.insert(0, os.path.join(REPO_ROOT, "lunus", "sf", "tools"))
+    import fit_solvent_rfactor
+
+    path = os.path.join(REPO_ROOT, "lunus", "sf", "examples", "compare_gemmi", "8VPW.pdb")
+    out = fit_solvent_rfactor.read_model(path, log=open(os.devnull, "w"))
+    xrs = out[0]
+    labels = [sc.label for sc in xrs.scatterers()]
+    elements = [sc.scattering_type for sc in xrs.scatterers()]
+    tool, why = fit_solvent_rfactor.mask_level_rule("auto", "threshold", "spheres", elements,
+                                                    None, by_element=by_element)
+    model = SolventModel(**QUIET)
+    if by_element:
+        model.set_atoms(elements)
+    else:
+        model.set_atoms(elements, *mask_spheres.names_from_cctbx_labels(labels))
+    n_h = sum(mask_spheres.is_hydrogen(e) for e in elements)
+    assert n_h > 1000
+    assert model.threshold("spheres") == (tool, 0.5 * tool)
+    assert tool == 1.0 + (1.17 if by_element else 0.89) * n_h / len(elements)
+    assert ("element" if by_element else "ua") + " radii" in why

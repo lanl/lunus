@@ -218,7 +218,9 @@ def test_log_binned_row_through_run_on_7fpv_at_3a():
     """The wiring: run() hands the binned fit cctbx's d spacings and reports
     mmtbx's 6 bins for 7FPV cut to 3 A, while the main fit stays
     single-scale. --solvent-bins off keeps the exponential solvent, which is
-    what the pinned numbers were measured with."""
+    what the pinned numbers were measured with. 7FPV carries hydrogens and the
+    pins were measured with its mask calibrated, so the run asks for that
+    (auto cuts it at 1.0 + 0.89 h since 2026-11-22)."""
     import contextlib
     import io
 
@@ -227,7 +229,7 @@ def test_log_binned_row_through_run_on_7fpv_at_3a():
     args = fit_solvent_rfactor.build_parser().parse_args(
         [os.path.join(COMPARE, "7FPV.pdb"), os.path.join(COMPARE, "7FPV-sf.cif"),
          "--d-min", "3.0", "--aniso", "--scale-bins", "0", "--also-scale-bins", "log",
-         "--shells", "3", "--solvent-bins", "off"])
+         "--shells", "3", "--solvent-bins", "off", "--mask-level", "calibrate"])
     with contextlib.redirect_stdout(io.StringIO()) as out:
         r = fit_solvent_rfactor.run(args)
     assert r["main_scale_bins"] == 0 and r["main_bin_scheme"] is None
@@ -249,7 +251,8 @@ def test_log_binned_row_through_run_on_7fpv_at_3a():
 
 
 def test_main_fit_with_log_bins_through_run_on_7fpv_at_3a():
-    """--scale-bins log makes the main fit itself binned on mmtbx's bins."""
+    """--scale-bins log makes the main fit itself binned on mmtbx's bins.
+    Calibrated mask, as the pins were measured (7FPV carries hydrogens)."""
     import contextlib
     import io
 
@@ -257,7 +260,8 @@ def test_main_fit_with_log_bins_through_run_on_7fpv_at_3a():
 
     args = fit_solvent_rfactor.build_parser().parse_args(
         [os.path.join(COMPARE, "7FPV.pdb"), os.path.join(COMPARE, "7FPV-sf.cif"),
-         "--d-min", "3.0", "--aniso", "--scale-bins", "log", "--shells", "3"])
+         "--d-min", "3.0", "--aniso", "--scale-bins", "log", "--shells", "3",
+         "--mask-level", "calibrate"])
     with contextlib.redirect_stdout(io.StringIO()) as out:
         r = fit_solvent_rfactor.run(args)
     assert (r["main_scale_bins"], r["main_bin_scheme"]) == (6, "6 log bins")
@@ -362,7 +366,8 @@ def test_main_forwards_the_default_binned_row(monkeypatch, capsys):
 def test_binned_row_defaults_to_per_bin_solvent_on_7fpv_at_3a():
     """The default binned row scales the solvent per bin, reports the curve,
     and quotes k_sol/b_sol as the exponential nearest it; the single-scale
-    row is untouched."""
+    row is untouched. Calibrated mask, as the pins were measured (7FPV
+    carries hydrogens)."""
     import contextlib
     import io
 
@@ -371,7 +376,7 @@ def test_binned_row_defaults_to_per_bin_solvent_on_7fpv_at_3a():
     args = fit_solvent_rfactor.build_parser().parse_args(
         [os.path.join(COMPARE, "7FPV.pdb"), os.path.join(COMPARE, "7FPV-sf.cif"),
          "--d-min", "3.0", "--aniso", "--scale-bins", "0", "--also-scale-bins", "log",
-         "--shells", "3"])
+         "--shells", "3", "--mask-level", "calibrate"])
     with contextlib.redirect_stdout(io.StringIO()) as out:
         r = fit_solvent_rfactor.run(args)
     text = out.getvalue()
@@ -1288,7 +1293,8 @@ def test_sphere_source_united_atom_radii_on_7fpv_without_hydrogens():
     assert r["mask_source"] == "spheres"
     for radius in ("1.90 A", "1.95 A", "1.77 A", "1.12 A"):
         assert radius in text.split("mask source: soft spheres")[1].split("\n")[0], radius
-    assert r["mask_level"] == 1.0 and r["mask_level_rule"] == "auto: no hydrogens in the model"
+    assert r["mask_level"] == 1.0
+    assert r["mask_level_rule"] == "auto: no hydrogens in the model, ua radii"
     assert abs(r["R-work binned"] - 0.1616) < 5e-4
     assert abs(r["R-free binned"] - 0.1860) < 1e-3
     rc, _ = fit("--mask-level", "calibrate")
@@ -1429,7 +1435,7 @@ def test_mask_level_cuts_the_atom_field_without_calibrating(tmp_path, monkeypatc
     ra, text = fit()
     assert calls == ["target", "calibrate"], calls
     assert ra["mask_level"] is None
-    assert "no fixed level has been measured for the atom field" in ra["mask_level_rule"]
+    assert "fixed level (0.024 atoms/A^3) drifts" in ra["mask_level_rule"]
     # its cutoff, fed back as the level, reproduces the run exactly
     rb, _ = fit("--mask-level", repr(ra["mask_cutoff"]))
     assert calls == ["target", "calibrate"], calls
@@ -1475,22 +1481,32 @@ def test_mask_level_arg():
 
 
 def test_mask_level_auto_rule():
-    """auto cuts the sphere field at the fixed level for a model with no
-    hydrogens, and calibrates a model with any (charged or deuterium types
-    included), any other mask source, --mask gemmi, or an explicit target.
-    An explicit setting is taken as it is."""
+    """auto cuts the sphere field at mask_spheres.sphere_level: 1.0 with no
+    hydrogens, 1.0 + 0.89 h with them for ua radii and 1.0 + 1.17 h for
+    element radii, every atom counted and charged or deuterium types
+    included. It calibrates any other mask source, --mask gemmi, an explicit
+    target, and a sphere field built off the measured settings. An explicit
+    setting is taken as it is."""
     import fit_solvent_rfactor as f
 
     rule = f.mask_level_rule
     heavy = ["C", "N", "O", "S", "O1-", "Zn2+"]
     assert rule("auto", "threshold", "spheres", heavy, None) == (
-        f.MASK_LEVEL_FIXED, "auto: no hydrogens in the model")
+        f.MASK_LEVEL_FIXED, "auto: no hydrogens in the model, ua radii")
     assert f.MASK_LEVEL_FIXED == 1.0
-    for h in ("H", "D", "h"):
-        level, why = rule("auto", "threshold", "spheres", heavy + [h], None)
-        assert level is None and "1 hydrogens" in why, (h, why)
+    assert rule("auto", "threshold", "spheres", heavy, None, by_element=True) == (
+        1.0, "auto: no hydrogens in the model, element radii")
+    for h in ("H", "D", "h", "H1+"):
+        level, why = rule("auto", "threshold", "spheres", heavy + [h, h], None)
+        assert level == 1.0 + 0.89 * 2 / 8, (h, level)
+        assert why == ("auto: 2 of 8 atoms are hydrogens (h 0.250), ua radii, level "
+                       "1.0 + 0.89 h = 1.222"), why
+        level, why = rule("auto", "threshold", "spheres", heavy + [h, h], None,
+                          by_element=True)
+        assert level == 1.0 + 1.17 * 2 / 8 and "element radii" in why, (h, level, why)
     level, why = rule("auto", "threshold", "atoms", heavy, None)
-    assert level is None and "atom field" in why, why
+    assert level is None and "atom field" in why and "0.024" in why, why
+    assert rule("auto", "threshold", "atoms", heavy + ["H"], None)[0] is None
     assert rule(0.025, "threshold", "atoms", heavy, None) == (0.025, "--mask-level 0.025")
     assert rule("auto", "threshold", "density", heavy, None) == (
         None, "auto: the density source takes no fixed level")
@@ -1498,15 +1514,47 @@ def test_mask_level_auto_rule():
         None, "auto: --mask gemmi takes no fixed level")
     assert rule("auto", "gemmi", "atoms", heavy, None) == (
         None, "auto: --mask gemmi takes no fixed level")
-    assert rule("auto", "threshold", "spheres", heavy, 0.4)[0] is None
+    for by_element in (False, True):
+        assert rule("auto", "threshold", "spheres", heavy + ["H"], 0.4,
+                    by_element=by_element)[0] is None
     assert rule("calibrate", "threshold", "spheres", heavy, None)[0] is None
+    assert rule("calibrate", "threshold", "spheres", heavy + ["H"], None,
+                by_element=True)[0] is None
     assert rule(0.9, "threshold", "spheres", heavy + ["H"], None) == (0.9, "--mask-level 0.9")
-    # a sphere field built away from the measured settings is calibrated
-    level, why = rule("auto", "threshold", "spheres", heavy, None,
-                      nondefault_field=["--sphere-offset"])
-    assert level is None and "--sphere-offset" in why, why
+    # a sphere field built away from the measured settings is calibrated,
+    # with hydrogens or without, for either radius table
+    for extra in ([], ["H"]):
+        for by_element in (False, True):
+            level, why = rule("auto", "threshold", "spheres", heavy + extra, None,
+                              nondefault_field=["--sphere-offset"], by_element=by_element)
+            assert level is None and "--sphere-offset" in why, why
     assert rule(0.9, "threshold", "spheres", heavy, None,
                 nondefault_field=["--mask-blur"])[0] == 0.9
+
+
+def test_mask_level_auto_on_7fpv_with_hydrogens():
+    """7FPV, hydrogens kept, cut to 3 A: auto cuts the sphere field at
+    1.0 + 0.89 h (1527 hydrogens of 3341 atoms, level 1.407) with no gemmi
+    target. Pinned 2026-11-22: 0.1571 / 0.1775, against 0.1591 / 0.1797
+    calibrated (level 1.195; test_log_binned_row_through_run_on_7fpv_at_3a)
+    and mmtbx's 0.1561 / 0.1811."""
+    import contextlib
+    import io
+
+    import fit_solvent_rfactor
+
+    args = fit_solvent_rfactor.build_parser().parse_args(
+        [os.path.join(COMPARE, "7FPV.pdb"), os.path.join(COMPARE, "7FPV-sf.cif"),
+         "--d-min", "3.0", "--aniso", "--scale-bins", "0", "--also-scale-bins", "log",
+         "--shells", "3", "--solvent-bins", "off"])
+    with contextlib.redirect_stdout(io.StringIO()):
+        r = fit_solvent_rfactor.run(args)
+    assert r["mask_level"] == 1.0 + 0.89 * 1527 / 3341
+    assert r["mask_level_rule"] == ("auto: 1527 of 3341 atoms are hydrogens (h 0.457), "
+                                    "ua radii, level 1.0 + 0.89 h = 1.407")
+    assert r["target_source"].startswith("none")
+    assert abs(r["R-work binned"] - 0.1571) < 5e-4
+    assert abs(r["R-free binned"] - 0.1775) < 1e-3
 
 
 @requires_cctbx
@@ -1533,20 +1581,29 @@ def test_default_mask_level_skips_the_gemmi_target_without_hydrogens(tmp_path, m
             r = fit_solvent_rfactor.run(args)
     assert calls == []
     assert r["mask_level"] == 1.0 and r["mask_cutoff"] == 1.0
-    assert "mask level: 1 sphere overlaps (auto: no hydrogens in the model)" in out.getvalue()
+    assert ("mask level: 1 sphere overlaps (auto: no hydrogens in the model, ua radii)"
+            in out.getvalue())
 
 
 @requires_cctbx
-def test_default_mask_level_calibrates_hydrogens_and_offdefault_fields(tmp_path):
-    """Through run(): auto calibrates a model carrying a hydrogen, and a
-    model without hydrogens whose sphere field is built off the settings the
-    fixed level was measured with (here --sphere-offset and --taper-frac),
-    and says why."""
+def test_default_mask_level_cuts_hydrogens_and_element_radii_and_calibrates_offdefault_fields(
+        tmp_path, monkeypatch):
+    """Through run(): auto cuts the sphere field of a model carrying a
+    hydrogen at the hydrogen-fraction level, ua radii or element radii, with
+    no gemmi target and no search, and the level is what a fixed
+    --mask-level of the same value gives; it calibrates a model whose
+    sphere field is built off the settings the level was measured with
+    (here --sphere-offset and --taper-frac), and says why."""
     import contextlib
     import io
     import warnings
 
     import fit_solvent_rfactor
+
+    calls = []
+    real_target = fit_solvent_rfactor.gemmi_mask_occupancy_at_spacing
+    monkeypatch.setattr(fit_solvent_rfactor, "gemmi_mask_occupancy_at_spacing",
+                        lambda *a, **k: calls.append("target") or real_target(*a, **k))
 
     def fit(pdb, mtz, *extra):
         args = fit_solvent_rfactor.build_parser().parse_args(
@@ -1557,15 +1614,26 @@ def test_default_mask_level_calibrates_hydrogens_and_offdefault_fields(tmp_path)
                 return fit_solvent_rfactor.run(args)
 
     (tmp_path / "h").mkdir()
-    r = fit(*sharp_toy(tmp_path / "h", sharp=False, hydrogen=True))
-    assert r["mask_level"] is None and "has 1 hydrogens" in r["mask_level_rule"]
-    assert r["target_source"].startswith("gemmi")
+    hpdb, hmtz = sharp_toy(tmp_path / "h", sharp=False, hydrogen=True)   # 3 heavy + 1 H
+    for radii, slope in (("ua", 0.89), ("element", 1.17)):
+        r = fit(hpdb, hmtz, "--sphere-radii", radii)
+        assert calls == [], calls
+        assert r["mask_level"] == 1.0 + slope / 4 and r["mask_cutoff"] == r["mask_level"]
+        assert ("1 of 4 atoms are hydrogens (h 0.250), %s radii" % radii
+                in r["mask_level_rule"]), r["mask_level_rule"]
+        fixed = fit(hpdb, hmtz, "--sphere-radii", radii, "--mask-level", repr(r["mask_level"]))
+        assert fixed["R-work"] == r["R-work"]
+        assert fixed["mask_occupancy"] == r["mask_occupancy"]
+    r = fit(hpdb, hmtz, "--mask-level", "calibrate")
+    assert r["mask_level"] is None and r["target_source"].startswith("gemmi")
+    calls.clear()
     pdb, mtz = sharp_toy(tmp_path, sharp=False)
     for extra, name in ((["--sphere-offset", "0.1"], "--sphere-offset"),
                         (["--taper-frac", "0.4"], "--taper-frac")):
         r = fit(pdb, mtz, *extra)
         assert r["mask_level"] is None and name in r["mask_level_rule"], r["mask_level_rule"]
     assert fit(pdb, mtz)["mask_level"] == 1.0
+    assert fit(pdb, mtz, "--sphere-radii", "element")["mask_level"] == 1.0
 
 
 def read_mtz_columns(path):
@@ -1659,13 +1727,15 @@ def test_write_mtz_round_trip_on_7fpv(tmp_path):
     are the ones the fit used (7FPV's _refln.status letters, written in the
     CCP4 convention with 0 the test set), and PHIC with the unscaled components
     is F_model = k (F_protein + k_mask F_mask) with k > 0 and one k_mask per
-    log bin."""
+    log bin. Calibrated mask, on which 7FPV's neighbouring bins were measured
+    to differ by more than 0.005 (at the 1.0 + 0.89 h rule two differ by
+    0.004)."""
     import numpy as np
 
     import fit_solvent_rfactor
 
     out, r, text = write_mtz_7fpv(tmp_path, "--scale-bins", "0", "--mtz-components",
-                                  "--mtz-observed")
+                                  "--mtz-observed", "--mask-level", "calibrate")
     assert "wrote %s: binned row" % out in text
     cols, history, _ = read_mtz_columns(out)
     assert set(cols) == {"H", "K", "L", "FP", "SIGFP", "PHIC", "FreeR_flag", "FPROTEIN",
