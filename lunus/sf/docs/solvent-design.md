@@ -1092,6 +1092,20 @@ ways: kernels built by hand without `set_atoms` go with an explicit
 `mask_source="spheres"` or `"atoms"`, as `spheres=True` and `source_b=`
 always required. `mask_field()` places the field for `calibrate()`.
 
+Given the R-factor tool's inputs (coordinates, cctbx symmetry weights as
+occupancies, grid, cell, symmetry operations, reflections), this default --
+`SolventModel()`, `set_atoms` with names, `cutoff=None`, through
+`structure_factors_one_config(..., return_parts=True)` -- gives the tool's
+mask and F_mask bit for bit, on 3I7M (no hydrogens, level 1.0) and 2YL0
+(hydrogens kept, level 1.278), at 3 Å in `tests/test_mask_parity.py` (which
+skips unless `pdb_rfactor.py` has fetched those two entries into
+`examples/compare_gemmi`) and at
+full resolution when measured (2026-11-22), whatever `blur=` is passed for
+the protein. That is with the density cores uncompiled, as the tool places
+the field; the compiled CPU core agrees to 1e-15 in a process without cctbx,
+but on branches without master's fix for cctbx's OpenMP stub (fbaf33f) it
+is wrong once cctbx is loaded.
+
 Knowing nothing is an error rather than a fall back to the density, which
 measured worst of the three, so that no caller gets the weakest mask without
 asking for it: code written before 2026-11-18 that relied on the density
